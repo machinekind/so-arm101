@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# uv
+.venv/
+
+# Model weights stay on Hugging Face
+*.pt
+*.pth
+*.safetensors
+*.ckpt
+
+# Datasets and recordings
+datasets/
+**/datasets/
+
+# Raw sysid recordings of each physical arm
+packages/soarm/arms/*/sysid/raw/
+
+# Local configuration
+configs/local.yaml
+**/configs/local.yaml
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,16 @@
+{
+  "schema": "soarm-embodiment/0. Draft schema, described in docs/conventions.md. Fields: name, robot, end_effector, state, action.",
+  "name": "tri_arm",
+  "robot": "tri-arm",
+  "end_effector": "hand",
+  "status": "draft",
+  "state": {
+    "joints": ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "hand"],
+    "units": {"arm": "deg", "hand": "0..100"}
+  },
+  "action": {
+    "joints": ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "hand"],
+    "units": {"arm": "deg", "hand": "0..100"},
+    "mode": "absolute"
+  }
+}

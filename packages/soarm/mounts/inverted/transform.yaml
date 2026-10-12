@@ -1,0 +1,6 @@
+# Arm base hanging upside down: rotated 180 degrees about x.
+parent: frame
+child: base
+pos: [0.0, 0.0, 0.0]        # TODO: measure the height of the inverted base above the table
+quat: [0.0, 1.0, 0.0, 0.0]
+cad: TODO

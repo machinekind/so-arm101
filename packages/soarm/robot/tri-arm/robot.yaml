@@ -1,0 +1,95 @@
+# tri-arm: the SO-101 arm with a hand in place of the gripper (internal design).
+#
+# DRAFT. Every value marked TODO is a placeholder. Strict tests skip robots with `status: draft`.
+# The arm joints, limits and servo bus copy so101 because the arm is the same.
+# The hand has one placeholder joint `hand` (0 closed, 100 open) until the hand design names its fingers.
+
+status: draft
+name: tri-arm
+title: tri-arm (SO-101 with hand)
+mjcf: tri_arm.xml                       # TODO: the MJCF does not exist yet
+joints: [shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, hand]  # TODO: real finger joints
+gripper: hand                           # TODO: confirm the hand takes one 0..100 open/close command
+tcp_site: TODO
+hand_body: TODO
+base_body: base
+backend: soarm.feetech:FeetechArm       # TODO: confirm the hand servos share the Feetech bus
+
+home:
+  shoulder_pan: 0.0
+  shoulder_lift: -23.3
+  elbow_flex: 46.4
+  wrist_flex: 3.3
+  wrist_roll: 0.0
+  hand: 35.0                            # TODO
+
+tcp_approach: [1.0, 0.0, 0.0]           # TODO
+tcp_closing: [0.0, 0.0, 1.0]            # TODO
+fingertips: [TODO, TODO]
+roll_joint: wrist_roll
+
+wave_ranges:
+  shoulder_pan: [-75.0, 75.0]
+  shoulder_lift: [-80.0, 30.0]
+  elbow_flex: [-30.0, 90.0]
+  wrist_flex: [-70.0, 80.0]
+
+onboard_cameras: []                     # TODO
+jaw_bodies: [TODO, TODO]
+
+limits:
+  shoulder_pan: [-105.0, 105.0]
+  shoulder_lift: [-95.0, 95.0]
+  elbow_flex: [-92.0, 92.0]
+  wrist_flex: [-95.0, 95.0]
+  wrist_roll: [-150.0, 150.0]
+  hand: [0.0, 100.0]
+
+max_vel:
+  shoulder_pan: 140.0
+  shoulder_lift: 120.0
+  elbow_flex: 120.0
+  wrist_flex: 160.0
+  wrist_roll: 220.0
+  hand: 300.0                           # TODO
+
+gripper_range_q: null                   # TODO
+mirror_joints: {}
+home_stages: []
+
+jaw:                                    # TODO: so101 values; the hand needs its own grasp detection
+  still: 0.02
+  margin: 0.05
+  creep: 0.03
+  open: 0.40
+
+desk:                                   # TODO: so101 values
+  goal_radius: [0.13, 0.32]
+  goal_height: [0.03, 0.22]
+  cube_radius: [0.15, 0.25]
+  cube_bearing: [-0.8, 0.8]
+  wave_radius: [0.12, 0.36]
+  search_centre: [0.2, 0.0, 0.05]
+  search_dist: [0.4, 0.9]
+  camera_dist: [0.45, 0.75]
+  camera_centre: [0.20, 0.0, 0.06]
+  map_centre: [0.22, 0.0]
+  map_side: 0.56
+
+hardware:
+  kind: so101
+  servo_ids:
+    shoulder_pan: 1
+    shoulder_lift: 2
+    elbow_flex: 3
+    wrist_flex: 4
+    wrist_roll: 5
+    hand: 6                             # TODO
+  baudrate: 1000000
+  center_ticks: 2048
+  gripper_closed_ticks: null            # TODO: measure on the hand
+  gripper_open_ticks: null              # TODO: measure on the hand
+  use_degrees: true
+  max_relative_target: 12.0
+  read_state_hz: 10.0
+  torque_off_on_exit: false
