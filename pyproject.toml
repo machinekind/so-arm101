@@ -1,12 +1,14 @@
 [tool.uv.workspace]
-members = ["packages/soarm"]
+members = ["packages/soarm", "packages/soarm_lab"]
 
 [tool.uv.sources]
 soarm = { workspace = true }
+soarm-lab = { workspace = true }
 
 [dependency-groups]
 dev = [
     "soarm[feetech]",
+    "soarm-lab",
     # The twin, for the tests that run our robot folder and backends through its contract.
     "lerobot-mp @ git+https://github.com/machinekind/digital_twin_training.git@main",
     "pytest>=8",
@@ -15,6 +17,9 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "render: renders frames through MuJoCo/OpenGL; skipped where no OpenGL context can be made",
+]
 
 [tool.ruff]
 line-length = 110
@@ -24,7 +29,7 @@ target-version = "py310"
 select = ["E", "F", "W", "I", "B", "UP"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["soarm", "conftest"]
+known-first-party = ["soarm", "soarm_lab", "conftest"]
 
 [tool.ruff.lint.per-file-ignores]
 # Moved from the twin, which lints with ruff's default rules only; kept as they were there.
@@ -33,3 +38,7 @@ known-first-party = ["soarm", "conftest"]
 "packages/soarm/soarm/settings.py" = ["B905"]
 "tests/test_feetech.py" = ["E501"]
 "tests/test_lerobot_backend_guard.py" = ["E501"]
+"tests/test_lab_policies.py" = ["E501"]
+"tests/test_lab_rl.py" = ["E501", "B905"]
+"packages/soarm_lab/soarm_lab/rl/*.py" = ["E501", "B905"]
+"packages/soarm_lab/soarm_lab/cli.py" = ["E501"]

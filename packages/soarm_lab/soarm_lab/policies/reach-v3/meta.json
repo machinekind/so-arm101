@@ -1,0 +1,115 @@
+{
+  "task": {
+    "name": "reach",
+    "control_hz": 20.0,
+    "timestep": 0.005,
+    "episode_steps": 100,
+    "arm_step": 0.05,
+    "grip_step": 0.15,
+    "success_dist": 0.02,
+    "goal_radius": [
+      0.13,
+      0.32
+    ],
+    "goal_height": [
+      0.03,
+      0.22
+    ],
+    "cube_half": 0.015,
+    "cube_mass": 0.03,
+    "cube_radius": [
+      0.15,
+      0.25
+    ],
+    "cube_bearing": [
+      -0.8,
+      0.8
+    ],
+    "lift_height": 0.06,
+    "start_noise_deg": 8.0,
+    "action_rate": 0.02,
+    "end_on_success": 0,
+    "limit_penalty": 0.0,
+    "limit_margin": 0.15,
+    "hold_still": 0.0,
+    "roll_penalty": 0.5
+  },
+  "hidden": [
+    256,
+    256,
+    128
+  ],
+  "obs_dim": 27,
+  "act_dim": 6,
+  "created": "2026-09-24T12:24:58",
+  "steps": 14745600,
+  "iterations": 150,
+  "success": 1.0,
+  "randomization": {
+    "kp": [
+      0.85,
+      1.15
+    ],
+    "damping": [
+      0.75,
+      1.3
+    ],
+    "armature": [
+      0.75,
+      1.3
+    ],
+    "frictionloss": [
+      0.6,
+      1.5
+    ],
+    "cube_mass": [
+      0.6,
+      1.6
+    ],
+    "cube_friction": [
+      0.7,
+      1.3
+    ],
+    "obs_noise_deg": 0.3,
+    "max_delay": 1,
+    "cube_delay": 3,
+    "cube_period": 3,
+    "cube_noise": 0.002,
+    "fold_yaw": true,
+    "centre": {
+      "kp": 1.0,
+      "damping": 1.0,
+      "armature": 1.0,
+      "frictionloss": 1.0,
+      "delay": 0.0,
+      "source": "menagerie",
+      "fit_deg": null,
+      "fitted": []
+    },
+    "min_delay": 0
+  },
+  "evals": {
+    "gpu": {
+      "success": 1.0,
+      "reward": 140.36118566058576,
+      "steps": 14745600
+    },
+    "cpu_nominal": {
+      "episodes": 50,
+      "success": 1.0,
+      "ever_success": 1.0,
+      "randomized": false,
+      "centre": "menagerie",
+      "final_distance_mm": 1.2140763519836628
+    },
+    "cpu_rand": {
+      "episodes": 50,
+      "success": 1.0,
+      "ever_success": 1.0,
+      "randomized": true,
+      "centre": "menagerie",
+      "final_distance_mm": 1.272179297667984
+    }
+  },
+  "notes": "douczana z polityki z 2026-09-24T12:21:24 (10 mln krokow)"
+}

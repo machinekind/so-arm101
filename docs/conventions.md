@@ -2,11 +2,18 @@
 
 ## Dependency rule
 
-- `soarm` imports neither the twin (`lerobot_mp`) nor `soarm_lab`.
-- `soarm_lab` imports the twin and `soarm`.
+- Neither package imports the twin (`lerobot_mp`).
+- `soarm_lab` may import `soarm`. `soarm` never imports `soarm_lab`.
 - The twin imports `soarm`. It never imports `soarm_lab`.
 
-`tests/test_dependency_rule.py` checks the first rule.
+The twin and `soarm_lab` meet only through data and entry points:
+
+- the twin exports the measured station as a folder (`lerobot-twin export`): `scene.xml`, `assets/`, `station.json`;
+- the twin finds the lab's strategy under the `lerobot_mp.strategies` entry point and runs it through its `StrategyRunner`.
+
+Tests may import the twin. It is a dev dependency, used to run both packages through its loaders and contracts.
+`tests/test_dependency_rule.py` checks every import in both packages' source, also one under `TYPE_CHECKING`.
+It also imports every lab module in a fresh interpreter and checks that no `lerobot_mp` module got loaded.
 
 The twin holds no robot and no training. It keeps the scene, cameras, calibration, perception primitives,
 runtime, safety, sysid and the contracts `Observation`, `Strategy`, `StrategyRunner` and `EpisodeLog`.
@@ -22,7 +29,8 @@ runtime, safety, sysid and the contracts `Observation`, `Strategy`, `StrategyRun
 | Lengths and positions | metres |
 | Servo positions | ticks, 0..4095 per turn |
 
-These are LeRobot's units. Conversion to MJCF units happens in the twin's `RobotKinematics` and nowhere else.
+These are LeRobot's units. Conversion to MJCF units happens in `RobotKinematics` and nowhere else:
+the twin's `lerobot_mp.twin.kinematics`, and its copy in `soarm_lab.kinematics`.
 Joint zero sits at mid-range, tick 2048 (`center_ticks`). The MJCF uses the same zero
 (LeRobot's new calibration convention).
 
@@ -50,3 +58,9 @@ The twin owns the contracts this package follows.
   A backend factory `create(ctx)` takes a `BackendContext` and returns the backend.
 - `packages/soarm/pyproject.toml` registers the robot folder under the `lerobot_mp.robots` entry point group
   and the backend factories under `lerobot_mp.backends`.
+- The strategy contract is `Strategy`, `Observation`, `RunInfo` and `Action` in `lerobot_mp.twin.strategy`,
+  and the strict settings dataclass in `lerobot_mp.twin.strategies`.
+  `soarm_lab.strategy.PolicyStrategy` follows it by attributes, without importing it.
+- `packages/soarm_lab/pyproject.toml` registers that strategy under `lerobot_mp.strategies` as `policy`.
+- The station export is `Workspace.export` in the twin (`lerobot-twin export`). `soarm_lab.station.Station` reads it.
+  `soarm_lab.robot.RobotSpec` reads only the `robot.yaml` fields the lab uses and skips the others.
