@@ -8,7 +8,9 @@ soarm-lab = { workspace = true }
 [dependency-groups]
 dev = [
     "soarm[feetech]",
-    "soarm-lab",
+    # torch for the tests of the legacy torch trainer and the converter; the runtime needs none
+    # (tests/test_dependency_rule.py).
+    "soarm-lab[torch]",
     # The twin, for the tests that run our robot folder and backends through its contract.
     "lerobot-mp @ git+https://github.com/machinekind/digital_twin_training.git@main",
     "pytest>=8",

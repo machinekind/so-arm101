@@ -15,6 +15,13 @@ Tests may import the twin. It is a dev dependency, used to run both packages thr
 `tests/test_dependency_rule.py` checks every import in both packages' source, also one under `TYPE_CHECKING`.
 It also imports every lab module in a fresh interpreter and checks that no `lerobot_mp` module got loaded.
 
+Running a policy needs no torch.
+The strategy, the policy file, evaluation and the `soarm-lab` commands other than `train` and `convert`
+import numpy, never torch.
+torch is the optional extra `soarm-lab[torch]` for the legacy torch trainer and `soarm-lab convert`.
+`tests/test_dependency_rule.py` runs the bundled policies in a fresh interpreter and checks that no torch
+module got loaded, also with torch made unimportable.
+
 The twin holds no robot and no training. It keeps the scene, cameras, calibration, perception primitives,
 runtime, safety, sysid and the contracts `Observation`, `Strategy`, `StrategyRunner` and `EpisodeLog`.
 

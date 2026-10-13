@@ -10,6 +10,8 @@ This repository is one uv workspace with two Python packages:
 - `soarm` is the robot: its robot folder and the hardware backends.
 - `soarm-lab` (package `soarm_lab`) is the training: RL tasks, the CPU and GPU environments, PPO,
   evaluation, the base policies, and a strategy that runs a policy in the twin.
+  The training stack is JAX and MuJoCo Warp. Until the JAX trainer is written, training runs a legacy
+  torch trainer. Running a policy needs numpy only.
 
 The digital twin ([digital_twin_training](https://github.com/machinekind/digital_twin_training), package `lerobot_mp`)
 measures the rig and runs strategies through its safety supervisor.
@@ -43,9 +45,9 @@ so-arm101/
         kinematics.py       degrees <-> MJCF, TCP forward kinematics, IK
         sim.py              the compiled scene with the task's objects
         rl/                 tasks, Gymnasium env (CPU), MuJoCo Warp batch (GPU), PPO, policies, evaluation
-        policies/           base policies reach-v3 and lift-v3
+        policies/           base policies reach-v3 and lift-v3 (policy.npz + meta.json)
         strategy.py         a policy as a twin strategy (entry point `policy`)
-        cli.py              the `soarm-lab` command: train, eval, policies
+        cli.py              the `soarm-lab` command: train, eval, policies, convert
   docs/                     first contact, conventions, safety, migration
   tests/                    pytest
 ```
@@ -75,6 +77,7 @@ See [packages/soarm_lab/README.md](packages/soarm_lab/README.md).
 The robot folder is the twin's, byte for byte. The backends no longer import the twin. Their behaviour is unchanged.
 `packages/soarm_lab/` is the twin's `twin/rl/` without `sysid.py`, moved here with ticket #146,
 together with the base policies and the training commands of `lerobot-twin`.
+The base policies are converted from the twin's torch checkpoints to `policy.npz`.
 The twin still holds its own copies and registers the same robot and backend names (`so101`, `feetech`, `lerobot`).
 Until the twin drops its copy, its robot and backend discovery fails when both packages are installed.
 The servo tools and a `soarm` command come later.
@@ -86,12 +89,15 @@ The servo tools and a `soarm` command come later.
 uv sync
 ```
 
-This installs `soarm` and `soarm-lab` in editable mode with pyserial, MuJoCo, Gymnasium, torch, pytest, ruff
+This installs `soarm` and `soarm-lab` in editable mode with pyserial, MuJoCo, Gymnasium, pytest, ruff
 and the twin from GitHub.
+It also installs torch, so the tests cover the legacy torch trainer and `soarm-lab convert`.
+`soarm-lab` itself does not depend on torch.
 The tests run both packages through the twin's own loaders and contracts.
 The twin repository is private, so `uv sync` needs GitHub access to it.
 
-GPU training needs MuJoCo Warp and a CUDA build of torch:
+GPU training needs MuJoCo Warp.
+Until the JAX trainer exists, it runs the legacy torch trainer and needs a CUDA build of torch:
 
 ```
 uv sync --extra train
@@ -107,8 +113,11 @@ pip install "soarm[lerobot]"   # LeRobot 0.6 backend (Python 3.12+)
 Extras of `soarm-lab`:
 
 ```
-pip install "soarm-lab[train]" # mujoco-warp: GPU training
+pip install "soarm-lab[train]" # mujoco-warp and jax: GPU training (the JAX trainer is not written yet)
+pip install "soarm-lab[torch]" # torch: the legacy PPO trainer and soarm-lab convert
 ```
+
+Without extras, `soarm-lab` runs policies, evaluates them and runs the strategy in the twin.
 
 ## Test
 
@@ -117,7 +126,7 @@ uv run pytest
 uv run ruff check .
 ```
 
-Tests that need MuJoCo skip when it is not installed.
+Tests that need MuJoCo skip when it is not installed. Tests that need torch skip without it.
 Tests marked `render` skip where MuJoCo cannot open an OpenGL context. On a headless Linux machine set `MUJOCO_GL=egl`.
 GPU tests skip without `mujoco-warp` or CUDA.
 

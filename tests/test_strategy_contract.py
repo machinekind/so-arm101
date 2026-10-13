@@ -14,7 +14,6 @@ import numpy as np
 import pytest
 
 pytest.importorskip("mujoco")
-pytest.importorskip("torch")
 pytest.importorskip("lerobot_mp")
 
 from lerobot_mp.twin import scene as twin_scene  # noqa: E402

@@ -9,19 +9,22 @@ description = "SO-101 training: RL tasks, CPU and GPU environments, PPO and the 
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
+# Running a policy (the strategy, evaluation, the CPU environments) needs numpy only, no torch.
 dependencies = [
     "soarm",
     "numpy>=1.24",
     "PyYAML>=6.0",
     "mujoco>=3.14,<3.15",
     "gymnasium>=1.0",
-    # CPU is enough for the environments, evaluation and the strategy; GPU training needs a CUDA build.
-    "torch>=2.7,<2.12",
 ]
 
 [project.optional-dependencies]
-# GPU training: thousands of MuJoCo Warp worlds. mujoco and mujoco-warp must have the same version.
-train = ["mujoco-warp>=3.14,<3.15"]
+# GPU training: thousands of MuJoCo Warp worlds, trained in JAX. mujoco and mujoco-warp must have the
+# same version. The JAX trainer is not written yet: today's trainer is the torch one (the torch extra).
+train = ["mujoco-warp>=3.14,<3.15", "jax>=0.4"]
+# Legacy: the torch PPO trainer (rl/ppo.py, rl/batch.py; GPU training needs a CUDA build) and
+# `soarm-lab convert`, which turns a torch checkpoint (policy.pt) into policy.npz.
+torch = ["torch>=2.7,<2.12"]
 
 [project.entry-points."lerobot_mp.strategies"]
 policy = "soarm_lab.strategy:PolicyStrategy"
@@ -31,11 +34,6 @@ soarm-lab = "soarm_lab.cli:main"
 
 [tool.uv.sources]
 soarm = { workspace = true }
-
-[tool.hatch.build]
-# The bundled policies' weights. Hatchling reads the repository's .gitignore (*.pt) relative to this
-# folder, where its exception for these files does not match; artifacts put them in the sdist and the wheel.
-artifacts = ["soarm_lab/policies/*/policy.pt"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["soarm_lab"]

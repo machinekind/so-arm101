@@ -13,10 +13,9 @@ htmlcov/
 # uv
 .venv/
 
-# Model weights stay on Hugging Face
+# Model weights stay on Hugging Face. soarm-lab's base policies (policy.npz, ~0.9 MB each) are the
+# exception; policies trained here go to workspace/.
 *.pt
-# ...except the base policies soarm-lab ships (reach-v3, lift-v3, ~0.9 MB each)
-!packages/soarm_lab/soarm_lab/policies/*/policy.pt
 *.pth
 *.safetensors
 *.ckpt

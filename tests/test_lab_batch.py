@@ -1,6 +1,6 @@
 """The GPU batch environment (MuJoCo Warp) and a short training run. Skipped without mujoco_warp or CUDA.
 
-`uv sync --extra train` (or `pip install "soarm-lab[train]"`) brings mujoco-warp; training also needs a
+`pip install "soarm-lab[train,torch]"` brings mujoco-warp and torch; the legacy torch trainer needs a
 CUDA build of torch.
 """
 
@@ -34,5 +34,6 @@ def test_the_batch_steps_on_the_station(task):
 def test_a_short_training_run_saves_a_policy(tmp_path, capsys):
     assert main(["train", "--task", "reach", "--envs", "256", "--iters", "2", "--eval-episodes", "1",
                  "--out", str(tmp_path), "--name", "smoke"]) == 0
-    pol = Policy.load(tmp_path / "smoke" / "policy.pt")
+    pol = Policy.load(tmp_path / "smoke" / "policy.npz")
+    assert pol.critic is not None                                    # for fine-tuning
     assert pol.meta.iterations == 2 and set(pol.meta.evals) >= {"gpu", "cpu_nominal"}

@@ -1,7 +1,12 @@
 """PPO na srodowisku wsadowym GPU - krotko, bez zaleznosci poza torchem.
 
     pol = train("reach", PPOConfig(iterations=200), station=Station.load("sim"))
-    pol.save("workspace/policies/reach/policy.pt")
+    pol.save("workspace/policies/reach/policy.npz")
+
+Dawny trener w torchu: potrzebuje dodatkow `soarm-lab[torch]` i `soarm-lab[train]` (MuJoCo Warp).
+Stos treningowy laboratorium to JAX i MuJoCo Warp, a trener w JAX zastapi ten. Uczy
+`torch_policy.TorchPolicy`, a zwraca i zapisuje polityke numpy `policy.Policy` (`policy.npz`, z krytykiem
+do douczania).
 
 Klasyczny przepis z rsl_rl / legged_gym, dobrany do tysiecy rownoleglych
 swiatow: krotkie przebiegi (`horizon` krokow na swiat), GAE, kilka epok na
@@ -26,14 +31,16 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import torch
-from torch import nn
 
 from ..station import Station
 from . import task as tk
+from ._torch import torch
 from .batch import BatchEnv
-from .policy import Policy, PolicyMeta, mlp
+from .policy import POLICY_FILE, Policy, PolicyMeta
 from .randomize import Randomization
+from .torch_policy import TorchPolicy, load_layers, mlp
+
+nn = torch.nn
 
 
 @dataclass
@@ -63,7 +70,7 @@ class PPOConfig:
 class ActorCritic(nn.Module):
     def __init__(self, meta: PolicyMeta, init_std: float):
         super().__init__()
-        self.policy = Policy(meta)
+        self.policy = TorchPolicy(meta)
         self.critic = mlp([meta.obs_dim, *meta.hidden], 1)
         self.log_std = nn.Parameter(torch.full((meta.act_dim,), float(np.log(init_std))))
 
@@ -118,9 +125,9 @@ def train(task: str | tk.TaskConfig, cfg: PPOConfig | None = None, *, station: S
     ac = ActorCritic(meta, cfg.init_std).to(device)
     warmup = 0
     if init is not None:
-        ac.policy.load_state_dict(init.state_dict())
-        if init.critic_state is not None:
-            ac.critic.load_state_dict(init.critic_state)
+        ac.policy.load_numpy(init)
+        if init.critic is not None:
+            load_layers(ac.critic, init.critic)
         else:
             warmup = cfg.critic_warmup
     opt = torch.optim.Adam(ac.parameters(), lr=cfg.lr)
@@ -254,17 +261,15 @@ def train(task: str | tk.TaskConfig, cfg: PPOConfig | None = None, *, station: S
         if out:
             (out / "progress.json").write_text(json.dumps(asdict(prog)), encoding="utf-8")
             if cfg.save_every and it % cfg.save_every == 0:
-                _finish(ac, prog, out / "policy.pt")
+                _finish(ac, prog, out / POLICY_FILE)
         if stopping:
             break
 
-    pol = _finish(ac, prog, out / "policy.pt" if out else None)
-    return pol.eval()
+    return _finish(ac, prog, out / POLICY_FILE if out else None)
 
 
 def _finish(ac: ActorCritic, prog: Progress, path: Path | None) -> Policy:
-    pol = ac.policy
-    pol.critic_state = {k: v.detach().cpu().clone() for k, v in ac.critic.state_dict().items()}
+    pol = ac.policy.to_numpy(critic=ac.critic)
     pol.meta.steps, pol.meta.iterations = prog.steps, prog.iteration
     pol.meta.success = prog.success
     pol.meta.evals["gpu"] = {"success": prog.success, "reward": prog.reward, "steps": prog.steps}

@@ -5,10 +5,12 @@
     soarm-lab train --task pickplace                 # ... kostka przeniesiona na cel na blacie
     soarm-lab eval lift-v3 --rand                    # ewaluacja polityki w zwyklym MuJoCo
     soarm-lab policies                               # polityki bazowe i uczone tutaj, z wynikami
+    soarm-lab convert old/policy.pt                  # punkt kontrolny torcha -> policy.npz
 
 `--station` to folder eksportu blizniaka (`scene.xml`, `assets/`, `station.json`) albo nazwa
-stanowiska dostarczanego z pakietem (`sim`, domyslnie). Trening na GPU potrzebuje dodatku `train`
-(`mujoco-warp`) i torcha z CUDA.
+stanowiska dostarczanego z pakietem (`sim`, domyslnie). `eval` i `policies` potrzebuja tylko numpy.
+`train` to dawny trener w torchu: potrzebuje dodatkow `train` (`mujoco-warp`) i `torch` (torch z CUDA).
+`convert` potrzebuje dodatku `torch`.
 """
 
 from __future__ import annotations
@@ -55,6 +57,7 @@ def _train(a: argparse.Namespace) -> int:
 
     from .paths import policies_dir
     from .rl.evaluate import evaluate
+    from .rl.policy import POLICY_FILE
     from .rl.ppo import PPOConfig, train
     from .rl.randomize import Dynamics
 
@@ -97,15 +100,13 @@ def _train(a: argparse.Namespace) -> int:
         threading.Thread(target=watch, daemon=True).start()
     pol = train(a.task, cfg, station=st, randomization=rand, out_dir=out, on_progress=show, stop=stop,
                 init=init, device=a.device)
-    pol = pol.to("cpu")
     print("Ewaluacja na CPU (zwykle MuJoCo, inny silnik niz w treningu):")
     for label, key, r in evals:
         res = evaluate(pol, a.eval_episodes, randomization=r, station=st)
         pol.meta.evals[key] = res
         rounded = {k: round(v, 3) if isinstance(v, float) else v for k, v in res.items()}
         print(f"  {label:17s} sukces {res['success']:5.1%}  ({json.dumps(rounded)})")
-    pol.save(out / "policy.pt")
-    print(f"Zapisano {out / 'policy.pt'}")
+    print(f"Zapisano {pol.save(out / POLICY_FILE)}")
     return 0
 
 
@@ -126,7 +127,7 @@ def _eval(a: argparse.Namespace) -> int:
 
 def _policies(a: argparse.Namespace) -> int:
     from .paths import policies_dir
-    from .rl.policy import list_policies
+    from .rl.policy import list_policies, torch_checkpoints
 
     items = list_policies(a.dir or policies_dir())
     if not items:
@@ -141,6 +142,16 @@ def _policies(a: argparse.Namespace) -> int:
         print(f"  {p['name']:32s} {p['task']:9s} {where:6s} GPU {p['success'] or 0:5.1%}  "
               f"CPU bez/z rand. {pct('cpu_nominal')} / {pct('cpu_rand')}  "
               f"{p['steps'] / 1e6:6.1f} M  {p['created']}")
+    for pt in torch_checkpoints(a.dir or policies_dir()):
+        print(f"  {pt.parent.name:32s} tylko policy.pt (torch): soarm-lab convert {pt}")
+    return 0
+
+
+def _convert(a: argparse.Namespace) -> int:
+    from .rl.torch_policy import convert
+
+    out = convert(a.checkpoint, a.out)
+    print(f"Zapisano {out} i {out.with_name('meta.json')}")
     return 0
 
 
@@ -167,12 +178,12 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--spread", type=float, default=1.0, help="szerokosc randomizacji wokol zmierzonej dynamiki")
     p.add_argument("--eval-episodes", type=int, default=50)
     p.add_argument("--stop-file", default=None, help="przerwij trening, gdy ten plik sie pojawi")
-    p.add_argument("--init", default=None, help="douczanie: start z tej polityki (nazwa albo policy.pt)")
+    p.add_argument("--init", default=None, help="douczanie: start z tej polityki (nazwa albo policy.npz)")
     p.add_argument("--device", default="cuda:0", help="urzadzenie torcha i MuJoCo Warp (domyslnie cuda:0)")
     p.set_defaults(fn=_train)
 
     p = sub.add_parser("eval", help="ewaluacja polityki na CPU (zwykle MuJoCo)")
-    p.add_argument("policy", help="nazwa polityki (np. lift-v3) albo sciezka do policy.pt")
+    p.add_argument("policy", help="nazwa polityki (np. lift-v3) albo sciezka do policy.npz")
     p.add_argument("--episodes", type=int, default=50)
     p.add_argument("--rand", action="store_true", help="z randomizacja dziedziny")
     p.add_argument("--seed", type=int, default=10_000, help="ziarno pierwszego epizodu")
@@ -182,6 +193,11 @@ def parser() -> argparse.ArgumentParser:
     p = sub.add_parser("policies", help="polityki bazowe i uczone, z wynikami")
     p.add_argument("--dir", default=None, help="katalog polityk (domyslnie workspace/policies)")
     p.set_defaults(fn=_policies)
+
+    p = sub.add_parser("convert", help="punkt kontrolny torcha (policy.pt) jako policy.npz (dodatek torch)")
+    p.add_argument("checkpoint", help="policy.pt albo jego folder")
+    p.add_argument("--out", default=None, help="plik policy.npz (domyslnie obok policy.pt; meta.json obok niego)")
+    p.set_defaults(fn=_convert)
     return ap
 
 

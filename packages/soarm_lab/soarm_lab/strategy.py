@@ -13,6 +13,8 @@ an object with the attributes of the twin's `Action`.
     policy:
       policy: lift-v3              # a bundled policy, one trained here (workspace/policies) or a path
 
+The policy runs in numpy (`rl.policy.Policy`); the strategy needs no torch.
+
 The loop does exactly what the training environment does - the observation from `task.observe`, the
 action through `task.apply_action` - only the angles come from the servos, not from physics. It is the
 twin's former `rl/runner.py` (`PolicyRunner`) with the twin's side taken out: claiming the arm, the
@@ -72,7 +74,7 @@ class NoCube(RuntimeError):
 
 @dataclass
 class PolicySettings:
-    #: A bundled policy (reach-v3, lift-v3), one trained here (`soarm-lab policies`), or a path to policy.pt.
+    #: A bundled policy (reach-v3, lift-v3), one trained here (`soarm-lab policies`), or a path to policy.npz.
     policy: str = "reach-v3"
     #: The run ends, holding the measured pose, when an arm joint lags its target by more than this [deg].
     max_tracking_deg: float = 25.0

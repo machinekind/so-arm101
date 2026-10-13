@@ -18,7 +18,6 @@ import pytest
 import soarm
 
 pytest.importorskip("mujoco")
-torch = pytest.importorskip("torch")
 
 from soarm_lab.rl import task as tk  # noqa: E402
 from soarm_lab.rl.policy import Policy, PolicyMeta  # noqa: E402
@@ -31,11 +30,8 @@ SPEC = load_robot()
 def constant_policy(task: tk.TaskConfig, action: dict[int, float] | None = None) -> Policy:
     """Polityka, ktora zawsze daje te sama akcje (zera + `action`)."""
     pol = Policy(PolicyMeta(task=asdict(task), hidden=[8], obs_dim=task.obs_dim, act_dim=task.act_dim))
-    with torch.no_grad():
-        for p in pol.actor.parameters():
-            p.zero_()
-        for k, v in (action or {}).items():
-            pol.actor[-1].bias[k] = v
+    for k, v in (action or {}).items():
+        pol.actor[-1][1][k] = v                                  # bias of the output layer
     return pol
 
 

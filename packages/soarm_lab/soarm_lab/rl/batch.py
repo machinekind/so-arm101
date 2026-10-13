@@ -15,6 +15,8 @@ epizodu. `info["time_outs"]` mowi, ktore skonczyly sie limitem czasu albo seria
 sukcesow (`task.end_on_success`, wtedy tez `info["finished"]`) - PPO dolicza
 im wartosc stanu zamiast zera.
 
+Srodowisko dawnego trenera w torchu: potrzebuje dodatkow `soarm-lab[torch]` i `soarm-lab[train]`.
+
 Stan MuJoCo Warp jest wystawiony jako widoki torch (`wp.to_torch`) - bez kopii.
 Fizyka to jeden przechwycony graf CUDA z `substeps` krokami; torch i Warp
 synchronizujemy jawnie przed i po nim (dwa synchronizacje na krok polityki,
@@ -36,11 +38,11 @@ from __future__ import annotations
 
 import mujoco
 import numpy as np
-import torch
 
 from .. import sim as sc
 from ..station import Station
 from . import task as tk
+from ._torch import torch
 from .env import TARGET_SIZE, scene_config
 from .randomize import Randomization
 

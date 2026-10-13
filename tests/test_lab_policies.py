@@ -23,14 +23,13 @@ import numpy as np
 import pytest
 
 pytest.importorskip("mujoco")
-pytest.importorskip("torch")
 
 from soarm_lab.rl.env import TwinEnv  # noqa: E402
 from soarm_lab.rl.policy import Policy, bundled_dir  # noqa: E402
 from soarm_lab.rl.randomize import Randomization  # noqa: E402
 
-REACH = bundled_dir() / "reach-v3" / "policy.pt"
-LIFT = bundled_dir() / "lift-v3" / "policy.pt"
+REACH = bundled_dir() / "reach-v3" / "policy.npz"
+LIFT = bundled_dir() / "lift-v3" / "policy.npz"
 #: "Przy limicie" = rozkaz stawu blizej niz 1 st. od limitu (`task.Limits`).
 NEAR_LIMIT = np.radians(1.0)
 
@@ -103,8 +102,12 @@ def check_lift(rep: dict, lift_height: float) -> None:
     # a chwyt to kontakty: trajektorie zgodne do 1e-8 rozchodza sie przy chwycie i maksimum
     # z 30 epizodow trafia na inny epizod. Zmierzone na czterech blokach po 30 ziaren
     # (10/20/30/40 tys.): blizniak 44-54 st., laboratorium 26-59 st., p90 w obu 25,8 st.
-    # 60 st. dalej odroznia lift-v2 (72 st.).
-    assert rep["swing_after_success_deg"] < 60.0, rep
+    # Polityka liczona w numpy (policy.npz) daje akcje torcha z dokladnoscia float32 (< 6e-7), a to
+    # przy chwycie tez zmienia trajektorie. Zmierzone na 12 blokach po 30 ziaren (10-120 tys.):
+    # maksimum torch 26-65 st. (powyzej 60 w trzech blokach), numpy 26-65 st. (w dwoch), p90 torch
+    # 25,8-28,8 st., numpy 25,8 st.; blok 10 tys.: torch 56,5, numpy 63,3 st.
+    # 70 st. dalej odroznia lift-v2 (72 st.); jej wysokosc i takty przy limicie lapia ja i tak.
+    assert rep["swing_after_success_deg"] < 70.0, rep
 
 
 def test_both_base_policies_are_bundled():

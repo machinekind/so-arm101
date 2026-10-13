@@ -32,8 +32,8 @@ Paths on the left are relative to the twin's repository root. Paths on the right
 | `RobotSpec` and `load_robot` in `src/lerobot_mp/twin/robots.py` | the fields the lab uses, in `packages/soarm_lab/soarm_lab/robot.py`; the twin keeps its own | #146 | copied |
 | `Scene`, `Box`, `CameraView`, `build` in `src/lerobot_mp/twin/scene.py` | `packages/soarm_lab/soarm_lab/sim.py` and `station.py`, built from the exported `scene.xml`; the twin keeps its own | #146 | copied |
 | `_train`, `_eval`, `_policies`, `_train_plan`, `_describe` in `src/lerobot_mp/twin/cli.py` | `packages/soarm_lab/soarm_lab/cli.py`, the `soarm-lab` command | #146 | moved; twin PR pending |
-| `assets/policies/reach-v3/` (`meta.json`, `policy.pt`) | `packages/soarm_lab/soarm_lab/policies/reach-v3/` | #146 | copied; twin PR pending |
-| `assets/policies/lift-v3/` (`meta.json`, `policy.pt`) | `packages/soarm_lab/soarm_lab/policies/lift-v3/` | #146 | copied; twin PR pending |
+| `assets/policies/reach-v3/` (`meta.json`, `policy.pt`) | `packages/soarm_lab/soarm_lab/policies/reach-v3/` (`meta.json`, `policy.npz` converted from `policy.pt`) | #146 | converted; twin PR pending |
+| `assets/policies/lift-v3/` (`meta.json`, `policy.pt`) | `packages/soarm_lab/soarm_lab/policies/lift-v3/` (`meta.json`, `policy.npz` converted from `policy.pt`) | #146 | converted; twin PR pending |
 | `lerobot-twin export` of `examples/twin.sim.json` (branch `scene-export`) | `packages/soarm_lab/soarm_lab/stations/sim/` (`scene.xml`, `station.json`; meshes from `soarm`) | #146 | copied |
 | `tests/test_feetech.py` | `tests/test_feetech.py` | #145 | copied; twin PR pending |
 | `tests/test_serial_bridge.py` | `tests/test_serial_bridge.py` | #145 | copied; twin PR pending |
@@ -78,7 +78,8 @@ These come from the twin's imports on its `main` branch.
    station's `workspace/policies` (`find_policy`).
 6. `pyproject.toml` of the twin: the `robot`, `feetech` and `bridge` extras and the `lerobot-mp-bridge` script move to `soarm`.
    `soarm` now has the `feetech` and `lerobot` extras and the `soarm-bridge` script. The twin still has its own.
-   The `train` extra moves to `soarm-lab` (`mujoco-warp`; mujoco, gymnasium and torch are base dependencies there).
+   The `train` extra moves to `soarm-lab` and becomes `mujoco-warp` and `jax`. mujoco and gymnasium are base
+   dependencies there. torch is the optional extra `torch`.
 
 ## #146: training
 
@@ -91,6 +92,31 @@ scene from `MjSpec`), `assets/` (the arm's meshes) and `station.json` (the works
 The bundled `stations/sim` is that export of the twin's simulated example station, without the meshes.
 `tests/test_station.py` checks that its compiled model matches the twin's own scene build to 1e-5
 (the XML keeps 6 significant digits).
+
+### Policy format and torch
+
+The lab's training stack is JAX and MuJoCo Warp. The JAX trainer is a separate ticket.
+torch is no longer a dependency of `soarm-lab`.
+
+- Base dependencies are `soarm`, numpy, PyYAML, mujoco and gymnasium.
+  The strategy, `soarm-lab eval`, `soarm-lab policies` and the CPU environments import no torch.
+  `tests/test_dependency_rule.py` checks this in a fresh interpreter, once with torch made unimportable.
+- The extra `train` is `mujoco-warp` and `jax`. Nothing uses jax yet.
+- The extra `torch` holds torch for the legacy PPO trainer (`rl/ppo.py`, `rl/batch.py`) and for
+  `soarm-lab convert`. Those modules raise "install soarm-lab[torch]" without it.
+  The workspace's dev group installs `soarm-lab[torch]`, so the tests still cover the torch trainer.
+- A policy is `policy.npz` next to `meta.json`. `policy.npz` holds the normalizer's buffers, the layer sizes
+  and the actor's and critic's weights in float32. `packages/soarm_lab/README.md` describes the keys.
+- `Policy` in `rl/policy.py` is plain numpy. It has no `to`, `eval`, `state_dict` or `critic_state`.
+  `critic` holds the critic's layers. The torch modules (`TorchPolicy`, `Normalizer`, `mlp`) moved to
+  `rl/torch_policy.py`.
+- The PPO trainer trains `TorchPolicy` and saves and returns a numpy `Policy` with its critic.
+  `--init` fine-tunes from a `policy.npz`.
+- `Policy.load` refuses a `policy.pt` and names `soarm-lab convert <policy.pt>`.
+  `soarm-lab policies` lists the folders that hold only a `policy.pt`.
+- The base policies were converted with `soarm-lab convert`. Every array equals the twin's checkpoint.
+  `meta.json` is the twin's file, unchanged. On 5000 random observations, one at a time, the numpy actions
+  match torch's to 6e-7. In batches of 5000 they match to 1.1e-6.
 
 ### Twin imports and their replacements
 
@@ -116,9 +142,13 @@ Behaviour that changes on purpose:
 - The strategy's lag guard ends the run with the measured pose as its last target; a squeezing gripper keeps its
   command. `PolicyRunner` called `Twin.hold_measured`, which also allows for the servos' braking distance.
   The contract has no "hold the measured pose" answer. The twin's own tracking guard (STOP) applies on top.
-- `test_lab_policies.py` allows 60 degrees of joint travel after the first lift success, not 55. The exported scene
+- `test_lab_policies.py` allows 70 degrees of joint travel after the first lift success, not 55. The exported scene
   differs from the twin's by XML rounding, and contacts amplify it. The twin measures 44-54 degrees over four blocks of
   30 seeds, the lab 26-59, and both have a p90 of 25.8. lift-v2 measured 72.
+  Numpy inference differs from torch's by float32 rounding, which changes the trajectories too. Over twelve blocks of
+  30 seeds the lab measures a maximum of 26-65 degrees with torch and 26-65 with numpy. The torch maximum passes 60 in
+  three blocks and the numpy maximum in two. The p90 stays at 25.8-28.8.
+- The twin's `policy.pt` files do not load in the lab. `soarm-lab convert` turns them into `policy.npz`.
 - `test_twin_runner.py`'s race between `claim` and the clutch is the `StrategyRunner`'s now.
   `tests/test_strategy_contract.py` runs it on the twin's runner with the lab's strategy.
 
