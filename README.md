@@ -5,8 +5,8 @@ The SO-101 is LeRobot's SO-ARM101 with Feetech STS3215 servos.
 The demo on 2026-11-11 uses two SO-101 arms, one mounted inverted.
 They pick an object from a known set, hand it from one arm to the other and place it on the quadruped Wojtek.
 A second robot, the tri-arm, is the same arm with a hand in place of the gripper.
-This repository is one uv workspace with two Python packages.
-`soarm` is the robot. `soarm-lab` holds the rig, perception, training and evaluation.
+This repository is one uv workspace with one Python package, `soarm`, which is the robot.
+A second package, `soarm-lab`, comes with ticket #146. It will hold the rig, perception, training and evaluation.
 The digital twin ([digital_twin_training](https://github.com/machinekind/digital_twin_training), package `lerobot_mp`)
 measures the rig and runs strategies through its safety supervisor.
 
@@ -23,36 +23,24 @@ measures the rig and runs strategies through its safety supervisor.
 so-arm101/
   packages/
     soarm/                  the robot; no twin import; the twin loads it as a plugin
-      robot/
-        so101/              MJCF, meshes, robot.yaml
-        tri-arm/            robot.yaml of the arm with a hand (draft)
-      end_effectors/
-        gripper/            jaw meshes, opening range, pad geometry
-        hand/               finger joints, open and closed poses, grasp detection
-      mounts/               table/ inverted/ wrist_cam/ top_cam/, one transform.yaml each
-      soarm/                Python package: spec, backend, feetech, bridge, lerobot, servo, leader, calibration, cli
-      arms/                 one folder per physical arm
-      embodiment/           embodiment descriptors
-    soarm_lab/              everything learned or measured; imports the twin and soarm
-      rig/                  demo table, cameras, object set, protocol, handover, Wojtek
-      perception/           which object from the set, and where on the table
-      training/
-        rl/                 PPO, GPU batch env, tasks, policy format, randomization, curricula
-        planner/            geometric grasp, GraspGenX adapter
-        vla/                recording recipe, LeRobot config, fine-tune configs, Cosmos, automatic demos
-      eval/                 run_sim.py, run_real.py, results/, compare.md
-      policies/             meta.json and Hugging Face links only
-      soarm_lab/            Python package: strategies.py
+      soarm/                Python package
+        robot/              robot.yaml, MJCF and meshes of the SO-101
+        feetech.py          backend `feetech`: Feetech STS3215 servos over a serial port or socket://
+        lerobot_backend.py  backend `lerobot`: the arm through LeRobot
+        serial_bridge.py    COM <-> TCP bridge, the `soarm-bridge` command
+        settings.py         strict builder for the backends' config sections
   docs/                     first contact, conventions, safety, migration
   tests/                    pytest
 ```
 
 ## State
 
-`soarm.spec` is real: `soarm.so101()` loads and validates `robot/so101/robot.yaml`.
-The robot entry point and the backend entry points are registered.
-The backends, the servo tools, the `soarm` command and everything in `soarm_lab` are stubs.
-Code moves here from the twin with tickets #145 and #146. [docs/MIGRATION.md](docs/MIGRATION.md) tracks it.
+`packages/soarm/soarm/` is the twin's `src/lerobot_mp/robot/so101/`, moved here with ticket #145.
+The robot folder is the twin's, byte for byte. The backends no longer import the twin. Their behaviour is unchanged.
+The twin still holds its own copy of that package and registers the same names (`so101`, `feetech`, `lerobot`).
+Until the twin drops its copy, its robot and backend discovery fails when both packages are installed.
+The servo tools and a `soarm` command come later. Training moves here with #146.
+[docs/MIGRATION.md](docs/MIGRATION.md) tracks the move.
 
 ## Install
 
@@ -60,15 +48,15 @@ Code moves here from the twin with tickets #145 and #146. [docs/MIGRATION.md](do
 uv sync
 ```
 
-This installs both packages in editable mode with pytest and ruff. It does not install the twin or torch.
+This installs `soarm` in editable mode with pyserial, pytest, ruff and the twin from GitHub.
+The tests run the package through the twin's own loader and backend contract.
+The twin repository is private, so `uv sync` needs GitHub access to it.
 
-Extras:
+Extras of `soarm`:
 
 ```
-uv sync --extra feetech      # pyserial, to drive servos
-uv sync --extra lerobot      # LeRobot 0.6 backend (Python 3.12+)
-uv sync --extra twin         # the twin from GitHub
-uv sync --extra train        # torch, MuJoCo, MuJoCo Warp
+pip install "soarm[feetech]"   # pyserial: the feetech backend and soarm-bridge
+pip install "soarm[lerobot]"   # LeRobot 0.6 backend (Python 3.12+)
 ```
 
 ## Test
@@ -84,10 +72,10 @@ Tests that need MuJoCo skip when it is not installed.
 
 - [docs/first-contact.md](docs/first-contact.md): plug in an arm for the first time, safely.
 - [docs/safety.md](docs/safety.md): safety rules.
-- [docs/conventions.md](docs/conventions.md): units, joint names, robot.yaml schema, entry points, dependency rule.
+- [docs/conventions.md](docs/conventions.md): units, joint names, the dependency rule and where the contracts live.
 - [docs/MIGRATION.md](docs/MIGRATION.md): what moves from the twin, where, and with which ticket.
 
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
-The SO-101 MJCF and meshes come from MuJoCo Menagerie under Apache-2.0. See `packages/soarm/robot/so101/`.
+The SO-101 MJCF and meshes come from MuJoCo Menagerie under Apache-2.0. See `packages/soarm/soarm/robot/`.

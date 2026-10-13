@@ -1,6 +1,0 @@
-# Camera above the table, looking down at the workspace.
-parent: base
-child: top_cam
-pos: [0.0, 0.0, 0.0]        # TODO: measure; the rig calibration in the twin gives the real pose
-quat: [1.0, 0.0, 0.0, 0.0]  # TODO
-cad: TODO

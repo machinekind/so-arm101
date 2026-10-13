@@ -7,22 +7,29 @@ from pathlib import Path
 
 import pytest
 
-from conftest import SOARM_ROOT
+import soarm
 
 FORBIDDEN = ("lerobot_mp", "soarm_lab")
+SOURCES = sorted(Path(soarm.__file__).parent.rglob("*.py"))
 
 
-def imported_modules(path: Path) -> set[str]:
-    out = set()
+def imports(path: Path) -> tuple[set[str], list[int]]:
+    """Absolute modules imported by `path` and the levels of its relative imports."""
+    modules, levels = set(), []
     for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
         if isinstance(node, ast.Import):
-            out.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            out.add(node.module)
-    return out
+            modules.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level == 0 and node.module:
+                modules.add(node.module)
+            elif node.level:
+                levels.append(node.level)
+    return modules, levels
 
 
-@pytest.mark.parametrize("path", sorted((SOARM_ROOT / "soarm").rglob("*.py")), ids=lambda p: p.name)
+@pytest.mark.parametrize("path", SOURCES, ids=lambda p: p.name)
 def test_soarm_does_not_import_the_twin_or_the_lab(path: Path) -> None:
-    bad = {m for m in imported_modules(path) if m.split(".")[0] in FORBIDDEN}
-    assert not bad
+    modules, levels = imports(path)
+    assert {m for m in modules if m.split(".")[0] in FORBIDDEN} == set()
+    # `from ..base import ...` (the twin's layout) would reach outside the package.
+    assert all(level == 1 for level in levels)

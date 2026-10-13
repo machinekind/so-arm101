@@ -1,0 +1,82 @@
+# SO-101 (LeRobot): the model from MuJoCo Menagerie, see README.md.
+name: so101
+title: SO-101 (LeRobot)
+mjcf: so101.xml
+
+joints: [shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper]
+gripper: gripper
+# `gripperframe` lies between the jaws, at the tips: where the gripper grips.
+tcp_site: gripperframe
+hand_body: gripper
+base_body: base
+tcp_approach: [1.0, 0.0, 0.0]
+tcp_closing: [0.0, 0.0, 1.0]
+fingertips: [fixed_jaw_sph_tip1, moving_jaw_sph_tip1]
+roll_joint: wrist_roll
+onboard_cameras: [wrist_cam]
+jaw_bodies: [gripper, moving_jaw_so101_v1]
+
+# A ready pose from inverse kinematics: the tip in the middle of the workspace, the gripper
+# pointing slightly down. All zeros (the middle of the LeRobot calibration range) leaves the
+# arm fully stretched out.
+home:
+  shoulder_pan: 0.0
+  shoulder_lift: -23.3
+  elbow_flex: 46.4
+  wrist_flex: 3.3
+  wrist_roll: 0.0
+  gripper: 35.0
+
+# Slightly tighter than the SO-101 calibration ranges (+-110 / +-100 / +-96.8 / +-95 / -157..163),
+# to keep a margin before the mechanical stop.
+limits:
+  shoulder_pan: [-105.0, 105.0]
+  shoulder_lift: [-95.0, 95.0]
+  elbow_flex: [-92.0, 92.0]
+  wrist_flex: [-95.0, 95.0]
+  wrist_roll: [-150.0, 150.0]
+  gripper: [0.0, 100.0]
+max_vel:
+  shoulder_pan: 140.0
+  shoulder_lift: 120.0
+  elbow_flex: 120.0
+  wrist_flex: 160.0
+  wrist_roll: 220.0
+  gripper: 300.0
+
+# The STS3215 gripper servo: 0..100 is ticks 1986..2670 around the joint zero at tick 2048
+# (4096 ticks per turn), the jaw travel stored in the EEPROM of the example arm. The `feetech`
+# backend maps 0..100 through its own ticks and reports them; the twin warns when they differ.
+gripper_range_q: [-0.0951068, 0.9541361]
+
+wave_ranges:
+  shoulder_pan: [-75.0, 75.0]
+  shoulder_lift: [-80.0, 30.0]
+  elbow_flex: [-30.0, 90.0]
+  wrist_flex: [-70.0, 80.0]
+
+jaw: {still: 0.02, margin: 0.05, creep: 0.03, open: 0.40}
+desk:
+  goal_radius: [0.13, 0.32]
+  goal_height: [0.03, 0.22]
+  cube_radius: [0.15, 0.25]
+  cube_bearing: [-0.8, 0.8]
+  wave_radius: [0.12, 0.36]
+  search_centre: [0.2, 0.0, 0.05]
+  search_dist: [0.4, 0.9]
+  camera_dist: [0.45, 0.75]
+  camera_centre: [0.20, 0.0, 0.06]
+  map_centre: [0.22, 0.0]
+  map_side: 0.56
+
+joint_labels:
+  shoulder_pan: [Podstawa, Obrot podstawy]
+  shoulder_lift: [Bark, Bark]
+  elbow_flex: [Lokiec, Lokiec]
+  wrist_flex: [Nadg. zgiecie, Nadgarstek - zgiecie]
+  wrist_roll: [Nadg. obrot, Nadgarstek - obrot]
+  gripper: [Chwytak, Chwytak]
+
+connections:
+  - {label: "SO-101 przez port (feetech)", backend: feetech}
+  - {label: "SO-101 przez LeRobota (lerobot)", backend: lerobot}

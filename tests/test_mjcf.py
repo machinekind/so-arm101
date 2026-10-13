@@ -5,7 +5,7 @@ import xml.etree.ElementTree as ET
 
 import pytest
 
-from soarm.spec import RobotSpec
+import soarm
 
 
 def names(root: ET.Element, tag: str) -> list[str]:
@@ -13,36 +13,37 @@ def names(root: ET.Element, tag: str) -> list[str]:
 
 
 @pytest.fixture
-def mjcf(ready_spec: RobotSpec) -> ET.Element:
-    return ET.parse(ready_spec.mjcf_path).getroot()
+def mjcf(robot_yaml: dict) -> ET.Element:
+    return ET.parse(soarm.ROBOT_DIR / robot_yaml["mjcf"]).getroot()
 
 
-def test_joint_names_match_mjcf(ready_spec: RobotSpec, mjcf: ET.Element) -> None:
-    assert names(mjcf, "joint") == list(ready_spec.joints)
+def test_joint_names_match_mjcf(robot_yaml: dict, mjcf: ET.Element) -> None:
+    assert names(mjcf, "joint") == robot_yaml["joints"]
 
 
-def test_named_parts_exist_in_mjcf(ready_spec: RobotSpec, mjcf: ET.Element) -> None:
+def test_named_parts_exist_in_mjcf(robot_yaml: dict, mjcf: ET.Element) -> None:
     bodies, sites = set(names(mjcf, "body")), set(names(mjcf, "site"))
     geoms, cameras = set(names(mjcf, "geom")), set(names(mjcf, "camera"))
-    assert ready_spec.tcp_site in sites
-    assert {ready_spec.hand_body, ready_spec.base_body, *ready_spec.jaw_bodies} <= bodies
-    assert set(ready_spec.fingertips) <= geoms
-    assert set(ready_spec.onboard_cameras) <= cameras
+    assert robot_yaml["tcp_site"] in sites
+    assert {robot_yaml["hand_body"], robot_yaml["base_body"], *robot_yaml["jaw_bodies"]} <= bodies
+    assert set(robot_yaml["fingertips"]) <= geoms
+    assert set(robot_yaml["onboard_cameras"]) <= cameras
 
 
-def test_limits_inside_mjcf_ranges(ready_spec: RobotSpec, mjcf: ET.Element) -> None:
+def test_limits_inside_mjcf_ranges(robot_yaml: dict, mjcf: ET.Element) -> None:
     assert mjcf.find("compiler").get("angle") == "radian"
+    arm_joints = [j for j in robot_yaml["joints"] if j != robot_yaml["gripper"]]
     for joint in mjcf.iter("joint"):
         name = joint.get("name")
-        if name not in ready_spec.arm_joints:
+        if name not in arm_joints:
             continue
         lo, hi = (math.degrees(float(v)) for v in joint.get("range").split())
-        app_lo, app_hi = ready_spec.limits[name]
+        app_lo, app_hi = robot_yaml["limits"][name]
         assert lo - 1e-3 <= app_lo < app_hi <= hi + 1e-3, (name, lo, hi)
 
 
-def test_meshes_exist(ready_spec: RobotSpec, mjcf: ET.Element) -> None:
-    meshdir = ready_spec.mjcf_path.parent / mjcf.find("compiler").get("meshdir", ".")
+def test_meshes_exist(robot_yaml: dict, mjcf: ET.Element) -> None:
+    meshdir = soarm.ROBOT_DIR / mjcf.find("compiler").get("meshdir", ".")
     files = [m.get("file") for m in mjcf.iter("mesh") if m.get("file")]
     assert files
     assert [f for f in files if not (meshdir / f).is_file()] == []
