@@ -29,6 +29,7 @@ so-arm101/
         lerobot_backend.py  backend `lerobot`: the arm through LeRobot
         serial_bridge.py    COM <-> TCP bridge, the `soarm-bridge` command
         settings.py         strict builder for the backends' config sections
+      tests/                pytest, mirroring soarm/
     soarm_lab/              the training; no twin import; the twin runs its strategy as a plugin
       soarm_lab/            Python package
         station.py          an exported station (scene.xml + station.json), read with plain MuJoCo
@@ -40,8 +41,9 @@ so-arm101/
         policies/           base policies reach-v3 and lift-v3 (policy.npz + meta.json)
         strategies/         strategies for the twin; policy.py runs a policy (entry point `policy`)
         cli.py              the `soarm-lab` command: train, eval, policies, convert
+      tests/                pytest, mirroring soarm_lab/
   docs/                     first contact, conventions, safety
-  tests/                    pytest; tests/twin/ runs both packages through the twin's own code
+  conftest.py               the pytest markers `twin` and `render`
 ```
 
 ## How the twin uses the packages
@@ -126,16 +128,20 @@ Without extras, `soarm-lab` runs policies, evaluates them and runs the strategy 
 ## Test
 
 ```
-uv run pytest
-uv run pytest --ignore=tests/twin      # without the twin
+uv run pytest -q                       # both packages
+uv run pytest -q -m "not twin"         # without the twin
+uv run pytest -q packages/soarm_lab    # one package
 uv run ruff check .
 ```
 
-The tests in `tests/twin/` run both packages through the twin's own loaders, contracts and runner.
-They are the only tests that import the twin, and they skip when it is not installed.
+Each package keeps its tests in its own `tests/` folder.
+The test files mirror the package's modules: `packages/soarm_lab/tests/rl/test_env.py` tests `soarm_lab/rl/env.py`.
+Tests that run a package through the twin's own loaders, contracts and runner are marked `twin`.
+They skip when the twin is not installed.
 Tests that need MuJoCo skip when it is not installed. Tests that need torch skip without it.
 Tests marked `render` skip where MuJoCo cannot open an OpenGL context. On a headless Linux machine set `MUJOCO_GL=egl`.
 GPU tests skip without `mujoco-warp` or CUDA.
+[docs/conventions.md](docs/conventions.md#tests) has the test conventions.
 
 ## Docs
 

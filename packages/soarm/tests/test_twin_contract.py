@@ -9,14 +9,18 @@ builder directly.
 from __future__ import annotations
 
 import pytest
-from lerobot_mp.robot import BackendPlugin, backend_context
-from lerobot_mp.robot.factory import PluginBackend
-from lerobot_mp.twin.robots import load_robot, robot_config
-from test_feetech import FakeBusLink
 
-import soarm
-from soarm import feetech, lerobot_backend
-from soarm.feetech import ADDR_GOAL_POSITION
+pytestmark = pytest.mark.twin
+pytest.importorskip("lerobot_mp")
+
+from lerobot_mp.robot import BackendPlugin, backend_context  # noqa: E402
+from lerobot_mp.robot.factory import PluginBackend  # noqa: E402
+from lerobot_mp.twin.robots import load_robot, robot_config  # noqa: E402
+
+import soarm  # noqa: E402
+from fake_bus import FakeBusLink  # noqa: E402
+from soarm import feetech, lerobot_backend  # noqa: E402
+from soarm.feetech import ADDR_GOAL_POSITION  # noqa: E402
 
 
 @pytest.fixture(scope="module")

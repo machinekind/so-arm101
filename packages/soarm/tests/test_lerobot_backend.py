@@ -16,11 +16,15 @@ import dataclasses
 import enum
 
 import pytest
-from lerobot_mp.robot import backend_context
-from lerobot_mp.twin.robots import load_robot, robot_config
 
-import soarm
-from soarm.lerobot_backend import STATUS_EVERY_READS, LeRobotArm
+pytestmark = pytest.mark.twin
+pytest.importorskip("lerobot_mp")
+
+from lerobot_mp.robot import backend_context  # noqa: E402
+from lerobot_mp.twin.robots import load_robot, robot_config  # noqa: E402
+
+import soarm  # noqa: E402
+from soarm.lerobot_backend import STATUS_EVERY_READS, LeRobotArm  # noqa: E402
 
 
 @dataclasses.dataclass

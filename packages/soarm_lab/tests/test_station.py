@@ -1,4 +1,4 @@
-"""The exported station read with plain MuJoCo: the bundled `sim` station, task additions, kinematics."""
+"""The exported station read with plain MuJoCo: the bundled `sim` station and what a task adds to it."""
 
 from __future__ import annotations
 
@@ -12,19 +12,12 @@ import soarm
 
 mujoco = pytest.importorskip("mujoco")
 
-from soarm_lab import sim  # noqa: E402
-from soarm_lab.kinematics import RobotKinematics, inverse  # noqa: E402
-from soarm_lab.robot import load_robot  # noqa: E402
+from soarm_lab.kinematics import inverse  # noqa: E402
 from soarm_lab.station import PREFIX, STATIONS_DIR, Box, CameraView, Station, stations  # noqa: E402
 
 #: Bodies of the SO-101 in its MJCF, world excluded.
 ARM_BODIES = 8
 CUBE = Box("cube", (0.015, 0.015, 0.015), (0.2, 0.0), mass=0.03)
-
-
-@pytest.fixture(scope="module")
-def station() -> Station:
-    return Station.load("sim")
 
 
 def test_the_sim_station_is_bundled_without_meshes(station):
@@ -57,18 +50,6 @@ def test_the_station_record(station):
     assert station.dynamics == {}
     assert station.home is None
     assert station.T_base2world[:3, 3] == pytest.approx([-0.35, 0.0, 0.75])
-
-
-def test_the_scene_puts_the_base_and_the_cameras_where_the_record_says(station):
-    scene = sim.build(sim.SceneConfig(station))
-    try:
-        assert scene.T_base2world == pytest.approx(station.T_base2world, abs=1e-9)
-        for view in station.cameras:
-            assert scene.camera_pose(view.name) == pytest.approx(view.T_cam2base, abs=1e-5)
-            assert scene.model.cam_resolution[scene.model.camera(view.name).id].tolist() == [640, 480]
-            assert scene.camera(view.name).K == pytest.approx(view.K)
-    finally:
-        scene.close()
 
 
 def test_task_objects_and_jaw_sensors_are_added(station):
@@ -129,93 +110,3 @@ def test_unknown_stations_and_robots_are_refused(tmp_path, station):
     with pytest.raises(ValueError, match="robot is 'a1x'"):
         Station.load(folder).spec()
 
-
-# --------------------------------------------------------------------------- kinematics
-
-
-def test_degrees_and_gripper_units_round_trip(station):
-    spec = station.spec()
-    kin = RobotKinematics(spec)
-    joints = {"shoulder_pan": 12.5, "shoulder_lift": -40.0, "elbow_flex": 70.0, "wrist_flex": -15.0,
-              "wrist_roll": 100.0, "gripper": 42.0}
-    q = kin.to_q(joints)
-    assert q[:5] == pytest.approx(np.radians([12.5, -40.0, 70.0, -15.0, 100.0]))
-    assert kin.from_q(q) == pytest.approx(joints)
-    closed, opened = spec.gripper_range_q
-    assert kin.to_q({"gripper": 0.0})[5] == pytest.approx(closed)
-    assert kin.to_q({"gripper": 100.0})[5] == pytest.approx(opened)
-    # Missing joints take the rest pose.
-    assert kin.from_q(kin.to_q({})) == pytest.approx(spec.home)
-
-
-def test_tcp_at_home_is_in_front_of_the_base_above_the_table(station):
-    spec = station.spec()
-    tcp = RobotKinematics(spec).tcp(spec.home)[:3, 3]
-    assert 0.1 < tcp[0] < 0.35
-    assert abs(tcp[1]) < 0.01
-    assert 0.0 < tcp[2] < 0.3
-
-    # The arm inside the station's scene (prefix robot/) has the same kinematics.
-    scene = sim.build(sim.SceneConfig(station))
-    try:
-        assert scene.kin.tcp(spec.home)[:3, 3] == pytest.approx(tcp, abs=1e-5)
-    finally:
-        scene.close()
-
-
-def test_ik_finds_the_home_tcp_again(station):
-    spec = station.spec()
-    kin = RobotKinematics(spec)
-    target = kin.tcp(spec.home)[:3, 3]
-    seed = dict(spec.home, shoulder_pan=20.0, elbow_flex=30.0)
-    sol = kin.ik(target, seed=seed)
-    assert sol.ok and sol.pos_err < 1e-3
-    assert kin.tcp(sol.joints)[:3, 3] == pytest.approx(target, abs=1e-3)
-
-
-def test_the_robot_description_comes_from_soarm(robot_yaml):
-    spec = load_robot()
-    assert spec.root == soarm.ROBOT_DIR.resolve()
-    assert spec.joints == tuple(robot_yaml["joints"])
-    assert spec.limits["wrist_roll"] == tuple(robot_yaml["limits"]["wrist_roll"])
-    assert spec.desk.cube_radius == tuple(robot_yaml["desk"]["cube_radius"])
-    assert spec.jaw_bodies == tuple(robot_yaml["jaw_bodies"])
-
-
-# --------------------------------------------------------------------------- renders
-
-
-@pytest.mark.render
-def test_the_environment_renders_from_the_station_camera(station):
-    from soarm_lab.rl.env import ArmEnv
-
-    env = ArmEnv("lift", station=station, render_mode="rgb_array")
-    try:
-        env.reset(seed=0)
-        frame = env.render()
-    finally:
-        env.close()
-    assert env.render_camera == "sym-lewa"
-    assert frame.shape == (480, 640, 3) and frame.std() > 0
-
-
-@pytest.mark.render
-def test_a_station_without_cameras_gets_the_preview_camera(tmp_path, station):
-    """`env.scene_config(view=True)`: the preview camera `widok` when the station has none."""
-    from soarm_lab.rl.env import VIEW, ArmEnv
-
-    folder = tmp_path / "blind"
-    folder.mkdir()
-    xml = station.scene_path.read_text(encoding="utf-8").splitlines(keepends=True)
-    (folder / "scene.xml").write_text("".join(line for line in xml if '<camera name="sym-' not in line),
-                                      encoding="utf-8")
-    (folder / "station.json").write_text(json.dumps({**station.data, "cameras": []}), encoding="utf-8")
-
-    env = ArmEnv("reach", station=Station.load(folder), render_mode="rgb_array")
-    try:
-        env.reset(seed=0)
-        frame = env.render()
-    finally:
-        env.close()
-    assert env.render_camera == VIEW
-    assert frame.shape == (360, 480, 3) and frame.std() > 0

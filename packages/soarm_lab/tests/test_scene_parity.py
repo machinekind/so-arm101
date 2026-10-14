@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import pytest
 
+pytestmark = pytest.mark.twin
 pytest.importorskip("mujoco")
+pytest.importorskip("lerobot_mp")
 
 from lerobot_mp.twin import scene as twin_scene  # noqa: E402
 from lerobot_mp.twin.workspace import Workspace  # noqa: E402

@@ -17,7 +17,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+pytestmark = [pytest.mark.twin, pytest.mark.render]
 mujoco = pytest.importorskip("mujoco")
+pytest.importorskip("lerobot_mp")
 
 from lerobot_mp.twin import scene as sc  # noqa: E402
 from lerobot_mp.twin.clock import VirtualClock  # noqa: E402
@@ -41,7 +43,6 @@ def look(eye, target):
     return pose(np.column_stack([x, np.cross(z, x), z]), eye)
 
 
-@pytest.mark.render
 def test_lift_policy_lifts_a_cube_seen_only_by_cameras(twin_robots):
     ws = Workspace()
     K = [[560.0, 0, 322.0], [0, 560.0, 236.0], [0, 0, 1]]

@@ -1,6 +1,6 @@
 """The `soarm-lab` command: policies and evaluation on CPU, without torch.
 
-Training needs a GPU (test_lab_batch.py). Converting a torch checkpoint: test_lab_policy_format.py.
+Training needs a GPU (rl/test_batch.py). Converting a torch checkpoint: rl/test_policy_format.py.
 """
 
 from __future__ import annotations

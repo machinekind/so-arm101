@@ -2,7 +2,7 @@
 
 Claiming the arm, STOP and Home belong to the twin's `StrategyRunner`. The strategy's guards are tested
 here without the twin: `RunInfo` and `Observation` are plain objects with the attributes the twin gives
-them. `twin/test_strategy.py` runs the same strategy through the twin's runner, including the race
+them. test_policy_in_twin.py runs the same strategy through the twin's runner, including the race
 between a claim and the clutch.
 """
 

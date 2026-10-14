@@ -11,21 +11,47 @@ The twin and `soarm_lab` meet only through data and entry points:
 - the twin exports the measured station as a folder (`lerobot-twin export`): `scene.xml`, `assets/`, `station.json`;
 - the twin finds the lab's strategy under the `lerobot_mp.strategies` entry point and runs it through its `StrategyRunner`.
 
-The twin is a dev dependency. The tests in `tests/twin/` run both packages through its loaders, contracts
-and runner, and skip when it is not installed. No other test imports it.
-`tests/test_dependency_rule.py` checks every import in both packages' source, also one under `TYPE_CHECKING`.
-It also imports every lab module in a fresh interpreter and checks that no `lerobot_mp` module got loaded,
-and it checks that no test outside `tests/twin/` imports `lerobot_mp`.
+The twin is a dev dependency. Tests that run a package through its loaders, contracts and runner are
+marked `twin` and skip when it is not installed.
+Each package's `tests/test_dependency_rule.py` checks every import in the package's source, also one under
+`TYPE_CHECKING`. It checks that every test module that imports `lerobot_mp` is marked `twin`.
+It also collects the package's tests with `-m "not twin"` where `lerobot_mp` cannot be imported.
+The lab's test also imports every lab module in a fresh interpreter and checks that no `lerobot_mp` module
+got loaded.
 
 Running a policy needs no torch.
 The strategy, the policy file, evaluation and the `soarm-lab` commands other than `train` and `convert`
 import numpy, never torch.
 torch is the optional extra `soarm-lab[torch]` for the legacy torch trainer and `soarm-lab convert`.
-`tests/test_dependency_rule.py` runs the bundled policies in a fresh interpreter and checks that no torch
-module got loaded, also with torch made unimportable.
+`packages/soarm_lab/tests/test_dependency_rule.py` runs the bundled policies in a fresh interpreter and
+checks that no torch module got loaded, also with torch made unimportable.
 
 The twin holds no robot and no training. It keeps the scene, cameras, calibration, perception primitives,
 runtime, safety, sysid and the contracts `Observation`, `Strategy`, `StrategyRunner` and `EpisodeLog`.
+
+## Tests
+
+Each package keeps its tests next to its source, in `packages/soarm/tests/` and `packages/soarm_lab/tests/`.
+A test file mirrors the module it tests. `soarm_lab/rl/env.py` is tested in `tests/rl/test_env.py`.
+A test that runs a module through the twin's own code may get a file of its own next to the module's test file.
+`tests/strategies/test_policy_in_twin.py` sits next to `tests/strategies/test_policy.py`.
+
+A test module that imports the twin declares `pytestmark = pytest.mark.twin`.
+It calls `pytest.importorskip("lerobot_mp")` before its twin imports, so it skips without the twin.
+The root `conftest.py` skips every test marked `twin` when the twin is not installed.
+It also skips tests marked `render` where MuJoCo cannot open an OpenGL context.
+
+```
+uv run pytest -q                       # both packages
+uv run pytest -q -m "not twin"         # without the twin
+uv run pytest -q packages/soarm_lab    # one package
+```
+
+Fixtures shared by a package's tests live in its `tests/conftest.py`.
+pytest imports test modules with `--import-mode=importlib`, so both packages can have test files of the same name.
+A test module cannot import another test module.
+A helper that several test modules use is a module of its own on pytest's `pythonpath` (`pyproject.toml`).
+`packages/soarm/tests/fake_bus.py` is one.
 
 ## Units
 

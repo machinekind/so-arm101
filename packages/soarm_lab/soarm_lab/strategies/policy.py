@@ -16,10 +16,9 @@ an object with the attributes of the twin's `Action`.
 The policy runs in numpy (`rl.policy.Policy`); the strategy needs no torch.
 
 The loop does exactly what the training environment does - the observation from `task.observe`, the
-action through `task.apply_action` - only the angles come from the servos, not from physics. It is the
-twin's former `rl/runner.py` (`PolicyRunner`) with the twin's side taken out: claiming the arm, the
-thread, STOP and Home now belong to the `StrategyRunner`. The guards the training environment does not
-have and a real arm needs stay here:
+action through `task.apply_action` - only the angles come from the servos, not from physics. Claiming the
+arm, the thread, STOP and Home belong to the twin's `StrategyRunner`. The strategy adds the guards a real
+arm needs and the training environment does not have:
 
 * **stop on lag**: when the measured pose falls behind the target by more than `max_tracking_deg`
   (a blocked joint, a collision, a servo that cannot keep up) the run ends and the arm holds where it

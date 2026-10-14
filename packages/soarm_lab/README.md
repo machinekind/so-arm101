@@ -160,4 +160,4 @@ The twin's Strategies tab passes neither a goal nor objects today.
 Reach then drives to the goal in the settings.
 Lift and pickplace wait `wait_for_cube_s` for a cube and then end the run.
 They need a runner that passes `objects`, e.g. the twin's cube tracker as an `ObjectPose` with its source.
-`tests/twin/test_lift_from_cameras.py` builds one.
+`tests/strategies/test_lift_from_cameras.py` builds one.

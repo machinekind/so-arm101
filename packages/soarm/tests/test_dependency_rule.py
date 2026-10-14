@@ -1,0 +1,83 @@
+"""`soarm` imports neither the twin (`lerobot_mp`) nor `soarm_lab`. A test that imports the twin is marked
+`twin`; the others run without it."""
+
+from __future__ import annotations
+
+import ast
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+import soarm
+
+#: Top-level modules soarm's source may not import.
+FORBIDDEN = ("lerobot_mp", "soarm_lab")
+ROOT = Path(soarm.__file__).parent
+TESTS = Path(__file__).parent
+
+
+def imports(path: Path) -> tuple[set[str], list[int]]:
+    """Absolute modules imported by `path` and the levels of its relative imports.
+
+    Every import counts, also one under `if TYPE_CHECKING:` or inside a function.
+    """
+    modules, levels = set(), []
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level == 0 and node.module:
+                modules.add(node.module)
+            elif node.level:
+                levels.append(node.level)
+    return modules, levels
+
+
+@pytest.mark.parametrize("path", sorted(ROOT.rglob("*.py")), ids=lambda p: p.relative_to(ROOT).as_posix())
+def test_no_forbidden_imports(path: Path) -> None:
+    modules, levels = imports(path)
+    assert {m for m in modules if m.split(".")[0] in FORBIDDEN} == set()
+    # A relative import may not reach above its own package (`from ..base import ...`: the twin's layout).
+    assert all(level <= len(path.relative_to(ROOT).parts) for level in levels)
+
+
+def twin_imports(path: Path) -> list[str]:
+    """The `lerobot_mp` modules `path` imports, by an import statement or `pytest.importorskip`."""
+    modules = imports(path)[0]
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if (isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "importorskip"
+                and node.args and isinstance(node.args[0], ast.Constant)):
+            modules.add(str(node.args[0].value))
+    return sorted(m for m in modules if m.split(".")[0] == "lerobot_mp")
+
+
+def marked_twin(path: Path) -> bool:
+    """The module's `pytestmark` holds `pytest.mark.twin`."""
+    for node in ast.parse(path.read_text(encoding="utf-8")).body:
+        if isinstance(node, ast.Assign) and any(getattr(t, "id", None) == "pytestmark" for t in node.targets):
+            marks = ast.walk(node.value)
+            return any(isinstance(mark, ast.Attribute) and mark.attr == "twin" for mark in marks)
+    return False
+
+
+def test_a_test_that_imports_the_twin_is_marked_twin() -> None:
+    found = {path: twin_imports(path) for path in sorted(TESTS.rglob("test_*.py"))}
+    assert any(found.values())                                # the check sees the twin's imports
+    unmarked = [path.relative_to(TESTS).as_posix() for path, modules in found.items()
+                if modules and not marked_twin(path)]
+    assert unmarked == []
+
+
+#: pytest in a fresh interpreter where `import lerobot_mp` fails as if the twin were not installed.
+WITHOUT_TWIN = ("import sys; sys.modules['lerobot_mp'] = None\n"
+                "import pytest; sys.exit(pytest.main(sys.argv[1:]))")
+
+
+def test_the_tests_not_marked_twin_collect_without_the_twin(pytestconfig: pytest.Config) -> None:
+    """`pytest -m "not twin"` where the twin cannot be imported: no test module fails to import."""
+    args = ["--collect-only", "-q", "-p", "no:cacheprovider", "-m", "not twin", str(TESTS)]
+    out = subprocess.run([sys.executable, "-c", WITHOUT_TWIN, *args], capture_output=True, text=True,
+                         cwd=pytestconfig.rootpath)
+    assert out.returncode == 0, out.stdout + out.stderr
