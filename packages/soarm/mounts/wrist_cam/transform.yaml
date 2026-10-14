@@ -1,7 +1,0 @@
-# Wrist camera on the gripper body. Values from robot/so101/so101.xml, camera `wrist_cam`
-# (pos 0 0.055 -0.045, euler -0.57 0 0 rad, inside body `camera_mount` at the origin of `gripper`).
-parent: gripper
-child: wrist_cam
-pos: [0.0, 0.055, -0.045]
-quat: [0.959662, -0.281157, 0.0, 0.0]
-cad: robot/so101/assets/wrist_roll_follower_so101_camera_mount.stl

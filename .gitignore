@@ -13,7 +13,8 @@ htmlcov/
 # uv
 .venv/
 
-# Model weights stay on Hugging Face
+# Model weights stay on Hugging Face. soarm-lab's base policies (policy.npz, ~0.9 MB each) are the
+# exception; policies trained here go to workspace/.
 *.pt
 *.pth
 *.safetensors
@@ -23,8 +24,8 @@ htmlcov/
 datasets/
 **/datasets/
 
-# Raw sysid recordings of each physical arm
-packages/soarm/arms/*/sysid/raw/
+# Station data: trained policies (soarm-lab train)
+workspace/
 
 # Local configuration
 configs/local.yaml

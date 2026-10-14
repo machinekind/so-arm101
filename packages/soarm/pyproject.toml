@@ -5,39 +5,28 @@ build-backend = "hatchling.build"
 [project]
 name = "soarm"
 version = "0.1.0"
-description = "SO-101 robot: robot folders, robot.yaml loader and Feetech hardware backends"
+description = "SO-101 robot: its robot folder and the Feetech backend plugins for the digital twin"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
-dependencies = [
-    "numpy>=1.24",
-    "PyYAML>=6.0",
-]
+# The twin's plugin contracts (numpy only); never the twin itself.
+dependencies = ["lerobot-mp-api>=0.1,<0.2"]
 
 [project.optional-dependencies]
+# Servos driven directly, without LeRobot and torch; also the COM <-> TCP bridge.
 feetech = ["pyserial>=3.5"]
+# Backend `lerobot` (LeRobot 0.6 needs Python 3.12).
 lerobot = ["lerobot[feetech]>=0.6,<0.7; python_version>='3.12'"]
-dev = ["pytest", "ruff"]
-
-[project.scripts]
-soarm = "soarm.cli:main"
 
 [project.entry-points."lerobot_mp.robots"]
-so101 = "soarm.spec:so101"
+so101 = "soarm:ROBOT_DIR"
 
 [project.entry-points."lerobot_mp.backends"]
-feetech = "soarm.feetech:FeetechArm"
-bridge = "soarm.bridge:BridgeArm"
-lerobot = "soarm.lerobot:LeRobotArm"
+feetech = "soarm.feetech:create"
+lerobot = "soarm.lerobot_backend:create"
+
+[project.scripts]
+soarm-bridge = "soarm.serial_bridge:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["soarm"]
-
-[tool.hatch.build.targets.wheel.force-include]
-"robot" = "soarm/robot"
-"end_effectors" = "soarm/end_effectors"
-"mounts" = "soarm/mounts"
-"embodiment" = "soarm/embodiment"
-
-[tool.hatch.build.targets.sdist]
-include = ["soarm", "robot", "end_effectors", "mounts", "embodiment", "arms", "README.md"]

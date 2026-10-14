@@ -1,10 +1,13 @@
-"""soarm: the SO-101 robot. Robot folders, the robot.yaml loader and hardware backends.
+"""SO-101: the robot folder and its two hardware backends, `feetech` and `lerobot`, plus the COM<->TCP bridge.
 
-The twin (`lerobot_mp`) loads this package as a plugin through entry points.
-This package imports neither the twin nor `soarm_lab`.
+`pyproject.toml` registers both halves with the digital twin (`lerobot_mp`):
+
+* `lerobot_mp.robots`: `so101 = "soarm:ROBOT_DIR"`, the folder with `robot.yaml` and the model;
+* `lerobot_mp.backends`: `feetech` and `lerobot`, the backend factories (`create`).
+
+Nothing here imports the twin. The backends follow its plugin contracts, `lerobot_mp_api.backend`.
 """
 
-from .spec import RobotSpec, SpecError, data_dir, load, robot_dir, so101
+from pathlib import Path
 
-__all__ = ["RobotSpec", "SpecError", "data_dir", "load", "robot_dir", "so101"]
-__version__ = "0.1.0"
+ROBOT_DIR = Path(__file__).parent / "robot"

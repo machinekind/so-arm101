@@ -5,21 +5,37 @@ build-backend = "hatchling.build"
 [project]
 name = "soarm-lab"
 version = "0.1.0"
-description = "Everything learned or measured for the SO-101 demo: rig, perception, training, evaluation"
+description = "SO-101 training: RL tasks, CPU and GPU environments, PPO and the policies, on a station exported by the digital twin"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
-dependencies = ["soarm"]
+# Running a policy (the strategy, evaluation, the CPU environments) needs numpy only, no torch.
+dependencies = [
+    "soarm",
+    # The twin's plugin contracts (numpy only); never the twin itself.
+    "lerobot-mp-api>=0.1,<0.2",
+    "numpy>=1.24",
+    "PyYAML>=6.0",
+    "mujoco>=3.14,<3.15",
+    "gymnasium>=1.0",
+]
 
 [project.optional-dependencies]
-twin = ["lerobot-mp @ git+https://github.com/machinekind/digital_twin_training.git@main"]
-train = ["torch>=2.7,<2.12", "mujoco>=3.14,<3.15", "mujoco-warp>=3.14,<3.15"]
+# GPU training: thousands of MuJoCo Warp worlds, trained in JAX. mujoco and mujoco-warp must have the
+# same version. The JAX trainer is not written yet: today's trainer is the torch one (the torch extra).
+train = ["mujoco-warp>=3.14,<3.15", "jax>=0.4"]
+# Legacy: the torch PPO trainer (rl/ppo.py, rl/batch.py; GPU training needs a CUDA build) and
+# `soarm-lab convert`, which turns a torch checkpoint (policy.pt) into policy.npz.
+torch = ["torch>=2.7,<2.12"]
+
+[project.entry-points."lerobot_mp.strategies"]
+policy = "soarm_lab.strategies.policy:PolicyStrategy"
+
+[project.scripts]
+soarm-lab = "soarm_lab.cli:main"
 
 [tool.uv.sources]
 soarm = { workspace = true }
-
-[tool.hatch.metadata]
-allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["soarm_lab"]

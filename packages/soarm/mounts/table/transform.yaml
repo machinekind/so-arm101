@@ -1,7 +1,0 @@
-# Arm base standing on the table top.
-# The base frame origin sits on the table surface (table at z = 0 in the base frame, as in the twin).
-parent: table
-child: base
-pos: [0.0, 0.0, 0.0]
-quat: [1.0, 0.0, 0.0, 0.0]
-cad: TODO
