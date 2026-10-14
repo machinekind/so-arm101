@@ -146,7 +146,7 @@ policy:
 
 The twin's `StrategyRunner` claims the arm and calls the strategy at the policy's rate (20 Hz).
 Every target goes through the twin's safety supervisor, in simulation and on hardware.
-The strategy follows `lerobot_mp_api.Strategy`. It takes a `RunInfo` and an `Observation` and returns an `Action`.
+The strategy subclasses `lerobot_mp_api.Strategy`. It takes a `RunInfo` and an `Observation` and returns an `Action`.
 It reads these fields of the observation:
 
 - `obs.joints`: measured joints;

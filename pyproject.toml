@@ -6,8 +6,8 @@ soarm = { workspace = true }
 soarm-lab = { workspace = true }
 # The plugin contracts (`lerobot_mp_api`) are not on PyPI: packages/lerobot_mp_api in the twin's repository.
 # The twin comes from the same commit, because it depends on that package too.
-lerobot-mp-api = { git = "https://github.com/machinekind/digital_twin_training.git", subdirectory = "packages/lerobot_mp_api", rev = "11de24d3141ca9ce573a8c4f2c6951a154e9b6e6" }
-lerobot-mp = { git = "https://github.com/machinekind/digital_twin_training.git", rev = "11de24d3141ca9ce573a8c4f2c6951a154e9b6e6" }
+lerobot-mp-api = { git = "https://github.com/machinekind/digital_twin_training.git", subdirectory = "packages/lerobot_mp_api", rev = "40ee4527f9b19a43a5a139c091ecf854b5c6db1f" }
+lerobot-mp = { git = "https://github.com/machinekind/digital_twin_training.git", rev = "40ee4527f9b19a43a5a139c091ecf854b5c6db1f" }
 
 [dependency-groups]
 dev = [
@@ -19,7 +19,12 @@ dev = [
     "lerobot-mp",
     "pytest>=8",
     "ruff>=0.6",
+    "pyright>=1.1",
 ]
+
+# The type checker runs on what implements the twin's contracts; the rest is not typed yet.
+[tool.pyright]
+include = ["packages/soarm_lab/soarm_lab/strategies"]
 
 [tool.pytest.ini_options]
 testpaths = ["packages/soarm/tests", "packages/soarm_lab/tests"]

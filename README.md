@@ -111,7 +111,7 @@ It lives in the twin's repository under `packages/lerobot_mp_api`.
 pip ignores that table. Outside the workspace, install the contracts from git first:
 
 ```
-pip install "lerobot-mp-api @ git+https://github.com/machinekind/digital_twin_training.git@11de24d3141ca9ce573a8c4f2c6951a154e9b6e6#subdirectory=packages/lerobot_mp_api"
+pip install "lerobot-mp-api @ git+https://github.com/machinekind/digital_twin_training.git@40ee4527f9b19a43a5a139c091ecf854b5c6db1f#subdirectory=packages/lerobot_mp_api"
 ```
 
 GPU training needs MuJoCo Warp.
@@ -144,6 +144,7 @@ uv run pytest -q                       # both packages
 uv run pytest -q -m "not twin"         # without the twin
 uv run pytest -q packages/soarm_lab    # one package
 uv run ruff check .
+uv run pyright                         # the strategies, against the twin's contracts
 ```
 
 Each package keeps its tests in its own `tests/` folder.
