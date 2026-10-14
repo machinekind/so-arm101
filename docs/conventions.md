@@ -89,9 +89,7 @@ Names are identical in `robot.yaml`, the MJCF, LeRobot and the twin.
 ## Contracts
 
 The twin owns the contracts these packages follow.
-The plugin contracts are the package `lerobot-mp-api`, in the twin's repository under `packages/lerobot_mp_api`.
-It is not published yet. `[tool.uv.sources]` in the root `pyproject.toml` installs it from that folder at a
-pinned commit of the twin, and the twin from the same commit.
+The plugin contracts are the package `lerobot-mp-api` (see the root README for how it installs).
 
 - The `robot.yaml` schema is `RobotSpec` in `lerobot_mp.twin.robots`. `load_robot(folder)` checks a folder strictly.
 - The backend contract is `lerobot_mp_api.backend`: `BackendContext`, `BackendPlugin`, `RobotBackend` and `RobotInfo`.

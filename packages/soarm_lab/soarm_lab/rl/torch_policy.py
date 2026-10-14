@@ -140,7 +140,7 @@ def convert(path: str | Path, out: str | Path | None = None) -> Path:
     """A torch checkpoint (`policy.pt` or its folder) as `policy.npz` and `meta.json`.
 
     `out` is the `policy.npz` to write, by default next to the checkpoint; `meta.json` goes next to it,
-    from the checkpoint's own meta (the one `Policy.load` used to read). Returns the `policy.npz`.
+    from the checkpoint's own meta. Returns the `policy.npz`.
     """
     path = Path(path)
     if path.is_dir():

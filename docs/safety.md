@@ -6,7 +6,7 @@ An SO-101 is small, but it moves fast and its jaw pinches. These rules apply to 
 
 1. Every autonomous motion goes through the twin's `SafetySupervisor`. It enforces position limits, speed limits and STOP.
    Backends in `soarm` move servos only when the twin tells them to.
-2. The servo tools that come later read only. The one exception is a command that releases torque.
+2. Servo tools are read-only. The one exception is a command that releases torque.
 3. Know your stop before you power the arm. The fastest stop is the motor power plug.
 4. Support the arm before torque goes off. A limp arm drops under its own weight.
    For that reason `torque_off_on_exit` is `false` by default.

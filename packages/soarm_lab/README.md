@@ -24,9 +24,6 @@ The legacy trainer needs both extras and a CUDA build of torch: `pip install "so
 The torch extra stays until the PPO trainer is rewritten in JAX. It may also be needed on Windows.
 A command that needs torch without it fails with "install soarm-lab[torch]".
 
-`lerobot-mp-api` is not published yet. In this workspace uv installs it from the twin's repository,
-`packages/lerobot_mp_api`. The root README has the pip command.
-
 ## Contents
 
 | Path | Holds |

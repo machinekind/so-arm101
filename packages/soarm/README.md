@@ -38,7 +38,6 @@ soarm-bridge = "soarm.serial_bridge:main"
 ## Dependencies
 
 `lerobot-mp-api>=0.1,<0.2` is the only base dependency. It needs only numpy.
-It is not published yet. In this workspace uv installs it from the twin's repository, `packages/lerobot_mp_api`.
 
 ## Extras
 
