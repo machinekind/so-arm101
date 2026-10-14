@@ -1,10 +1,9 @@
 """The SO-101 description as the lab reads it: `robot.yaml` of `soarm.ROBOT_DIR` as a dataclass.
 
-The schema belongs to the twin (`RobotSpec` in `lerobot_mp.twin.robots`), which checks a robot folder
-strictly. The lab reads only the fields its kinematics, tasks and strategy use, with the twin's field
-names, types and defaults. Keys it does not use (panel labels, connections, staged home, onboard
-cameras) are skipped, so a new field in `robot.yaml` does not break the lab. The fields it reads are
-built strictly by `soarm.settings.from_mapping`.
+`robot.yaml` follows the twin's robot schema. The lab reads only the fields its kinematics, tasks and
+strategy use, with the schema's names, types and defaults. Keys it does not use (panel labels,
+connections, staged home, onboard cameras) are skipped, so a new field in `robot.yaml` does not break
+the lab. The fields it reads are built strictly by `soarm.settings.from_mapping`.
 
 App units are LeRobot's: joints in degrees, the gripper 0..100. `kinematics.RobotKinematics` maps
 the gripper linearly onto `RobotSpec.gripper_range_q` (closed, open) in MJCF units.
@@ -61,7 +60,7 @@ class Desk:
 
 @dataclass(frozen=True)
 class RobotSpec:
-    """The part of the robot description the lab uses. Field meanings as in the twin's `RobotSpec`."""
+    """The part of the robot description the lab uses."""
 
     name: str
     title: str
@@ -116,7 +115,7 @@ def load_robot(folder: str | Path = ROBOT_DIR) -> RobotSpec:
     """The description in `folder/robot.yaml` (default: the SO-101 of `soarm`).
 
     Keys the lab does not use are skipped; the ones it uses are built strictly. A joint named in
-    `limits`, `home` or `roll_joint` but missing from `joints` is an error, as in the twin.
+    `limits`, `home` or `roll_joint` but missing from `joints` is an error.
     """
     folder = Path(folder).resolve()
     path = folder / ROBOT_FILE

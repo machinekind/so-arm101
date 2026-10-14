@@ -182,38 +182,14 @@ def test_the_robot_description_comes_from_soarm(robot_yaml):
     assert spec.jaw_bodies == tuple(robot_yaml["jaw_bodies"])
 
 
-# --------------------------------------------------------------------------- the twin's own scene
-
-
-def test_the_scene_matches_the_one_the_twin_builds(station, twin_robots):
-    """The lab's scene from the export is the twin's scene from the same station, up to XML rounding."""
-    from lerobot_mp.twin import scene as twin_scene
-    from lerobot_mp.twin.workspace import Workspace
-
-    ws = Workspace.load(station.folder / "station.json")
-    cube = twin_scene.Box("cube", CUBE.size, CUBE.xy, mass=CUBE.mass)
-    twin_model = twin_scene.build(ws.scene_config(objects=[cube], grasp_sensors=["cube"])).model
-    lab_model = station.build(objects=[CUBE], grasp_sensors=["cube"])
-
-    for size in ("nq", "nv", "nu", "nbody", "ngeom", "nsensor", "ncam", "nmesh", "nlight", "nmeshvert"):
-        assert getattr(lab_model, size) == getattr(twin_model, size), size
-    for name in ("body_pos", "body_quat", "body_mass", "body_inertia", "geom_size", "geom_pos", "geom_quat",
-                 "geom_friction", "jnt_range", "dof_damping", "dof_armature", "dof_frictionloss",
-                 "actuator_gainprm", "actuator_biasprm", "actuator_ctrlrange", "cam_pos", "cam_quat",
-                 "cam_intrinsic", "qpos0"):
-        assert getattr(lab_model, name) == pytest.approx(getattr(twin_model, name), abs=1e-5), name
-    for option in ("timestep", "integrator", "cone", "impratio", "iterations", "ls_iterations"):
-        assert getattr(lab_model.opt, option) == getattr(twin_model.opt, option), option
-
-
 # --------------------------------------------------------------------------- renders
 
 
 @pytest.mark.render
 def test_the_environment_renders_from_the_station_camera(station):
-    from soarm_lab.rl.env import TwinEnv
+    from soarm_lab.rl.env import ArmEnv
 
-    env = TwinEnv("lift", station=station, render_mode="rgb_array")
+    env = ArmEnv("lift", station=station, render_mode="rgb_array")
     try:
         env.reset(seed=0)
         frame = env.render()
@@ -225,8 +201,8 @@ def test_the_environment_renders_from_the_station_camera(station):
 
 @pytest.mark.render
 def test_a_station_without_cameras_gets_the_preview_camera(tmp_path, station):
-    """`env.scene_config(view=True)`: the twin's `widok` camera when the station has none."""
-    from soarm_lab.rl.env import VIEW, TwinEnv
+    """`env.scene_config(view=True)`: the preview camera `widok` when the station has none."""
+    from soarm_lab.rl.env import VIEW, ArmEnv
 
     folder = tmp_path / "blind"
     folder.mkdir()
@@ -235,7 +211,7 @@ def test_a_station_without_cameras_gets_the_preview_camera(tmp_path, station):
                                       encoding="utf-8")
     (folder / "station.json").write_text(json.dumps({**station.data, "cameras": []}), encoding="utf-8")
 
-    env = TwinEnv("reach", station=Station.load(folder), render_mode="rgb_array")
+    env = ArmEnv("reach", station=Station.load(folder), render_mode="rgb_array")
     try:
         env.reset(seed=0)
         frame = env.render()

@@ -1,8 +1,7 @@
 """The compiled station scene the lab trains and evaluates in: model, state, the arm's kinematics, renders.
 
-The lab's counterpart of the twin's `scene.Scene`, with only what the environments, the GPU batch and
-the evaluation use. The scene comes from an exported station (`station.Station`) plus the task's
-objects; `SceneConfig` says which.
+It holds what the environments, the GPU batch and the evaluation use. The scene comes from an exported
+station (`station.Station`) plus the task's objects; `SceneConfig` says which.
 
     cube = Box("cube", (0.015, 0.015, 0.015), (0.2, 0.0))
     cfg = SceneConfig(Station.load("sim"), objects=[cube], grasp_sensors=["cube"])

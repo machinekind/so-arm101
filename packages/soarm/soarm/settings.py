@@ -1,7 +1,8 @@
 """Strict dataclass builder for the backends' config sections (`feetech:`, `lerobot:`).
 
-A copy of `from_mapping` and `_coerce` from the twin's `lerobot_mp.twin.config`, so the backends build
-their settings exactly as before without importing the twin.
+`from_mapping(cls, data)` builds the settings dataclass `cls` from a mapping, such as a section of the
+twin's config file. Unknown keys and missing required keys fail; the other fields take their defaults.
+Values are cast to the field types: tuples, dicts, nested dataclasses and paths.
 """
 
 from __future__ import annotations

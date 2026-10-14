@@ -1,4 +1,4 @@
-"""Kinematyka ramienia liczona przez MuJoCo na opisie z `robot` (przeniesiona z `lerobot_mp.twin.kinematics`).
+"""Kinematyka ramienia liczona przez MuJoCo na opisie z `robot`.
 
 Nie ma tu wlasnego lancucha kinematycznego do utrzymywania: kinematyka prosta
 to `mj_kinematics` na tym samym MJCF, ktory symuluje i rysuje scene, wiec

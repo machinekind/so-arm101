@@ -8,31 +8,10 @@ import yaml
 import soarm
 
 
-@pytest.fixture(autouse=True)
-def _no_config_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The tests count on defaults: a file named by LEROBOT_MP_CONFIG in the shell would change them."""
-    monkeypatch.delenv("LEROBOT_MP_CONFIG", raising=False)
-
-
 @pytest.fixture(scope="session")
 def robot_yaml() -> dict:
     """`robot.yaml` of the SO-101 as plain data."""
     return yaml.safe_load((soarm.ROBOT_DIR / "robot.yaml").read_text(encoding="utf-8"))
-
-
-@pytest.fixture
-def twin_robots(monkeypatch: pytest.MonkeyPatch):
-    """The twin's robot discovery with `so101` taken from `soarm` only.
-
-    The twin's `main` still registers its own copy of the SO-101 under the same name, so with both
-    installed its discovery raises on the duplicate (see test_twin_contract). Tests that build a twin
-    (`Workspace`, `Twin`) pin discovery to this repository's robot folder instead.
-    """
-    robots = pytest.importorskip("lerobot_mp.twin.robots")
-    monkeypatch.setattr(robots, "robot_folders", lambda: {"so101": soarm.ROBOT_DIR.resolve()})
-    robots.get_spec.cache_clear()
-    yield robots
-    robots.get_spec.cache_clear()
 
 
 @functools.lru_cache(maxsize=1)

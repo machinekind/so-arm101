@@ -10,7 +10,7 @@ czyli z konwencji **nowej kalibracji LeRobota**: zero kazdego stawu w srodku
 zakresu. To ta sama konwencja, w ktorej pracuje backend `feetech` i podglad 3D
 aplikacji, wiec katy z prawdziwego ramienia ida do modelu bez przesuniec -
 tylko stopnie na radiany, a chwytak z 0..100 na kat szczeki. Zgodnosc
-sprawdza `tests/test_twin_robots.py` wzgledem niezaleznej kinematyki z Articulusa.
+sprawdza w blizniaku `tests/test_twin_robots.py` wzgledem niezaleznej kinematyki z Articulusa.
 
 Co menagerie dodalo wzgledem oryginalu: proste ksztalty kolizyjne chwytaka
 i ramienia, parametry solvera dobrane pod manipulacje, uchwyt kamery

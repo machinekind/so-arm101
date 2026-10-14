@@ -1,6 +1,6 @@
 """Uczenie ze wzmocnieniem SO-101: zadania, srodowiska CPU i GPU, PPO, polityki.
 
-Przeniesione z blizniaka (`lerobot_mp.twin.rl`, bez `sysid`, ktore zostaje przy nim).
+Identyfikacja dynamiki serw zostaje w blizniaku; jej wynik przychodzi w `station.json`.
 Import rejestruje srodowiska Gymnasium:
 
     SoArmLab/Reach-v0       dojazd TCP do punktu (cel losowany z osiagalnych)
@@ -15,4 +15,4 @@ import gymnasium as gym
 for _id, _task in (("SoArmLab/Reach-v0", "reach"), ("SoArmLab/Lift-v0", "lift"),
                    ("SoArmLab/PickPlace-v0", "pickplace")):
     if _id not in gym.registry:
-        gym.register(id=_id, entry_point="soarm_lab.rl.env:TwinEnv", kwargs={"task": _task})
+        gym.register(id=_id, entry_point="soarm_lab.rl.env:ArmEnv", kwargs={"task": _task})

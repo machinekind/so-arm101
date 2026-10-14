@@ -1,4 +1,4 @@
-"""Srodowiska RL laboratorium: zgodnosc numpy/torch (z testow blizniaka, `tests/test_twin_rl.py`)."""
+"""Srodowiska RL laboratorium: zgodnosc numpy/torch."""
 
 from __future__ import annotations
 
@@ -10,14 +10,14 @@ gym = pytest.importorskip("gymnasium")
 torch = pytest.importorskip("torch")
 
 from soarm_lab.rl import task as tk  # noqa: E402
-from soarm_lab.rl.env import TwinEnv  # noqa: E402
+from soarm_lab.rl.env import ArmEnv  # noqa: E402
 from soarm_lab.rl.randomize import Randomization  # noqa: E402
 
 
 def test_observation_and_reward_are_the_same_in_numpy_and_torch():
     """Jedna definicja zadania dla CPU, GPU i ramienia - wzory nie moga sie rozjechac."""
     task = tk.make_task("pickplace")
-    env = TwinEnv(task, randomization=Randomization.none())
+    env = ArmEnv(task, randomization=Randomization.none())
     lim = env.limits
     env.close()
     rng = np.random.default_rng(0)
@@ -64,14 +64,14 @@ def test_observation_and_reward_are_the_same_in_numpy_and_torch():
 
 
 def test_gymnasium_ids_of_the_lab():
-    """Identyfikatory laboratorium nie kolizuja z blizniakiem (`LeRobotMP/Twin*-v0`), gdy oba sa zaladowane."""
+    """Import rejestruje srodowiska laboratorium pod `SoArmLab/*-v0`."""
     import soarm_lab.rl  # noqa: F401
 
     env = gym.make("SoArmLab/Reach-v0")
     try:
         obs, info = env.reset(seed=0)
         assert obs.shape == (tk.OBS_DIMS["reach"],)
-        assert type(env.unwrapped) is TwinEnv
+        assert type(env.unwrapped) is ArmEnv
     finally:
         env.close()
     assert {"SoArmLab/Lift-v0", "SoArmLab/PickPlace-v0"} <= set(gym.registry)

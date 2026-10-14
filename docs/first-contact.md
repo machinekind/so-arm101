@@ -2,8 +2,7 @@
 
 How to plug in an SO-101 for the first time, safely. Read [safety.md](safety.md) first.
 
-This repository has no servo tools yet. They come with a later ticket.
-Until then, the read-only leader reader in galaxeo-manipulators (`so101_feetech.py`) reads the servos without torque.
+The read-only leader reader in galaxeo-manipulators (`so101_feetech.py`) reads the servos without torque.
 The twin's `lerobot-twin ui` drives the arm through this package's `feetech` backend.
 
 ## 1. Before power

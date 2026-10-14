@@ -4,8 +4,8 @@ Everything goes through the twin's own code: discovery and strict settings (`ler
 the run (`StrategyRunner`), the safety supervisor and the twin's physics (`Twin`, simulated, its loop
 without a thread on a virtual clock). The strategy package itself imports nothing from the twin.
 
-The twin's robot discovery is pinned to `soarm`'s folder (fixture `twin_robots`): the twin's `main`
-still registers its own copy of the SO-101 under the same name.
+The twin's robot discovery is pinned to `soarm`'s folder (fixture `twin_robots`): the twin registers an
+SO-101 of its own under the same name.
 """
 
 from __future__ import annotations
@@ -14,7 +14,6 @@ import numpy as np
 import pytest
 
 pytest.importorskip("mujoco")
-pytest.importorskip("lerobot_mp")
 
 from lerobot_mp.twin import scene as twin_scene  # noqa: E402
 from lerobot_mp.twin.clock import VirtualClock  # noqa: E402
@@ -25,10 +24,10 @@ from lerobot_mp.twin.strategy import ObjectPose, Observation, RunInfo, StrategyR
 from lerobot_mp.twin.workspace import Workspace  # noqa: E402
 
 import soarm  # noqa: E402
-from soarm_lab.strategy import PolicySettings, PolicyStrategy  # noqa: E402
+from soarm_lab.strategies.policy import PolicySettings, PolicyStrategy  # noqa: E402
 
 NAME = "policy"
-#: The simulated clock's step, and the twin loop's period [s] (as the twin's test_strategy.py).
+#: The simulated clock's step, and the twin loop's period [s].
 CLOCK_STEP = 0.01
 TWIN_PERIOD = 0.02
 
@@ -74,13 +73,13 @@ def sim_cube(twin: Twin) -> dict[str, ObjectPose]:
 
 
 def test_the_twin_finds_the_strategy_through_its_entry_point():
-    assert strategies()[NAME].value == "soarm_lab.strategy:PolicyStrategy"
+    assert strategies()[NAME].value == "soarm_lab.strategies.policy:PolicyStrategy"
 
     plugin = load_strategy(NAME)
 
     assert plugin.cls is PolicyStrategy
     assert plugin.settings is PolicySettings
-    assert plugin.source == "soarm-lab 0.1.0 (soarm_lab.strategy:PolicyStrategy)"
+    assert plugin.source == "soarm-lab 0.1.0 (soarm_lab.strategies.policy:PolicyStrategy)"
     assert plugin.summary.startswith("An RL policy of soarm-lab")
 
 
@@ -216,8 +215,7 @@ def test_a_policy_for_another_robot_refuses_the_run(twin, monkeypatch):
 def test_start_does_not_switch_off_the_clutch_of_the_next_owner(twin, monkeypatch):
     """STOP between the runner's `claim` and its clutch, then the panel takes the arm and engages it.
 
-    The run must not disengage the panel's clutch. From the twin's `test_twin_runner.py`, now on the
-    `StrategyRunner`.
+    The run must not disengage the panel's clutch.
     """
     twin.connect("sim", threaded=False)
     real_claim = twin.claim

@@ -1,5 +1,6 @@
-"""Neither package imports the twin (`lerobot_mp`); `soarm` never imports `soarm_lab`; running a policy
-needs no torch (`soarm-lab[torch]` is the legacy trainer's extra)."""
+"""Neither package imports the twin (`lerobot_mp`); `soarm` never imports `soarm_lab`; only the tests in
+`tests/twin/` import the twin; running a policy needs no torch (`soarm-lab[torch]` is the legacy trainer's
+extra)."""
 
 from __future__ import annotations
 
@@ -21,6 +22,9 @@ FORBIDDEN = {
 }
 ROOTS = {"soarm": Path(soarm.__file__).parent, "soarm_lab": Path(soarm_lab.__file__).parent}
 SOURCES = [(package, path) for package, root in ROOTS.items() for path in sorted(root.rglob("*.py"))]
+TESTS = Path(__file__).parent
+#: The only tests that may import the twin.
+TWIN_TESTS = TESTS / "twin"
 
 
 def imports(path: Path) -> tuple[set[str], list[int]]:
@@ -53,11 +57,30 @@ def test_no_forbidden_imports(package: str, path: Path) -> None:
     assert all(level <= 1 + depth(path, ROOTS[package]) for level in levels)
 
 
+def twin_imports(path: Path) -> list[str]:
+    """The `lerobot_mp` modules `path` imports, by an import statement or `pytest.importorskip`."""
+    modules = imports(path)[0]
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if (isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "importorskip"
+                and node.args and isinstance(node.args[0], ast.Constant)):
+            modules.add(str(node.args[0].value))
+    return sorted(m for m in modules if m.split(".")[0] == "lerobot_mp")
+
+
+def test_only_the_tests_in_tests_twin_import_the_twin() -> None:
+    """Every other test runs without the twin installed."""
+    assert twin_imports(TWIN_TESTS / "conftest.py")          # the check sees the twin's imports
+    outside = [path for path in sorted(TESTS.rglob("*.py")) if TWIN_TESTS not in path.parents]
+    assert outside
+    found = {path.relative_to(TESTS).as_posix(): twin_imports(path) for path in outside}
+    assert {name: modules for name, modules in found.items() if modules} == {}
+
+
 def test_the_lab_imports_nothing_from_the_twin_at_runtime() -> None:
     """Importing every lab module (strategy, environments, CLI) loads no `lerobot_mp` module."""
     script = (
         "import importlib.util, sys\n"
-        "import soarm_lab.cli, soarm_lab.sim, soarm_lab.strategy\n"
+        "import soarm_lab.cli, soarm_lab.sim, soarm_lab.strategies, soarm_lab.strategies.policy\n"
         "import soarm_lab.rl, soarm_lab.rl.env, soarm_lab.rl.evaluate\n"
         "if importlib.util.find_spec('torch'):\n"
         "    import soarm_lab.rl.ppo, soarm_lab.rl.torch_policy\n"
@@ -68,8 +91,9 @@ def test_the_lab_imports_nothing_from_the_twin_at_runtime() -> None:
 
 
 #: What a twin user, `soarm-lab eval` and `soarm-lab policies` load.
-RUNTIME = ("soarm_lab", "soarm_lab.strategy", "soarm_lab.rl.policy", "soarm_lab.station", "soarm_lab.sim",
-           "soarm_lab.cli", "soarm_lab.rl", "soarm_lab.rl.env", "soarm_lab.rl.evaluate")
+RUNTIME = ("soarm_lab", "soarm_lab.strategies", "soarm_lab.strategies.policy", "soarm_lab.rl.policy",
+           "soarm_lab.station", "soarm_lab.sim", "soarm_lab.cli", "soarm_lab.rl", "soarm_lab.rl.env",
+           "soarm_lab.rl.evaluate")
 #: Imports the runtime, loads both bundled policies, runs a strategy tick, `policies` and `eval`.
 RUN_POLICIES = f"""
 import sys
@@ -79,7 +103,7 @@ import soarm
 from soarm_lab.cli import main
 from soarm_lab.robot import load_robot
 from soarm_lab.rl.policy import Policy, find_policy
-from soarm_lab.strategy import PolicySettings, PolicyStrategy
+from soarm_lab.strategies.policy import PolicySettings, PolicyStrategy
 
 for name in ("reach-v3", "lift-v3"):
     pol = Policy.load(find_policy(name))

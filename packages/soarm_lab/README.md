@@ -32,14 +32,11 @@ A command that needs torch without it fails with "install soarm-lab[torch]".
 | `soarm_lab/robot.py` | `RobotSpec`: the fields of `soarm`'s `robot.yaml` the lab uses |
 | `soarm_lab/kinematics.py` | `RobotKinematics`: degrees and gripper 0..100 <-> MJCF, TCP forward kinematics, IK |
 | `soarm_lab/sim.py` | `Scene`: the compiled station scene with the task's objects; renders |
-| `soarm_lab/rl/` | tasks (`reach`, `lift`, `pickplace`), `TwinEnv` (Gymnasium, CPU), `Policy` (numpy), evaluation, domain randomization; the legacy torch trainer: `BatchEnv` (MuJoCo Warp, GPU), PPO, `torch_policy` |
+| `soarm_lab/rl/` | tasks (`reach`, `lift`, `pickplace`), `ArmEnv` (Gymnasium, CPU), `Policy` (numpy), evaluation, domain randomization; the legacy torch trainer: `BatchEnv` (MuJoCo Warp, GPU), PPO, `torch_policy` |
 | `soarm_lab/policies/` | base policies `reach-v3` and `lift-v3` (`policy.npz` + `meta.json`) |
-| `soarm_lab/strategy.py` | `PolicyStrategy`: a policy as a strategy of the twin |
+| `soarm_lab/strategies/` | strategies for the twin, one module per approach; `policy.py`: `PolicyStrategy`, a policy as a strategy |
 | `soarm_lab/cli.py` | the `soarm-lab` command |
 | `soarm_lab/paths.py` | where trained policies go |
-
-The code in `rl/`, `kinematics.py` and the logic of `strategy.py` come from the twin (`twin/rl/`, `twin/kinematics.py`).
-Their comments stay in Polish, as in the twin.
 
 ## Get a station
 
@@ -52,7 +49,7 @@ lerobot-twin export ~/stations/desk1
 
 The folder holds `scene.xml` (the MuJoCo scene: table, lights, the arm under the prefix `robot/`, cameras
 with their full intrinsics, the arm's physics options), `assets/` (the arm's meshes) and `station.json`
-(the twin's station record: table, cameras, identified dynamics, home pose).
+(the station record: table, cameras, identified dynamics, home pose).
 
 ```python
 from soarm_lab.station import Box, Station
@@ -61,9 +58,10 @@ station = Station.load("~/stations/desk1")      # or Station.load("sim"): the bu
 model = station.build(objects=[Box("cube", (0.015, 0.015, 0.015), (0.2, 0.0))], grasp_sensors=["cube"])
 ```
 
-`build` loads `scene.xml` through `mujoco.MjSpec`, adds the task's objects and the jaw contact sensors as the
-twin's scene does, and compiles. A folder without `assets/` takes the meshes from `soarm`'s robot folder.
-`station.dynamics` (the twin's sysid result) is the centre of the domain randomization.
+`build` loads `scene.xml` through `mujoco.MjSpec`, adds the task's objects and a contact sensor between each
+object in `grasp_sensors` and each jaw, and compiles.
+A folder without `assets/` takes the meshes from `soarm`'s robot folder.
+`station.dynamics`, the servo dynamics the twin identified on this arm, is the centre of the domain randomization.
 
 ## Train and evaluate
 
@@ -107,16 +105,13 @@ The action is `clip(actor(clip((obs - obs_mean) / sqrt(obs_var + 1e-8), -obs_cli
 Every actor layer is `x @ weight.T + bias`, and every layer but the last is followed by ELU.
 `soarm_lab.rl.policy.Policy` reads, runs and writes the file with numpy.
 
-Policies saved before this format are torch checkpoints, `policy.pt`.
-`soarm-lab eval` and the strategy refuse them and name the command that converts them:
+A torch checkpoint, `policy.pt`, is the older policy format.
+`soarm-lab eval` and the strategy refuse it and name the command that converts it:
 
 ```bash
 pip install "soarm-lab[torch]"
 soarm-lab convert workspace/policies/reach-x/policy.pt    # writes policy.npz and meta.json next to it
 ```
-
-The base policies were converted this way from the twin's `policy.pt`, with every array unchanged.
-On 5000 random observations their actions match torch's to 6e-7, one observation at a time.
 
 The Gymnasium environments register on import:
 
@@ -131,7 +126,7 @@ env = gym.make("SoArmLab/Lift-v0")
 
 ```toml
 [project.entry-points."lerobot_mp.strategies"]
-policy = "soarm_lab.strategy:PolicyStrategy"
+policy = "soarm_lab.strategies.policy:PolicyStrategy"
 ```
 
 With `soarm-lab` installed next to the twin, the panel's Strategies tab lists `policy`.
@@ -165,4 +160,4 @@ The twin's Strategies tab passes neither a goal nor objects today.
 Reach then drives to the goal in the settings.
 Lift and pickplace wait `wait_for_cube_s` for a cube and then end the run.
 They need a runner that passes `objects`, e.g. the twin's cube tracker as an `ObjectPose` with its source.
-`tests/test_lab_lift_from_cameras.py` builds one.
+`tests/twin/test_lift_from_cameras.py` builds one.

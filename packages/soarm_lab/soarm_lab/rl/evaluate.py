@@ -13,7 +13,7 @@ from typing import Any
 import numpy as np
 
 from ..station import Station
-from .env import TwinEnv
+from .env import ArmEnv
 from .policy import Policy
 from .randomize import Dynamics, Randomization
 
@@ -32,7 +32,7 @@ def evaluate(policy: Policy, episodes: int = 50, *, randomization: Randomization
     task = policy.task
     rand = randomization if randomization is not None else \
         Randomization.nominal(Dynamics.from_dict(station.dynamics) if station is not None else None)
-    env = TwinEnv(task, station=station, randomization=rand, render_mode="rgb_array" if on_frame else None)
+    env = ArmEnv(task, station=station, randomization=rand, render_mode="rgb_array" if on_frame else None)
     succ, final, ever, place = [], [], [], []
     try:
         for ep in range(episodes):

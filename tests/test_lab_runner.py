@@ -1,10 +1,9 @@
-"""The policy strategy's own guards, the ones training does not have (from the twin's `test_twin_runner.py`).
+"""The policy strategy's own guards, the ones training does not have.
 
-The twin's `PolicyRunner` became `soarm_lab.strategy.PolicyStrategy`. What the runner did with the twin
-(claiming the arm, STOP and Home) is now the twin's `StrategyRunner`. What stays in the strategy is
-tested here without the twin: `RunInfo` and `Observation` are plain objects with the attributes the
-twin gives them. `test_strategy_contract.py` runs the same strategy through the twin's runner, including
-the race between a claim and the clutch.
+Claiming the arm, STOP and Home belong to the twin's `StrategyRunner`. The strategy's guards are tested
+here without the twin: `RunInfo` and `Observation` are plain objects with the attributes the twin gives
+them. `twin/test_strategy.py` runs the same strategy through the twin's runner, including the race
+between a claim and the clutch.
 """
 
 from __future__ import annotations
@@ -22,7 +21,7 @@ pytest.importorskip("mujoco")
 from soarm_lab.rl import task as tk  # noqa: E402
 from soarm_lab.rl.policy import Policy, PolicyMeta  # noqa: E402
 from soarm_lab.robot import load_robot  # noqa: E402
-from soarm_lab.strategy import PolicySettings, PolicyStrategy, project_goal, project_target  # noqa: E402
+from soarm_lab.strategies.policy import PolicySettings, PolicyStrategy, project_goal, project_target  # noqa: E402
 
 SPEC = load_robot()
 

@@ -5,14 +5,14 @@ The twin writes such a folder with `lerobot-twin export <folder>`:
 * `scene.xml`: the station's MuJoCo scene (floor, table, lights, the arm under the prefix `robot/`,
   every enabled camera with a pose and its full K, the arm's physics options), `meshdir="assets/"`;
 * `assets/`: the arm's meshes;
-* `station.json`: the twin's station record (robot, table, cameras, identified dynamics, home).
+* `station.json`: the station record (robot, table, cameras, identified dynamics, home).
 
     station = Station.load("sim")            # the station bundled with soarm-lab
     station = Station.load("~/stations/desk1")
     model = station.build(objects=[Box("cube", (0.015,) * 3, (0.2, 0.0))], grasp_sensors=["cube"])
 
 The lab reads the folder with plain `mujoco` and never imports the twin. `build` loads `scene.xml`
-through `MjSpec`, adds the task's objects and the jaw contact sensors exactly as the twin's scene does,
+through `MjSpec`, adds the task's objects and a contact sensor between each grasped object and each jaw,
 and compiles. A folder without `assets/` takes the meshes from the robot folder of `soarm`; that is how
 the bundled `sim` station is shipped.
 
@@ -42,7 +42,8 @@ ASSETS_DIR = "assets"
 PREFIX = "robot/"
 #: A MuJoCo camera looks along -z with y up; OpenCV along +z with y down.
 CV_TO_MJ = np.diag([1.0, -1.0, -1.0])
-#: Horizontal field of view of a camera without intrinsics in `station.json` (the twin's `nominal_K`).
+#: Horizontal field of view of a camera without intrinsics in `station.json`. Its nominal K has the
+#: focal length of this field of view and the principal point at the image centre.
 NOMINAL_HFOV_DEG = 65.0
 
 
@@ -157,7 +158,7 @@ class Station:
         """Every enabled camera with a pose: the cameras `scene.xml` holds.
 
         A simulated camera renders from its true pose (`sim_pose`), a real one from its calibrated
-        pose, as in the twin's `CameraRecord.view`.
+        pose (`T_cam2base`). A camera without K gets the nominal one (`NOMINAL_HFOV_DEG`).
         """
         views = []
         for cam in self.data.get("cameras") or []:
@@ -177,7 +178,7 @@ class Station:
 
     @property
     def dynamics(self) -> dict[str, Any]:
-        """Servo dynamics identified on this arm (the twin's sysid result); {} = the Menagerie model."""
+        """Servo dynamics the twin identified on this arm; {} = the Menagerie model."""
         return dict(self.data.get("dynamics") or {})
 
     @property
@@ -192,10 +193,10 @@ class Station:
                 cameras: Sequence[CameraView] = ()) -> mujoco.MjSpec:
         """`scene.xml` as an `MjSpec`, plus task objects, jaw contact sensors and extra cameras.
 
-        `objects` are added like the twin's scene adds them: a free body with a box geom (condim 4,
-        friction 1 / 0.02 / 0.002), or a mocap body without collisions. `grasp_sensors` names objects
-        that get a contact sensor with each jaw, `<object>_jaw0` (fixed) and `<object>_jaw1` (moving),
-        1 when they touch. `cameras` are added with their full K; a name the scene already has fails.
+        Each of `objects` is a free body with a box geom (condim 4, friction 1 / 0.02 / 0.002), or a
+        mocap body without collisions. `grasp_sensors` names objects that get a contact sensor with
+        each jaw, `<object>_jaw0` (fixed) and `<object>_jaw1` (moving), 1 when they touch. `cameras`
+        are added with their full K; a name the scene already has fails.
         """
         spec = mujoco.MjSpec.from_file(str(self.scene_path))
         if not (self.folder / ASSETS_DIR).is_dir():
@@ -290,7 +291,7 @@ def _robot_meshdir(spec: RobotSpec) -> Path:
 
 
 def _add_camera(spec: mujoco.MjSpec, view: CameraView, T_base2world: np.ndarray) -> None:
-    """A camera with its full K, as the twin's scene adds it (see the twin's `scene.compose`)."""
+    """A camera with its full K at `view.T_cam2base`, in the scene's world frame."""
     T_world = T_base2world @ np.asarray(view.T_cam2base, float)
     cam = spec.worldbody.add_camera()
     cam.name = view.name
@@ -303,6 +304,5 @@ def _add_camera(spec: mujoco.MjSpec, view: CameraView, T_base2world: np.ndarray)
     cam.sensor_size = [view.width * 1e-6, view.height * 1e-6]
     cam.focal_pixel = [K[0, 0], K[1, 1]]
     # The principal point as the offset of the image centre from it: pixel (0, 0) is centred at 0
-    # in OpenCV, so the image centre is (W - 1) / 2, (H - 1) / 2. The sign was measured on renders
-    # in the twin.
+    # in OpenCV, so the image centre is (W - 1) / 2, (H - 1) / 2. The sign was measured on renders.
     cam.principal_pixel = [(view.width - 1) / 2 - K[0, 2], (view.height - 1) / 2 - K[1, 2]]

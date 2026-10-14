@@ -4,7 +4,6 @@ The SO-101 robot and everything machinekind learns or measures with it.
 The SO-101 is LeRobot's SO-ARM101 with Feetech STS3215 servos.
 The demo on 2026-11-11 uses two SO-101 arms, one mounted inverted.
 They pick an object from a known set, hand it from one arm to the other and place it on the quadruped Wojtek.
-A second robot, the tri-arm, is the same arm with a hand in place of the gripper.
 This repository is one uv workspace with two Python packages:
 
 - `soarm` is the robot: its robot folder and the hardware backends.
@@ -15,15 +14,8 @@ This repository is one uv workspace with two Python packages:
 
 The digital twin ([digital_twin_training](https://github.com/machinekind/digital_twin_training), package `lerobot_mp`)
 measures the rig and runs strategies through its safety supervisor.
-
-## Rules
-
-1. The twin holds no robot and no training. It keeps the scene, cameras, calibration, perception primitives,
-   runtime, safety, sysid and the contracts `Observation`, `Strategy`, `StrategyRunner` and `EpisodeLog`.
-2. Dependency direction: the twin imports `soarm`. `soarm_lab` imports `soarm` and never the twin.
-   `soarm` imports neither the twin nor `soarm_lab`. The twin never imports `soarm_lab`.
-3. The twin hands the measured station to `soarm_lab` as data: `lerobot-twin export <folder>`.
-   It runs the lab's policies as a strategy it finds through an entry point.
+Neither package imports the twin; the twin loads both through entry points.
+[docs/conventions.md](docs/conventions.md) has the full dependency rule.
 
 ## Layout
 
@@ -46,42 +38,55 @@ so-arm101/
         sim.py              the compiled scene with the task's objects
         rl/                 tasks, Gymnasium env (CPU), MuJoCo Warp batch (GPU), PPO, policies, evaluation
         policies/           base policies reach-v3 and lift-v3 (policy.npz + meta.json)
-        strategy.py         a policy as a twin strategy (entry point `policy`)
+        strategies/         strategies for the twin; policy.py runs a policy (entry point `policy`)
         cli.py              the `soarm-lab` command: train, eval, policies, convert
-  docs/                     first contact, conventions, safety, migration
-  tests/                    pytest
+  docs/                     first contact, conventions, safety
+  tests/                    pytest; tests/twin/ runs both packages through the twin's own code
 ```
 
-## The station: from the twin to the lab
+## How the twin uses the packages
 
-The twin measures the station: where the arm stands on the table, the cameras and the arm's dynamics.
-`lerobot-twin export <folder>` writes it as data:
+The twin finds both packages through entry points:
+
+| Group | Name | Target |
+|---|---|---|
+| `lerobot_mp.robots` | `so101` | `soarm:ROBOT_DIR`, the robot folder |
+| `lerobot_mp.backends` | `feetech` | `soarm.feetech:create` |
+| `lerobot_mp.backends` | `lerobot` | `soarm.lerobot_backend:create` |
+| `lerobot_mp.strategies` | `policy` | `soarm_lab.strategies.policy:PolicyStrategy` |
+
+The panel offers the robot `so101` with the `feetech` and `lerobot` connections.
+A trained policy runs as the strategy `policy` in the panel's Strategies tab.
+See [packages/soarm/README.md](packages/soarm/README.md) and [packages/soarm_lab/README.md](packages/soarm_lab/README.md).
+
+The twin also registers an SO-101 of its own under the names `so101`, `feetech` and `lerobot`.
+With both installed, its robot and backend discovery fails on the duplicate names.
+
+## Get a station
+
+The lab trains and evaluates on a station the twin measured: the table and where the arm stands on it,
+the cameras and the arm's dynamics. Export it from the twin's environment:
+
+```
+lerobot-twin export ~/stations/desk1
+```
+
+The folder holds:
 
 - `scene.xml`: the MuJoCo scene with floor, table, lights, the arm under the prefix `robot/`,
   the cameras with their full intrinsics, and the arm's physics options;
 - `assets/`: the arm's meshes;
-- `station.json`: the twin's station record (table, cameras, identified dynamics, home pose).
+- `station.json`: the station record (table, cameras, identified dynamics, home pose).
 
-`soarm_lab.station.Station.load(folder)` reads the folder with plain `mujoco`.
-It adds the task's cube, target and jaw contact sensors, then trains or evaluates on that scene.
-`soarm-lab train --station <folder>` and `soarm-lab eval --station <folder>` take the folder.
+Pass the folder to the lab:
+
+```
+soarm-lab train --task reach --station ~/stations/desk1
+soarm-lab eval lift-v3 --station ~/stations/desk1
+```
+
 Without `--station`, the lab uses `sim`, the simulated station bundled with the package.
-
-The twin runs a trained policy through the `lerobot_mp.strategies` entry point `policy`.
-It appears in the panel's Strategies tab.
-See [packages/soarm_lab/README.md](packages/soarm_lab/README.md).
-
-## State
-
-`packages/soarm/soarm/` is the twin's `src/lerobot_mp/robot/so101/`, moved here with ticket #145.
-The robot folder is the twin's, byte for byte. The backends no longer import the twin. Their behaviour is unchanged.
-`packages/soarm_lab/` is the twin's `twin/rl/` without `sysid.py`, moved here with ticket #146,
-together with the base policies and the training commands of `lerobot-twin`.
-The base policies are converted from the twin's torch checkpoints to `policy.npz`.
-The twin still holds its own copies and registers the same robot and backend names (`so101`, `feetech`, `lerobot`).
-Until the twin drops its copy, its robot and backend discovery fails when both packages are installed.
-The servo tools and a `soarm` command come later.
-[docs/MIGRATION.md](docs/MIGRATION.md) tracks the move.
+In Python, `soarm_lab.station.Station.load(folder)` reads the folder with plain `mujoco`.
 
 ## Install
 
@@ -93,7 +98,6 @@ This installs `soarm` and `soarm-lab` in editable mode with pyserial, MuJoCo, Gy
 and the twin from GitHub.
 It also installs torch, so the tests cover the legacy torch trainer and `soarm-lab convert`.
 `soarm-lab` itself does not depend on torch.
-The tests run both packages through the twin's own loaders and contracts.
 The twin repository is private, so `uv sync` needs GitHub access to it.
 
 GPU training needs MuJoCo Warp.
@@ -123,9 +127,12 @@ Without extras, `soarm-lab` runs policies, evaluates them and runs the strategy 
 
 ```
 uv run pytest
+uv run pytest --ignore=tests/twin      # without the twin
 uv run ruff check .
 ```
 
+The tests in `tests/twin/` run both packages through the twin's own loaders, contracts and runner.
+They are the only tests that import the twin, and they skip when it is not installed.
 Tests that need MuJoCo skip when it is not installed. Tests that need torch skip without it.
 Tests marked `render` skip where MuJoCo cannot open an OpenGL context. On a headless Linux machine set `MUJOCO_GL=egl`.
 GPU tests skip without `mujoco-warp` or CUDA.
@@ -135,7 +142,6 @@ GPU tests skip without `mujoco-warp` or CUDA.
 - [docs/first-contact.md](docs/first-contact.md): plug in an arm for the first time, safely.
 - [docs/safety.md](docs/safety.md): safety rules.
 - [docs/conventions.md](docs/conventions.md): units, joint names, the dependency rule and where the contracts live.
-- [docs/MIGRATION.md](docs/MIGRATION.md): what moves from the twin, where, and with which ticket.
 - [packages/soarm_lab/README.md](packages/soarm_lab/README.md): stations, training, evaluation and the policy strategy.
 
 ## License

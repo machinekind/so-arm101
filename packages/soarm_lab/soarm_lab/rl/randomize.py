@@ -2,21 +2,20 @@
 
 Zakresy to mnozniki wokol wartosci NOMINALNYCH modelu. Nominal nie musi byc
 modelem z MuJoCo Menagerie: `Station.dynamics` trzyma wynik identyfikacji
-serw zmierzony na prawdziwym ramieniu (`rl.sysid`), a `Randomization.around`
+serw zmierzony przez blizniaka na prawdziwym ramieniu, a `Randomization.around`
 stawia zakresy wokol niego - wtedy randomizacja pokrywa niepewnosc pomiaru,
 a nie zgadywanie. To jest "kalibracja treningu": polityka uczy sie na
 rozrzucie wokol zmierzonego ramienia.
 
 Nie ma tu obietnicy, ze prawdziwe ramie na pewno lezy w tym rozrzucie.
 Zmierzone na nagraniach syntetycznych o znanej dynamice (pelne pobudzenie,
-kp 0,7-1,3, tarcie 0,6-1,4 - patrz `tests/test_twin_sysid.py`): po
+kp 0,7-1,3, tarcie 0,6-1,4 - testy identyfikacji w blizniaku): po
 identyfikacji tlumienie, armatura i opoznienie prawdy leza w zakresach wokol
 wyniku, a kp i tarcie suche - ktorych ruch nie wyznacza - tylko dzieki
 szerszym zakresom `UNFITTED_RANGES`. Ramie z kp 0,5 albo tarciem x3 byloby
 poza nimi.
 
-`Dynamics` i `UNFITTED_RANGES` to kopia: identyfikacja (`rl.sysid`) zostaje w blizniaku
-razem ze swoimi. Wynik identyfikacji przychodzi tu jako dane - `station.json`
+Identyfikacja dynamiki zyje w blizniaku. Jej wynik przychodzi tu jako dane - `station.json`
 eksportu, pole `dynamics` (`Dynamics.from_dict(station.dynamics)`).
 """
 
@@ -33,7 +32,7 @@ import numpy as np
 #: przy prawdzie kp 0,8 wynik mial armature -13 % - czyli jest dobry tylko RAZEM z kp,
 #: ktore naprawde ma ramie. Domyslne kp 0,85-1,15 wokol 1,0 nie zawieralo prawd kp
 #: 0,7 / 0,75 / 0,8 / 1,2 / 1,3 z przegladu - trening nie widzial ani jednego swiata
-#: z taka dynamika. `rl.sysid` mierzy niepewnosc wyniku wlasnie na tych zakresach.
+#: z taka dynamika. Identyfikacja w blizniaku mierzy niepewnosc wyniku wlasnie na tych zakresach.
 UNFITTED_RANGES: dict[str, tuple[float, float]] = {"kp": (0.6, 1.5), "frictionloss": (0.5, 2.0)}
 
 #: Najszersze pasmo dopasowanego mnoznika, jakie `Randomization.around` przenosi na zakres
@@ -64,7 +63,7 @@ class Dynamics:
     #: Parametry, ktore identyfikacja NAPRAWDE dopasowala (reszta zostala z modelu).
     #: Puste = nic nie mierzono (Menagerie albo dynamika sprzed tego pola).
     fitted: tuple[str, ...] = ()
-    #: Niepewnosc dopasowanych parametrow z identyfikacji (`sysid.FitResult.band`): mnozniki
+    #: Niepewnosc dopasowanych parametrow z identyfikacji w blizniaku (pasmo wyniku): mnozniki
     #: wzglednie (0,1 = +-10 %), opoznienie w TAKTACH polityki (jak `delay`); inf = pomiar
     #: nic o parametrze nie mowi. Puste = brak pomiaru (Menagerie albo stara dynamika).
     #: Trzymane tu, bo `Randomization.around` rozszerza wedlug niego zakresy treningu -

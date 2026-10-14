@@ -102,7 +102,7 @@ class ModelFields:
         mujoco.mj_setConst(m, d)
 
 
-class TwinEnv(gym.Env):
+class ArmEnv(gym.Env):
     metadata = {"render_modes": ["rgb_array"], "render_fps": 20}
 
     def __init__(self, task: str | tk.TaskConfig = "reach", *, station: Station | None = None,

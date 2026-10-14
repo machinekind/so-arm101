@@ -1,6 +1,6 @@
 """Polityki DOSTARCZANE z pakietem (`soarm_lab/policies`) na CPU - to one pojada na prawdziwym ramieniu.
 
-Z testow blizniaka (`tests/test_twin_policies.py`); scena to stanowisko `sim` z pakietu.
+Scena to stanowisko `sim` z pakietu.
 
 Testy RL sprawdzaja srodowisko i nagrode; tu sprawdzamy zachowanie samych plikow
 polityk, ktore operator dostaje w panelu. Przeglad zmierzyl na starej `lift-v2`:
@@ -8,9 +8,8 @@ kostka konczyla 13-22 cm nad blatem (zadanie: 6 cm), stawy ramienia przez
 kilkadziesiat taktow przy limitach i wymachy po chwycie do 72 st. - a zaden test
 tego nie widzial, bo sprawdzal tylko "czy podniosla". Progi ponizej przepuszczaja
 `lift-v3` (zmierzone: kostka 8-14 cm, 6 taktow przy limicie po chwycie, ruch po
-pierwszym sukcesie do 46 st.) i zatrzymuja `lift-v2` (git show
-ee44e21:assets/policies/lift-v2/policy.pt): kostka srednio 16-18 cm, do 22 cm,
-24-56 taktow przy limicie po chwycie, ruch po sukcesie do 72 st.
+pierwszym sukcesie do 46 st.) i zatrzymuja `lift-v2`: kostka srednio 16-18 cm,
+do 22 cm, 24-56 taktow przy limicie po chwycie, ruch po sukcesie do 72 st.
 
 Epizod na CPU trwa ~0,07 s, wiec 50 epizodow to kilka sekund.
 """
@@ -24,7 +23,7 @@ import pytest
 
 pytest.importorskip("mujoco")
 
-from soarm_lab.rl.env import TwinEnv  # noqa: E402
+from soarm_lab.rl.env import ArmEnv  # noqa: E402
 from soarm_lab.rl.policy import Policy, bundled_dir  # noqa: E402
 from soarm_lab.rl.randomize import Randomization  # noqa: E402
 
@@ -52,7 +51,7 @@ class Episode:
 
 def run(policy: Policy, rand: Randomization, episodes: int, seed: int = 10_000) -> tuple[list[Episode], object]:
     task = policy.task
-    env = TwinEnv(task, randomization=rand)
+    env = ArmEnv(task, randomization=rand)
     out = []
     try:
         for ep in range(episodes):
@@ -98,15 +97,7 @@ def check_lift(rep: dict, lift_height: float) -> None:
     # Stawy ramienia po chwycie nie siedza na limitach (lift-v2: 24 i 56 taktow).
     assert rep["limit_ticks_after_grasp"] <= 12, rep
     # Po pierwszym sukcesie ramie tylko trzyma i konczy (lift-v2: do 72 st. ruchu stawu).
-    # Blizniak mial tu 55 st. Scena z eksportu rozni sie od jego sceny zaokragleniem XML (~1e-6),
-    # a chwyt to kontakty: trajektorie zgodne do 1e-8 rozchodza sie przy chwycie i maksimum
-    # z 30 epizodow trafia na inny epizod. Zmierzone na czterech blokach po 30 ziaren
-    # (10/20/30/40 tys.): blizniak 44-54 st., laboratorium 26-59 st., p90 w obu 25,8 st.
-    # Polityka liczona w numpy (policy.npz) daje akcje torcha z dokladnoscia float32 (< 6e-7), a to
-    # przy chwycie tez zmienia trajektorie. Zmierzone na 12 blokach po 30 ziaren (10-120 tys.):
-    # maksimum torch 26-65 st. (powyzej 60 w trzech blokach), numpy 26-65 st. (w dwoch), p90 torch
-    # 25,8-28,8 st., numpy 25,8 st.; blok 10 tys.: torch 56,5, numpy 63,3 st.
-    # 70 st. dalej odroznia lift-v2 (72 st.); jej wysokosc i takty przy limicie lapia ja i tak.
+    # Prog 70 st.: zaokraglenie XML sceny z eksportu rozrzuca trajektorie po kontakcie miedzy przebiegami.
     assert rep["swing_after_success_deg"] < 70.0, rep
 
 

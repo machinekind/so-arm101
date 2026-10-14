@@ -15,7 +15,7 @@ EXPECTED = {
         ("console_scripts", "soarm-bridge"): "soarm.serial_bridge:main",
     },
     "soarm-lab": {
-        ("lerobot_mp.strategies", "policy"): "soarm_lab.strategy:PolicyStrategy",
+        ("lerobot_mp.strategies", "policy"): "soarm_lab.strategies.policy:PolicyStrategy",
         ("console_scripts", "soarm-lab"): "soarm_lab.cli:main",
     },
 }
@@ -23,7 +23,7 @@ CALLABLE = [(dist, key) for dist, eps in EXPECTED.items() for key in eps if key[
 
 
 def own_entry_points(dist: str) -> dict[tuple[str, str], metadata.EntryPoint]:
-    """The distribution's own entry points (the twin registers the robot's names too: test_twin_contract)."""
+    """The distribution's own entry points (the twin registers the robot's names too)."""
     try:
         found = metadata.distribution(dist)
     except metadata.PackageNotFoundError:

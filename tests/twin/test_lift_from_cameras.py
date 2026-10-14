@@ -1,11 +1,9 @@
 """Caly lancuch sim-2-real naraz: polityka lift na zywym blizniaku, kostka WYLACZNIE z kamer.
 
-Z testow blizniaka (`tests/test_twin_lift_from_cameras.py`), z polityka jako strategia laboratorium:
-kadry symulowanych kamer -> dopasowanie sylwetki (z maska ramienia) -> sledzenie kostki w dloni
-(percepcja blizniaka) -> `ObjectPose` w obserwacji -> `PolicyStrategy` w `StrategyRunner` blizniaka
--> nadzor bezpieczenstwa -> fizyka. Sprawdzamy na prawdzie z fizyki, czy kostka zostala
-podniesiona. W blizniaku `lift-v1` (uczona na prawdziwej pozycji kostki) podnosila tu 1 z 8,
-`lift-v2` (douczona z modelem percepcji) - 8 z 8; test jedzie na bazowej `lift-v3`.
+Polityka jako strategia laboratorium: kadry symulowanych kamer -> dopasowanie sylwetki (z maska
+ramienia) -> sledzenie kostki w dloni (percepcja blizniaka) -> `ObjectPose` w obserwacji ->
+`PolicyStrategy` w `StrategyRunner` blizniaka -> nadzor bezpieczenstwa -> fizyka. Sprawdzamy na
+prawdzie z fizyki, czy kostka zostala podniesiona. Test jedzie na bazowej `lift-v3`.
 
 Caly lancuch idzie w czasie SYMULOWANYM, bez watkow: petla blizniaka 50 Hz (`Twin.step`), wizja
 co 0,1 s, strategia 20 Hz (`StrategyRunner.step_once`) na jednym zegarze.
@@ -20,7 +18,6 @@ import numpy as np
 import pytest
 
 mujoco = pytest.importorskip("mujoco")
-pytest.importorskip("lerobot_mp")
 
 from lerobot_mp.twin import scene as sc  # noqa: E402
 from lerobot_mp.twin.clock import VirtualClock  # noqa: E402
@@ -32,7 +29,7 @@ from lerobot_mp.twin.ui.watch import arm_mask  # noqa: E402
 from lerobot_mp.twin.workspace import CameraRecord, Workspace  # noqa: E402
 
 from soarm_lab.rl import task as tk  # noqa: E402
-from soarm_lab.strategy import PolicySettings, PolicyStrategy  # noqa: E402
+from soarm_lab.strategies.policy import PolicySettings, PolicyStrategy  # noqa: E402
 
 
 def look(eye, target):

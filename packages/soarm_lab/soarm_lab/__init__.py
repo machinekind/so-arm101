@@ -6,7 +6,8 @@
 * `sim`: the compiled station scene with the task's objects.
 * `rl`: tasks, the Gymnasium environment (CPU), the MuJoCo Warp batch (GPU), PPO, policies, evaluation,
   domain randomization. `policies/` holds the base policies `reach-v3` and `lift-v3` as `policy.npz`.
-* `strategy`: a policy as a strategy of the twin (entry point `lerobot_mp.strategies`: `policy`).
+* `strategies`: the lab's strategies for the twin, one module per approach; `strategies.policy` runs a
+  policy (entry point `lerobot_mp.strategies`: `policy`).
 * `cli`: the `soarm-lab` command (`train`, `eval`, `policies`, `convert`).
 
 Running a policy needs numpy only. torch is the optional extra `soarm-lab[torch]`: the legacy PPO trainer

@@ -4,7 +4,7 @@
     obs = env.reset()                                  # (N, obs_dim) na cuda
     obs, rew, done, info = env.step(actions)           # actions (N, act_dim) w [-1, 1]
 
-Ta sama scena, te same wzory (`task`) co `env.TwinEnv` na CPU - roznica to
+Ta sama scena, te same wzory (`task`) co `env.ArmEnv` na CPU - roznica to
 tylko, gdzie liczy sie fizyka. Na RTX A4500 scena z kostka robi ok.
 1,1 mln krokow fizyki na sekunde przy 8192 swiatach, a trajektoria jednego
 swiata zgadza sie z MuJoCo na CPU do 0,001 st. po 2 s.
@@ -24,8 +24,8 @@ nieistotne przy kilkudziesieciu milisekundach fizyki).
 
 pickplace: cel odlozenia to podkladka mocap (`d.mocap_pos` - osobna w kazdym swiecie),
 bez kolizji, wiec budzet kontaktow jest ten sam co w lift. Zatrzask "kostka niesiona"
-(`self.carried`) i losowanie celow (`_sample_targets`) to linia w linie blizniaki
-`env.TwinEnv` i `task.sample_targets` - pilnuje tego test zgodnosci GPU/CPU.
+(`self.carried`) i losowanie celow (`_sample_targets`) to linia w linie to samo co
+`env.ArmEnv` i `task.sample_targets` - pilnuje tego test zgodnosci GPU/CPU.
 
 Budzet kontaktow na swiat (`CONTACTS`: nconmax, njmax) dla zadan z kostka. Zmierzone
 w MuJoCo na CPU (najwiecej w jednym kroku fizyki, epizody losowe i ekspert pickplace):
@@ -141,7 +141,7 @@ class BatchEnv:
         self.q_cmd = self.home.repeat(N, 1)
         self.prev_action = torch.zeros(N, self.task.act_dim, **f32)
         # Opoznienie akcji: ostatnie akcje w buforze pierscieniowym, dla kazdego swiata
-        # wlasne {min_delay .. max_delay} taktow - jak kolejka w TwinEnv. Wczesniej byl tu
+        # wlasne {min_delay .. max_delay} taktow - jak kolejka w ArmEnv. Wczesniej byl tu
         # jeden slot i opoznienie sciete do 0/1 taktu: po identyfikacji (1,4 taktu,
         # max_delay 3) trening nie widzial nigdy 2-3 taktow, a ewaluacja na CPU - tak.
         self.Hd = int(self.rand.max_delay) + 1
@@ -167,7 +167,7 @@ class BatchEnv:
         with wp.ScopedCapture() as cap:
             for _ in range(self.task.substeps):
                 mjw.step(self.m, self.d)
-            # Jak w TwinEnv.step: po krokach xpos/site_xpos sa sprzed ostatniego calkowania,
+            # Jak w ArmEnv.step: po krokach xpos/site_xpos sa sprzed ostatniego calkowania,
             # wiec kinematyka od nowa - TCP i kostka z tego samego q, co katy w obserwacji.
             mjw.kinematics(self.m, self.d)
         self.graph = cap.graph
@@ -185,7 +185,7 @@ class BatchEnv:
             out["jaws"] = self.sensordata[:, self.jaw_adr]
             if self.task.target:
                 a = self.cube_dadr
-                out["cube_vel"] = self.qvel[:, a:a + 3] @ R          # R^T v jako wiersze (jak w TwinEnv)
+                out["cube_vel"] = self.qvel[:, a:a + 3] @ R          # R^T v jako wiersze (jak w ArmEnv)
                 out["target"] = self.target
         return out
 
@@ -242,7 +242,7 @@ class BatchEnv:
         self.mjw.set_const(self.m, self.d)
 
     def _sample_targets(self, cube_p: torch.Tensor) -> torch.Tensor:
-        """Cele pickplace (n, 3) dla kostek `cube_p` (n, 3) - blizniak `task.sample_targets`.
+        """Cele pickplace (n, 3) dla kostek `cube_p` (n, 3) - to samo co `task.sample_targets`.
 
         Ta sama regula: losowanie biegunowe, za bliskie wiersze od nowa (tylko one),
         najwyzej `TARGET_TRIES` razy, potem cel na zewnetrznym promieniu po drugiej stronie.

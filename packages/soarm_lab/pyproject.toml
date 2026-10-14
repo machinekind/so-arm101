@@ -27,7 +27,7 @@ train = ["mujoco-warp>=3.14,<3.15", "jax>=0.4"]
 torch = ["torch>=2.7,<2.12"]
 
 [project.entry-points."lerobot_mp.strategies"]
-policy = "soarm_lab.strategy:PolicyStrategy"
+policy = "soarm_lab.strategies.policy:PolicyStrategy"
 
 [project.scripts]
 soarm-lab = "soarm_lab.cli:main"

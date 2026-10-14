@@ -51,10 +51,10 @@ from typing import Any
 
 import numpy as np
 
-from .kinematics import RobotKinematics
-from .rl import task as tk
-from .rl.policy import Policy, find_policy
-from .robot import load_robot
+from ..kinematics import RobotKinematics
+from ..rl import task as tk
+from ..rl.policy import Policy, find_policy
+from ..robot import load_robot
 
 logger = logging.getLogger(__name__)
 

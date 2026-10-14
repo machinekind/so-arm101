@@ -1,9 +1,9 @@
-"""The twin's own code accepts this package: its strict robot loader and its backend plugin contract.
+"""The twin's own code accepts `soarm`: its strict robot loader and its backend plugin contract.
 
-Discovery (`robot_folders()`, `backends()`, `create_backend`) is not tested here. The twin's `main` still
-registers its own copy of the SO-101 (robot `so101`, backends `feetech` and `lerobot`), so with both
-installed the twin's discovery raises on the duplicate names. These tests call the twin's loader and
-context builder directly instead. Add a discovery test once the twin drops its copy (the twin side of #145).
+Discovery (`robot_folders()`, `backends()`, `create_backend`) is not tested here. The twin registers an
+SO-101 of its own under the same names (robot `so101`, backends `feetech` and `lerobot`), so with both
+installed its discovery raises on the duplicates. These tests call the twin's loader and context
+builder directly.
 """
 
 from __future__ import annotations

@@ -1,10 +1,10 @@
-"""Zadania RL blizniaka: co polityka widzi, co robi i za co dostaje nagrode.
+"""Zadania RL: co polityka widzi, co robi i za co dostaje nagrode.
 
 Jedna definicja dla trzech miejsc, w ktorych polityka zyje:
 
-* srodowisko Gymnasium na CPU (`env.TwinEnv`, numpy, jedno srodowisko),
+* srodowisko Gymnasium na CPU (`env.ArmEnv`, numpy, jedno srodowisko),
 * srodowisko wsadowe na GPU (`batch.BatchEnv`, torch, tysiace swiatow MuJoCo Warp),
-* petla na prawdziwym ramieniu (`strategy.PolicyStrategy` w `StrategyRunner` blizniaka, numpy, katy z serw).
+* petla na prawdziwym ramieniu (`strategies.policy.PolicyStrategy` w `StrategyRunner` blizniaka, numpy, katy z serw).
 
 Funkcje ponizej biora tablice z wymiarem wsadu `(N, ...)` i modul `xp` - numpy
 albo torch - wiec wszystkie trzy licza DOKLADNIE te same wzory. Dwie kopie
@@ -428,7 +428,7 @@ def sample_targets(task: TaskConfig, rng: np.random.Generator, cube_pos: np.ndar
     Losowanie biegunowe w `target_radius` / `target_bearing`, jak kostki; za bliskie
     wiersze losujemy od nowa (tylko je), najwyzej `TARGET_TRIES` razy. Wiersz, ktory
     wciaz nie pasuje, dostaje cel na zewnetrznym promieniu po drugiej stronie pierscienia.
-    Blizniak torch: `batch.BatchEnv._sample_targets` - ta sama regula.
+    Na GPU: `batch.BatchEnv._sample_targets` - ta sama regula.
     """
     cube = np.asarray(cube_pos, float).reshape(-1, 3)
     n = len(cube)
