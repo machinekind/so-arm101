@@ -17,7 +17,7 @@ members = [
 
 [manifest.dependency-groups]
 dev = [
-    { name = "lerobot-mp", git = "https://github.com/machinekind/digital_twin_training.git?rev=main" },
+    { name = "lerobot-mp", git = "https://github.com/machinekind/digital_twin_training.git?rev=11de24d3141ca9ce573a8c4f2c6951a154e9b6e6" },
     { name = "pytest", specifier = ">=8" },
     { name = "ruff", specifier = ">=0.6" },
     { name = "soarm", extras = ["feetech"], editable = "packages/soarm" },
@@ -846,11 +846,20 @@ feetech = [
 [[package]]
 name = "lerobot-mp"
 version = "0.1.0"
-source = { git = "https://github.com/machinekind/digital_twin_training.git?rev=main#d4e20246ad90a27991b49671b080280d5ad6468b" }
+source = { git = "https://github.com/machinekind/digital_twin_training.git?rev=11de24d3141ca9ce573a8c4f2c6951a154e9b6e6#11de24d3141ca9ce573a8c4f2c6951a154e9b6e6" }
 dependencies = [
+    { name = "lerobot-mp-api" },
     { name = "numpy" },
     { name = "opencv-contrib-python" },
     { name = "pyyaml" },
+]
+
+[[package]]
+name = "lerobot-mp-api"
+version = "0.1.0"
+source = { git = "https://github.com/machinekind/digital_twin_training.git?subdirectory=packages%2Flerobot_mp_api&rev=11de24d3141ca9ce573a8c4f2c6951a154e9b6e6#11de24d3141ca9ce573a8c4f2c6951a154e9b6e6" }
+dependencies = [
+    { name = "numpy" },
 ]
 
 [[package]]
@@ -2005,6 +2014,9 @@ wheels = [
 name = "soarm"
 version = "0.1.0"
 source = { editable = "packages/soarm" }
+dependencies = [
+    { name = "lerobot-mp-api" },
+]
 
 [package.optional-dependencies]
 feetech = [
@@ -2017,6 +2029,7 @@ lerobot = [
 [package.metadata]
 requires-dist = [
     { name = "lerobot", extras = ["feetech"], marker = "python_full_version >= '3.12' and extra == 'lerobot'", specifier = ">=0.6,<0.7" },
+    { name = "lerobot-mp-api", git = "https://github.com/machinekind/digital_twin_training.git?subdirectory=packages%2Flerobot_mp_api&rev=11de24d3141ca9ce573a8c4f2c6951a154e9b6e6" },
     { name = "pyserial", marker = "extra == 'feetech'", specifier = ">=3.5" },
 ]
 provides-extras = ["feetech", "lerobot"]
@@ -2027,6 +2040,7 @@ version = "0.1.0"
 source = { editable = "packages/soarm_lab" }
 dependencies = [
     { name = "gymnasium" },
+    { name = "lerobot-mp-api" },
     { name = "mujoco" },
     { name = "numpy" },
     { name = "pyyaml" },
@@ -2048,6 +2062,7 @@ train = [
 requires-dist = [
     { name = "gymnasium", specifier = ">=1.0" },
     { name = "jax", marker = "extra == 'train'", specifier = ">=0.4" },
+    { name = "lerobot-mp-api", git = "https://github.com/machinekind/digital_twin_training.git?subdirectory=packages%2Flerobot_mp_api&rev=11de24d3141ca9ce573a8c4f2c6951a154e9b6e6" },
     { name = "mujoco", specifier = ">=3.14,<3.15" },
     { name = "mujoco-warp", marker = "extra == 'train'", specifier = ">=3.14,<3.15" },
     { name = "numpy", specifier = ">=1.24" },

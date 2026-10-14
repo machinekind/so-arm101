@@ -17,14 +17,7 @@ import enum
 
 import pytest
 
-pytestmark = pytest.mark.twin
-pytest.importorskip("lerobot_mp")
-
-from lerobot_mp.robot import backend_context  # noqa: E402
-from lerobot_mp.twin.robots import load_robot, robot_config  # noqa: E402
-
-import soarm  # noqa: E402
-from soarm.lerobot_backend import STATUS_EVERY_READS, LeRobotArm  # noqa: E402
+from soarm.lerobot_backend import STATUS_EVERY_READS, LeRobotArm
 
 
 @dataclasses.dataclass
@@ -192,7 +185,7 @@ class FakeRobot:
 
 
 @pytest.fixture
-def arm(monkeypatch):
+def arm(monkeypatch, so101_context):
     FakeRobot.calibration_file, FakeRobot.servos_calibrated, FakeRobot.servos_torque = True, True, 1
     FakeRobot.last = None
     monkeypatch.setattr(LeRobotArm, "_resolve_classes", staticmethod(lambda kind: (FakeRobot, FakeConfig, "atrapa")))
@@ -201,9 +194,7 @@ def arm(monkeypatch):
         raise AssertionError("backend zapytal o cos w konsoli serwera")
 
     monkeypatch.setattr(builtins, "input", no_console)
-    spec = load_robot(soarm.ROBOT_DIR)
-    cfg = robot_config(spec, overrides={"robot": {"backend": "lerobot", "port": "COM_TEST"}})
-    return LeRobotArm(backend_context(cfg, spec))
+    return LeRobotArm(so101_context())
 
 
 def test_missing_calibration_file_is_refused_before_touching_the_port(arm):
@@ -235,15 +226,12 @@ def test_an_arm_holding_a_pose_is_connected_without_lerobot_configure(arm):
     assert ("torque_off",) not in robot.bus.log
 
 
-def test_lerobot_never_clamps_the_step_and_the_setting_is_gone(arm):
+def test_lerobot_never_clamps_the_step_and_the_setting_is_gone(arm, so101_context):
     """LeRobot's +-12 degree clamp hid collisions from the twin's tracking guard (25 degrees)."""
     arm.connect()
     assert FakeRobot.last.config.max_relative_target is None
-    spec = load_robot(soarm.ROBOT_DIR)
-    cfg = robot_config(spec, overrides={"robot": {"backend": "lerobot", "port": "COM_TEST"},
-                                        "lerobot": {"max_relative_target": 12.0}})
     with pytest.raises(ValueError, match="max_relative_target"):
-        LeRobotArm(backend_context(cfg, spec))
+        LeRobotArm(so101_context(max_relative_target=12.0))
 
 
 def test_disconnect_keeps_torque_unless_configured_otherwise(arm):

@@ -14,5 +14,6 @@ Running a policy needs numpy only. torch is the optional extra `soarm-lab[torch]
 (`rl.ppo`, `rl.batch`) and the converter of torch checkpoints (`rl.torch_policy`).
 
 Nothing here imports the twin (`lerobot_mp`). The twin hands the station over as data and runs the
-strategy through its own `StrategyRunner`.
+strategy through its own `StrategyRunner`. The strategy follows the twin's plugin contracts,
+`lerobot_mp_api.strategy`.
 """

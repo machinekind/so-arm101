@@ -2,7 +2,7 @@
 
 ## Dependency rule
 
-- Neither package imports the twin (`lerobot_mp`).
+- Both packages import the twin's plugin contracts, `lerobot_mp_api`. Neither imports the twin, `lerobot_mp`.
 - `soarm_lab` may import `soarm`. `soarm` never imports `soarm_lab`.
 - The twin imports `soarm`. It never imports `soarm_lab`.
 
@@ -11,13 +11,15 @@ The twin and `soarm_lab` meet only through data and entry points:
 - the twin exports the measured station as a folder (`lerobot-twin export`): `scene.xml`, `assets/`, `station.json`;
 - the twin finds the lab's strategy under the `lerobot_mp.strategies` entry point and runs it through its `StrategyRunner`.
 
-The twin is a dev dependency. Tests that run a package through its loaders, contracts and runner are
-marked `twin` and skip when it is not installed.
+The contracts are a base dependency of both packages, `lerobot-mp-api>=0.1,<0.2`. They need only numpy.
+The twin is a dev dependency. Tests that run a package through the twin's loaders, factory and runner are
+marked `twin` and skip when it is not installed. A test that imports only `lerobot_mp_api` needs no marker.
 Each package's `tests/test_dependency_rule.py` checks every import in the package's source, also one under
 `TYPE_CHECKING`. It checks that every test module that imports `lerobot_mp` is marked `twin`.
-It also collects the package's tests with `-m "not twin"` where `lerobot_mp` cannot be imported.
-The lab's test also imports every lab module in a fresh interpreter and checks that no `lerobot_mp` module
-got loaded.
+The checks compare whole package names, so `lerobot_mp_api` never counts as `lerobot_mp`.
+The test also collects the package's tests with `-m "not twin"` where `lerobot_mp` cannot be imported.
+The lab's test also imports every lab module in a fresh interpreter. It checks that `lerobot_mp_api` got
+loaded and no `lerobot_mp` module did.
 
 Running a policy needs no torch.
 The strategy, the policy file, evaluation and the `soarm-lab` commands other than `train` and `convert`
@@ -27,7 +29,7 @@ torch is the optional extra `soarm-lab[torch]` for the legacy torch trainer and 
 checks that no torch module got loaded, also with torch made unimportable.
 
 The twin holds no robot and no training. It keeps the scene, cameras, calibration, perception primitives,
-runtime, safety, sysid and the contracts `Observation`, `Strategy`, `StrategyRunner` and `EpisodeLog`.
+runtime, safety, sysid, `StrategyRunner` and `EpisodeLog`.
 
 ## Tests
 
@@ -86,16 +88,21 @@ Names are identical in `robot.yaml`, the MJCF, LeRobot and the twin.
 
 ## Contracts
 
-The twin owns the contracts this package follows.
+The twin owns the contracts these packages follow.
+The plugin contracts are the package `lerobot-mp-api`, in the twin's repository under `packages/lerobot_mp_api`.
+It is not published yet. `[tool.uv.sources]` in the root `pyproject.toml` installs it from that folder at a
+pinned commit of the twin, and the twin from the same commit.
 
 - The `robot.yaml` schema is `RobotSpec` in `lerobot_mp.twin.robots`. `load_robot(folder)` checks a folder strictly.
-- The backend contract is `BackendPlugin` and `BackendContext` in `lerobot_mp.robot.base`.
+- The backend contract is `lerobot_mp_api.backend`: `BackendContext`, `BackendPlugin`, `RobotBackend` and `RobotInfo`.
   A backend factory `create(ctx)` takes a `BackendContext` and returns the backend.
-- `packages/soarm/pyproject.toml` registers the robot folder under the `lerobot_mp.robots` entry point group
-  and the backend factories under `lerobot_mp.backends`.
-- The strategy contract is `Strategy`, `Observation`, `RunInfo` and `Action` in `lerobot_mp.twin.strategy`,
-  and the strict settings dataclass in `lerobot_mp.twin.strategies`.
-  `soarm_lab.strategies.policy.PolicyStrategy` follows it by attributes, without importing it.
-- `packages/soarm_lab/pyproject.toml` registers that strategy under `lerobot_mp.strategies` as `policy`.
+  `FeetechArm` and `LeRobotArm` subclass `RobotBackend`, so the twin uses them without its `PluginBackend` wrapper.
+- `lerobot_mp_api.entry_points` names the entry point groups: `ROBOTS`, `BACKENDS` and `STRATEGIES`.
+  `packages/soarm/pyproject.toml` registers the robot folder under `lerobot_mp.robots` (`ROBOTS`)
+  and the backend factories under `lerobot_mp.backends` (`BACKENDS`).
+- The strategy contract is `lerobot_mp_api.strategy`: `Strategy`, `RunInfo`, `Observation`, `ObjectPose` and `Action`.
+  The twin builds a strategy's settings dataclass strictly (`lerobot_mp.twin.strategies`).
+  `soarm_lab.strategies.policy.PolicyStrategy` takes `RunInfo` and `Observation` and returns an `Action`.
+- `packages/soarm_lab/pyproject.toml` registers that strategy under `lerobot_mp.strategies` (`STRATEGIES`) as `policy`.
 - The station export is `Workspace.export` in the twin (`lerobot-twin export`). `soarm_lab.station.Station` reads it.
   `soarm_lab.robot.RobotSpec` reads only the `robot.yaml` fields the lab uses and skips the others.

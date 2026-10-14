@@ -9,7 +9,8 @@ description = "SO-101 robot: its robot folder and the Feetech backend plugins fo
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
-dependencies = []
+# The twin's plugin contracts (numpy only); never the twin itself.
+dependencies = ["lerobot-mp-api>=0.1,<0.2"]
 
 [project.optional-dependencies]
 # Servos driven directly, without LeRobot and torch; also the COM <-> TCP bridge.

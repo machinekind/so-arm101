@@ -2,7 +2,8 @@
 
 Training for the SO-101: RL tasks, a CPU and a GPU environment, PPO, evaluation, the base policies,
 and a strategy that runs a policy in the digital twin (`lerobot_mp`).
-It does not import the twin. The twin hands it the measured station as data and runs its strategy as a plugin.
+It imports the twin's plugin contracts, `lerobot_mp_api`, and never the twin.
+The twin hands it the measured station as data and runs its strategy as a plugin.
 It imports `soarm` for the robot folder.
 
 ## Stack
@@ -15,13 +16,16 @@ Policies are `policy.npz` files.
 
 | Install | Brings | For |
 |---|---|---|
-| `pip install soarm-lab` | numpy, PyYAML, MuJoCo, Gymnasium, `soarm` | the strategy, evaluation, the CPU environments |
+| `pip install soarm-lab` | numpy, PyYAML, MuJoCo, Gymnasium, `soarm`, `lerobot-mp-api` | the strategy, evaluation, the CPU environments |
 | `pip install "soarm-lab[train]"` | MuJoCo Warp, JAX | GPU training; the JAX trainer will use it |
 | `pip install "soarm-lab[torch]"` | torch | the legacy torch trainer and `soarm-lab convert` |
 
 The legacy trainer needs both extras and a CUDA build of torch: `pip install "soarm-lab[train,torch]"`.
 The torch extra stays until the PPO trainer is rewritten in JAX. It may also be needed on Windows.
 A command that needs torch without it fails with "install soarm-lab[torch]".
+
+`lerobot-mp-api` is not published yet. In this workspace uv installs it from the twin's repository,
+`packages/lerobot_mp_api`. The root README has the pip command.
 
 ## Contents
 
@@ -145,7 +149,8 @@ policy:
 
 The twin's `StrategyRunner` claims the arm and calls the strategy at the policy's rate (20 Hz).
 Every target goes through the twin's safety supervisor, in simulation and on hardware.
-The strategy reads the observation by its attributes:
+The strategy follows `lerobot_mp_api.Strategy`. It takes a `RunInfo` and an `Observation` and returns an `Action`.
+It reads these fields of the observation:
 
 - `obs.joints`: measured joints;
 - `obs.command`: the supervisor's command, for a gripper that already squeezes a cube;

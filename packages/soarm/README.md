@@ -1,7 +1,8 @@
 # soarm
 
 The SO-101 robot as a package for the digital twin (`lerobot_mp`).
-It holds the robot folder and the hardware backends. It does not import the twin.
+It holds the robot folder and the hardware backends.
+It imports the twin's plugin contracts, `lerobot_mp_api`, and never the twin.
 The twin finds both through entry points.
 
 ## Contents
@@ -16,8 +17,9 @@ The twin finds both through entry points.
 | `soarm/settings.py` | `from_mapping`, the strict builder for the `feetech:` and `lerobot:` config sections |
 
 The twin's `lerobot_mp.twin.robots` defines the `robot.yaml` schema.
-The twin's `lerobot_mp.robot.base` defines the backend contract.
-Each backend module has a `create(ctx)` factory that takes the twin's `BackendContext`.
+`lerobot_mp_api.backend` defines the backend contract.
+Each backend module has a `create(ctx)` factory that takes a `BackendContext`.
+`FeetechArm` and `LeRobotArm` subclass `RobotBackend`.
 
 ## Entry points
 
@@ -32,6 +34,11 @@ lerobot = "soarm.lerobot_backend:create"
 [project.scripts]
 soarm-bridge = "soarm.serial_bridge:main"
 ```
+
+## Dependencies
+
+`lerobot-mp-api>=0.1,<0.2` is the only base dependency. It needs only numpy.
+It is not published yet. In this workspace uv installs it from the twin's repository, `packages/lerobot_mp_api`.
 
 ## Extras
 

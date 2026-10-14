@@ -5,17 +5,19 @@ from importlib import metadata
 from pathlib import Path
 
 import pytest
+from lerobot_mp_api.backend import BackendPlugin, RobotBackend, RobotInfo
+from lerobot_mp_api.entry_points import BACKENDS, ROBOTS
 
 #: The distribution's entry points: (group, name) -> value.
 EXPECTED = {
     "soarm": {
-        ("lerobot_mp.robots", "so101"): "soarm:ROBOT_DIR",
-        ("lerobot_mp.backends", "feetech"): "soarm.feetech:create",
-        ("lerobot_mp.backends", "lerobot"): "soarm.lerobot_backend:create",
+        (ROBOTS, "so101"): "soarm:ROBOT_DIR",
+        (BACKENDS, "feetech"): "soarm.feetech:create",
+        (BACKENDS, "lerobot"): "soarm.lerobot_backend:create",
         ("console_scripts", "soarm-bridge"): "soarm.serial_bridge:main",
     },
 }
-CALLABLE = [(dist, key) for dist, eps in EXPECTED.items() for key in eps if key[0] != "lerobot_mp.robots"]
+CALLABLE = [(dist, key) for dist, eps in EXPECTED.items() for key in eps if key[0] != ROBOTS]
 
 
 def own_entry_points(dist: str) -> dict[tuple[str, str], metadata.EntryPoint]:
@@ -33,7 +35,7 @@ def test_exactly_the_expected_entry_points(dist: str) -> None:
 
 
 def test_robot_entry_point_is_a_folder_with_robot_yaml() -> None:
-    target = own_entry_points("soarm")[("lerobot_mp.robots", "so101")].load()
+    target = own_entry_points("soarm")[(ROBOTS, "so101")].load()
     assert isinstance(target, (str, os.PathLike))
     assert (Path(target) / "robot.yaml").is_file()
 
@@ -41,3 +43,13 @@ def test_robot_entry_point_is_a_folder_with_robot_yaml() -> None:
 @pytest.mark.parametrize("dist, key", CALLABLE, ids=lambda k: k if isinstance(k, str) else k[1])
 def test_callable_entry_points(dist: str, key: tuple[str, str]) -> None:
     assert callable(own_entry_points(dist)[key].load())
+
+
+@pytest.mark.parametrize("name", ["feetech", "lerobot"])
+def test_a_backend_factory_builds_a_backend_plugin(name: str, so101_context) -> None:
+    """What the twin's factory does with the entry point, without the twin: `create(ctx)`, nothing opened."""
+    backend = own_entry_points("soarm")[(BACKENDS, name)].load()(so101_context())
+    assert isinstance(backend, BackendPlugin)
+    # A `RobotBackend` already, so the twin takes it as it is (test_twin_contract.py).
+    assert isinstance(backend, RobotBackend) and isinstance(backend.info, RobotInfo)
+    assert not backend.is_connected

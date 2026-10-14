@@ -17,7 +17,9 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from .feetech import LINK_LOSS_CYCLES, Info, describe_servo_error
+from lerobot_mp_api.backend import BackendContext, RobotBackend, RobotInfo
+
+from .feetech import LINK_LOSS_CYCLES, describe_servo_error
 from .settings import from_mapping
 
 logger = logging.getLogger(__name__)
@@ -70,15 +72,15 @@ class LeRobotSettings:
     torque_off_on_exit: bool = False
 
 
-def create(ctx: Any) -> LeRobotArm:
+def create(ctx: BackendContext) -> LeRobotArm:
     """Entry point of the `lerobot` backend plugin."""
     return LeRobotArm(ctx)
 
 
-class LeRobotArm:
+class LeRobotArm(RobotBackend):
     """Adapter na `SO101Follower` / `SO100Follower` z LeRobot."""
 
-    def __init__(self, ctx: Any):
+    def __init__(self, ctx: BackendContext):
         self.settings: LeRobotSettings = from_mapping(LeRobotSettings, ctx.settings, "lerobot")
         self.port = ctx.port
         self.joints = tuple(ctx.joints)
@@ -90,7 +92,7 @@ class LeRobotArm:
             raise ValueError(f"Nieznany typ ramienia: {self.settings.kind!r} (so101|so100)")
         self._kind = kind
         self._reset_status()
-        self.info = Info(
+        self.info = RobotInfo(
             name=f"{kind.upper()} (LeRobot)",
             description=f"port {self.port}",
             simulated=False,
@@ -294,18 +296,6 @@ class LeRobotArm:
     @property
     def is_connected(self) -> bool:
         return self._connected
-
-    @property
-    def link_silent(self) -> bool:
-        """Ostatni `read_joints` nie dostal ZADNEJ swiezej odpowiedzi - oddal stare pozycje."""
-        return bool(getattr(self, "_link_silent", False))
-
-    def __enter__(self) -> LeRobotArm:
-        self.connect()
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        self.disconnect()
 
     # ------------------------------------------------------------- wymiana IO
     def read_joints(self) -> dict[str, float]:

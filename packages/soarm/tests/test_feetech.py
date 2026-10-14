@@ -12,17 +12,11 @@ import threading
 import time
 
 import pytest
+from lerobot_mp_api.backend import BackendContext
 
-pytestmark = pytest.mark.twin
-pytest.importorskip("lerobot_mp")
-
-from lerobot_mp.robot import backend_context  # noqa: E402
-from lerobot_mp.twin.robots import load_robot, robot_config  # noqa: E402
-
-import soarm  # noqa: E402
-from fake_bus import REST_TICKS, FakeBusLink  # noqa: E402
-from soarm import serial_bridge  # noqa: E402
-from soarm.feetech import (  # noqa: E402
+from fake_bus import REST_TICKS, FakeBusLink
+from soarm import serial_bridge
+from soarm.feetech import (
     ADDR_GOAL_POSITION,
     ADDR_PRESENT_POSITION,
     ADDR_TORQUE_ENABLE,
@@ -35,11 +29,9 @@ from soarm.feetech import (  # noqa: E402
 
 
 @pytest.fixture
-def arm_ctx():
+def arm_ctx(so101_context) -> BackendContext:
     """What the twin hands the `feetech` backend for the SO-101 on port COM_TEST."""
-    spec = load_robot(soarm.ROBOT_DIR)
-    cfg = robot_config(spec, overrides={"robot": {"backend": "feetech", "port": "COM_TEST"}})
-    return backend_context(cfg, spec)
+    return so101_context()
 
 
 def connected(ctx, link: FakeBusLink | None = None) -> tuple[FeetechArm, FakeBusLink]:
@@ -75,7 +67,7 @@ def test_connect_refuses_when_a_servo_is_silent(arm_ctx):
         FeetechArm(arm_ctx, bus=bus).connect()
 
 
-def test_gripper_range_is_the_one_the_backend_converts_with_and_matches_the_description(arm_ctx):
+def test_gripper_range_is_the_one_the_backend_converts_with_and_matches_the_description(arm_ctx, robot_yaml):
     """The twin compares it with robot.yaml's `gripper_range_q`: it must be what the backend computes with."""
     arm, _ = connected(arm_ctx)
     rad = 2 * 3.141592653589793 / 4096
@@ -83,7 +75,7 @@ def test_gripper_range_is_the_one_the_backend_converts_with_and_matches_the_desc
     assert arm._to_ticks("gripper", 0.0) == round(2048 + closed / rad) == 1986
     assert arm._to_ticks("gripper", 100.0) == round(2048 + opened / rad) == 2670
     assert arm._to_units("shoulder_pan", 2048) == 0.0
-    assert (closed, opened) == pytest.approx(load_robot(soarm.ROBOT_DIR).gripper_range_q, abs=1e-6)
+    assert (closed, opened) == pytest.approx(robot_yaml["gripper_range_q"], abs=1e-6)
 
 
 def test_send_joints_clamps_to_the_configured_limits(arm_ctx):

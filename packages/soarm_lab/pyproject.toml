@@ -12,6 +12,8 @@ license = "Apache-2.0"
 # Running a policy (the strategy, evaluation, the CPU environments) needs numpy only, no torch.
 dependencies = [
     "soarm",
+    # The twin's plugin contracts (numpy only); never the twin itself.
+    "lerobot-mp-api>=0.1,<0.2",
     "numpy>=1.24",
     "PyYAML>=6.0",
     "mujoco>=3.14,<3.15",

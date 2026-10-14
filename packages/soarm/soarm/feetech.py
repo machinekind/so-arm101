@@ -32,6 +32,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from lerobot_mp_api.backend import BackendContext, RobotBackend, RobotInfo
+
 from .settings import from_mapping
 
 logger = logging.getLogger(__name__)
@@ -387,24 +389,15 @@ class FeetechSettings:
     torque_off_on_exit: bool = False
 
 
-@dataclass
-class Info:
-    """Opis podlaczonego robota (do HUD i logow): `name`, `description`, `simulated`."""
-
-    name: str
-    description: str = ""
-    simulated: bool = True
-
-
-def create(ctx: Any) -> FeetechArm:
+def create(ctx: BackendContext) -> FeetechArm:
     """Entry point of the `feetech` backend plugin."""
     return FeetechArm(ctx)
 
 
-class FeetechArm:
+class FeetechArm(RobotBackend):
     """Ramie SO-101 sterowane wprost przez port szeregowy."""
 
-    def __init__(self, ctx: Any, bus: FeetechBus | None = None):
+    def __init__(self, ctx: BackendContext, bus: FeetechBus | None = None):
         self.settings: FeetechSettings = from_mapping(FeetechSettings, ctx.settings, "feetech")
         self.port = ctx.port
         if not self.port:
@@ -435,7 +428,7 @@ class FeetechArm:
         self._stale: list[str] = []
         #: Ostatni cykl odczytu bez ANI JEDNEJ odpowiedzi - lacze stoi.
         self._link_silent = False
-        self.info = Info(
+        self.info = RobotInfo(
             name="SO-101 (feetech)",
             description=f"port {self.port} @ {self.settings.baudrate} bd",
             simulated=False,
@@ -592,18 +585,6 @@ class FeetechArm:
     @property
     def is_connected(self) -> bool:
         return self._connected
-
-    @property
-    def link_silent(self) -> bool:
-        """Ostatni `read_joints` nie dostal ZADNEJ swiezej odpowiedzi - oddal stare pozycje."""
-        return bool(getattr(self, "_link_silent", False))
-
-    def __enter__(self) -> FeetechArm:
-        self.connect()
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        self.disconnect()
 
     # ------------------------------------------------------------------ wymiana
     def read_joints(self) -> dict[str, float]:

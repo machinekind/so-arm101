@@ -4,10 +4,10 @@ The twin finds `PolicyStrategy` through the entry point in this package's `pypro
 `PolicySettings` from its config file's `policy:` section or the panel's form, creates the strategy as
 `PolicyStrategy(settings)` and runs it through its `StrategyRunner`: the runner claims the arm, builds
 an observation every tick and sends the strategy's joint targets through the safety supervisor, in
-simulation and on hardware alike. Nothing here imports the twin: the observation and the run info are
-read by their attributes (`obs.joints`, `obs.command`, `obs.goal`, `obs.objects`, `obs.t`;
-`run.robot`, `run.folder`, `run.limits`, `run.simulated`), and the answer is this module's `PolicyAction`,
-an object with the attributes of the twin's `Action`.
+simulation and on hardware alike. Nothing here imports the twin. `RunInfo`, `Observation`, `ObjectPose`
+and `Action` come from its plugin contracts, `lerobot_mp_api.strategy`. The strategy reads `obs.joints`,
+`obs.command`, `obs.goal`, `obs.objects` and `obs.t`, and `run.robot`, `run.folder`, `run.limits` and
+`run.simulated`. It answers with an `Action`.
 
     # configs/local.yaml of the twin: prefills the panel's form
     policy:
@@ -46,9 +46,9 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any
 
 import numpy as np
+from lerobot_mp_api.strategy import Action, ObjectPose, Observation, RunInfo
 
 from ..kinematics import RobotKinematics
 from ..rl import task as tk
@@ -86,17 +86,6 @@ class PolicySettings:
     goal_x: float = 0.22
     goal_y: float = 0.0
     goal_z: float = 0.12
-
-
-@dataclass
-class PolicyAction:
-    """The twin's `Action` by its attributes."""
-
-    target: dict[str, float] = field(default_factory=dict)
-    done: bool = False
-    success: bool | None = None
-    error: float | None = None
-    note: str = ""
 
 
 @dataclass
@@ -220,7 +209,7 @@ class PolicyStrategy:
 
     # ------------------------------------------------------------------- start
 
-    def start(self, run: Any, obs: Any) -> None:
+    def start(self, run: RunInfo, obs: Observation) -> None:
         """Checks the policy against the arm and starts from where the arm is. Raises to refuse the run."""
         robot = getattr(self.policy.meta, "robot", "so101")
         if robot != run.robot:
@@ -243,9 +232,9 @@ class PolicyStrategy:
         self.simulated = bool(run.simulated)
 
         measured = dict(obs.joints)
-        self._hw_lo, self._hw_hi = self._hardware_limits(getattr(run, "limits", None) or {})
+        self._hw_lo, self._hw_hi = self._hardware_limits(run.limits)
         self.q_cmd = np.clip(self.kin.to_q(measured), self._hw_lo, self._hw_hi)
-        grip = self._squeezing_grip_cmd(measured, getattr(obs, "command", None) or {})
+        grip = self._squeezing_grip_cmd(measured, obs.command)
         if grip is not None:
             self.q_cmd[self.g] = grip
         self.prev_action = np.zeros(self.task.act_dim)
@@ -290,14 +279,13 @@ class PolicyStrategy:
         lo[bad], hi[bad] = self.limits.lo[bad], self.limits.hi[bad]
         return lo, hi
 
-    def _take_goal(self, obs: Any) -> None:
-        goal = getattr(obs, "goal", None)
-        self.goal = self._default_goal if goal is None else goal
+    def _take_goal(self, obs: Observation) -> None:
+        self.goal = self._default_goal if obs.goal is None else obs.goal
 
     # -------------------------------------------------------------- observation
 
     def observation(self, measured: Mapping[str, float],
-                    objects: Mapping[str, Any] | None = None) -> np.ndarray:
+                    objects: Mapping[str, ObjectPose] | None = None) -> np.ndarray:
         """The policy's observation vector, as `task.observe` builds it in training."""
         q = self.kin.to_q(measured)
         tcp = self.kin.tcp(measured)[:3, 3]
@@ -308,7 +296,7 @@ class PolicyStrategy:
             if got is None:
                 raise NoCube(f"zadanie {self.task.name} potrzebuje polozenia kostki - kamery jej nie widza")
             cube_pos, cube_rot = np.asarray(got.position, float), np.asarray(got.rotation, float)
-            self._cube_src = str(getattr(got, "source", "") or "") or None
+            self._cube_src = str(got.source or "") or None
             self._cube = cube_pos.copy()
             if self.policy.meta.randomization.get("fold_yaw", False):
                 # W treningu polityka widziala obrot zlozony do +-45 st. (jak z detektora);
@@ -323,7 +311,7 @@ class PolicyStrategy:
 
     # --------------------------------------------------------------------- tick
 
-    def act(self, obs: Any) -> PolicyAction:
+    def act(self, obs: Observation) -> Action:
         """One policy tick: the next joint targets, or the end of the run."""
         if self.kin is None:
             raise RuntimeError("policy: act() przed start()")
@@ -338,13 +326,13 @@ class PolicyStrategy:
                               target=self._hold_pose(measured, q))
         holding = self._jaw_holding(q[self.g])
         try:
-            vec = self.observation(measured, getattr(obs, "objects", None))
+            vec = self.observation(measured, obs.objects)
         except NoCube as exc:
             # Na starcie percepcja moze jeszcze nie miec pierwszej detekcji - ramie
             # stoi i czekamy; zgubiona kostka W TRAKCIE epizodu zatrzymuje polityke.
             if st.step == 0 and float(obs.t) < self.wait_for_cube:
                 st.stopped_because = "czekam na kostke z kamer"
-                return PolicyAction(note=st.stopped_because)
+                return Action(note=st.stopped_because)
             return self._halt(str(exc))
         action = self.policy.act(vec)
         q_cmd = tk.apply_action(np, self.task, self.limits, self.q_cmd[None], action[None])[0]
@@ -381,7 +369,7 @@ class PolicyStrategy:
             return self._halt("zadanie wykonane", target=target, success=True)
         if self.episode_limit and st.step >= self.task.episode_steps:
             return self._halt("koniec epizodu", target=target, success=st.success)
-        return PolicyAction(target=target, success=st.success, error=self._error(), note=self._note())
+        return Action(target=target, success=st.success, error=self._error(), note=self._note())
 
     def _placed(self, holding: bool) -> bool:
         """pickplace: sukces tego taktu (i aktualizacja zatrzasku "niesiona", `status.distance`).
@@ -452,12 +440,12 @@ class PolicyStrategy:
     # ---------------------------------------------------------------------- end
 
     def _halt(self, reason: str, target: Mapping[str, float] | None = None,
-              success: bool = False) -> PolicyAction:
+              success: bool = False) -> Action:
         """The run is over: the last target (or the measured pose) and the reason for the twin's panel."""
         self.status.stopped_because = reason
         logger.info("Polityka zatrzymana: %s", reason)
-        return PolicyAction(target=dict(target or {}), done=True, success=success, error=self._error(),
-                            note=reason)
+        return Action(target=dict(target or {}), done=True, success=success, error=self._error(),
+                      note=reason)
 
     def stop(self, reason: str) -> None:
         """The twin ended the run (Stop, STOP, Home, the arm taken, or our own `done`)."""

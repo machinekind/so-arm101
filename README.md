@@ -14,7 +14,9 @@ This repository is one uv workspace with two Python packages:
 
 The digital twin ([digital_twin_training](https://github.com/machinekind/digital_twin_training), package `lerobot_mp`)
 measures the rig and runs strategies through its safety supervisor.
-Neither package imports the twin; the twin loads both through entry points.
+The twin loads both packages through entry points.
+Both packages import the twin's plugin contracts, `lerobot-mp-api` (package `lerobot_mp_api`), and never the twin.
+The contracts need only numpy.
 [docs/conventions.md](docs/conventions.md) has the full dependency rule.
 
 ## Layout
@@ -48,7 +50,8 @@ so-arm101/
 
 ## How the twin uses the packages
 
-The twin finds both packages through entry points:
+The twin finds both packages through entry points.
+`lerobot_mp_api.entry_points` names the groups: `ROBOTS`, `BACKENDS` and `STRATEGIES`.
 
 | Group | Name | Target |
 |---|---|---|
@@ -96,11 +99,20 @@ In Python, `soarm_lab.station.Station.load(folder)` reads the folder with plain 
 uv sync
 ```
 
-This installs `soarm` and `soarm-lab` in editable mode with pyserial, MuJoCo, Gymnasium, pytest, ruff
-and the twin from GitHub.
+This installs `soarm` and `soarm-lab` in editable mode with `lerobot-mp-api`, pyserial, MuJoCo, Gymnasium,
+pytest, ruff and the twin from GitHub.
 It also installs torch, so the tests cover the legacy torch trainer and `soarm-lab convert`.
 `soarm-lab` itself does not depend on torch.
 The twin repository is private, so `uv sync` needs GitHub access to it.
+
+Both packages depend on `lerobot-mp-api>=0.1,<0.2`. The package is not published yet.
+It lives in the twin's repository under `packages/lerobot_mp_api`.
+`[tool.uv.sources]` in `pyproject.toml` installs it from there at a pinned commit, and the twin from the same commit.
+pip ignores that table. Outside the workspace, install the contracts from git first:
+
+```
+pip install "lerobot-mp-api @ git+https://github.com/machinekind/digital_twin_training.git@11de24d3141ca9ce573a8c4f2c6951a154e9b6e6#subdirectory=packages/lerobot_mp_api"
+```
 
 GPU training needs MuJoCo Warp.
 Until the JAX trainer exists, it runs the legacy torch trainer and needs a CUDA build of torch:
@@ -136,7 +148,7 @@ uv run ruff check .
 
 Each package keeps its tests in its own `tests/` folder.
 The test files mirror the package's modules: `packages/soarm_lab/tests/rl/test_env.py` tests `soarm_lab/rl/env.py`.
-Tests that run a package through the twin's own loaders, contracts and runner are marked `twin`.
+Tests that run a package through the twin's own loaders, backend factory and runner are marked `twin`.
 They skip when the twin is not installed.
 Tests that need MuJoCo skip when it is not installed. Tests that need torch skip without it.
 Tests marked `render` skip where MuJoCo cannot open an OpenGL context. On a headless Linux machine set `MUJOCO_GL=egl`.
