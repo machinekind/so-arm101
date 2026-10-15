@@ -49,3 +49,16 @@ def test_ik_finds_the_home_tcp_again(station):
     sol = kin.ik(target, seed=seed)
     assert sol.ok and sol.pos_err < 1e-3
     assert kin.tcp(sol.joints)[:3, 3] == pytest.approx(target, abs=1e-3)
+
+
+def test_ik_keeps_the_seed_gripper_whichever_start_wins(station):
+    spec = station.spec()
+    kin = RobotKinematics(spec)
+    # The home TCP from a seed far from home, with one iteration and no random starts: only the start
+    # from the rest pose hits, so it wins.
+    target = kin.tcp(spec.home)[:3, 3]
+    seed = dict(spec.home, shoulder_pan=60.0, elbow_flex=-40.0, wrist_flex=50.0, gripper=5.0)
+    sol = kin.ik(target, seed=seed, iters=1, restarts=0)
+    assert sol.ok
+    assert sol.joints["shoulder_pan"] == pytest.approx(spec.home["shoulder_pan"], abs=1e-3)
+    assert sol.joints["gripper"] == pytest.approx(5.0)
