@@ -48,7 +48,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 import numpy as np
-from lerobot_mp_api.strategy import Action, ObjectPose, Observation, RunInfo
+from lerobot_mp_api.strategy import Action, ObjectPose, Observation, RunInfo, Strategy
 
 from ..kinematics import RobotKinematics
 from ..rl import task as tk
@@ -139,7 +139,7 @@ def project_target(task: tk.TaskConfig, goal: np.ndarray) -> np.ndarray:
     return np.array([r_new * np.cos(bearing), r_new * np.sin(bearing), 0.0])
 
 
-class PolicyStrategy:
+class PolicyStrategy(Strategy[PolicySettings]):
     """An RL policy of soarm-lab (reach, lift, pickplace) driving the arm, as in training."""
 
     settings = PolicySettings
@@ -167,8 +167,8 @@ class PolicyStrategy:
         self._default_goal = np.array([self.config.goal_x, self.config.goal_y, self.config.goal_z])
         self._goal = self._default_goal.copy()
         # Known from `start`: the arm's kinematics, the training limits and the hardware's.
-        self.kin: RobotKinematics | None = None
-        self.limits: tk.Limits | None = None
+        self._kin: RobotKinematics | None = None
+        self._limits: tk.Limits | None = None
         self.g, self.na = 0, 0
         self.q_cmd = np.zeros(self.task.act_dim)
         self.prev_action = np.zeros(self.task.act_dim)
@@ -181,6 +181,25 @@ class PolicyStrategy:
         #: pickplace: kostka byla niesiona (jak `task.carry_latch` w treningu) i gdzie byla na poczatku serii.
         self._carried = False
         self._streak_cube: np.ndarray | None = None
+
+    @property
+    def started(self) -> bool:
+        """Whether `start` ran: the arm's kinematics and limits are known."""
+        return self._kin is not None
+
+    @property
+    def kin(self) -> RobotKinematics:
+        """The arm's kinematics, known from `start`."""
+        if self._kin is None:
+            raise RuntimeError("policy: start the run first")
+        return self._kin
+
+    @property
+    def limits(self) -> tk.Limits:
+        """The training limits of this arm, known from `start`."""
+        if self._limits is None:
+            raise RuntimeError("policy: start the run first")
+        return self._limits
 
     # -------------------------------------------------------------------- goal
 
@@ -218,8 +237,8 @@ class PolicyStrategy:
         if self.policy.meta.act_dim != len(spec.joints):
             raise RuntimeError(f"polityka ma {self.policy.meta.act_dim} wyjsc, a ramie {spec.name} "
                                f"{len(spec.joints)} stawow")
-        self.kin = RobotKinematics(spec)
-        self.limits = tk.Limits.of(self.kin)
+        self._kin = RobotKinematics(spec)
+        self._limits = tk.Limits.of(self._kin)
         #: Indeks chwytaka i liczba stawow ramienia (chwytak ostatni, `Limits.of`).
         self.g, self.na = self.limits.grip, self.limits.n_arm
         #: Szczeka "trzyma" (sukces lift): jak w `CubeTracker` blizniaka - stoi (< `grip_still` miedzy
@@ -254,8 +273,10 @@ class PolicyStrategy:
         q_cmd trzymanej kostki tez jest ciasniejszy od pomiaru. Inne stawy - jak dotad, od pomiaru.
         """
         name = self.kin.spec.gripper
+        if name is None or name not in measured:
+            return None
         cmd = command.get(name)
-        if cmd is None or name not in measured:
+        if cmd is None:
             return None
         g = self.g
         q_cmd = float(self.kin.to_q({**measured, name: float(cmd)})[g])
@@ -313,7 +334,7 @@ class PolicyStrategy:
 
     def act(self, obs: Observation) -> Action:
         """One policy tick: the next joint targets, or the end of the run."""
-        if self.kin is None:
+        if self._kin is None:
             raise RuntimeError("policy: act() przed start()")
         st = self.status
         measured = dict(obs.joints)

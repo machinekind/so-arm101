@@ -100,6 +100,7 @@ The plugin contracts are the package `lerobot-mp-api` (see the root README for h
   and the backend factories under `lerobot_mp.backends` (`BACKENDS`).
 - The strategy contract is `lerobot_mp_api.strategy`: `Strategy`, `RunInfo`, `Observation`, `ObjectPose` and `Action`.
   The twin builds a strategy's settings dataclass strictly (`lerobot_mp.twin.strategies`).
+  Every strategy here subclasses `Strategy[ItsSettings]`, and `uv run pyright` checks it against the contract.
   `soarm_lab.strategies.policy.PolicyStrategy` takes `RunInfo` and `Observation` and returns an `Action`.
 - `packages/soarm_lab/pyproject.toml` registers that strategy under `lerobot_mp.strategies` (`STRATEGIES`) as `policy`.
 - The station export is `Workspace.export` in the twin (`lerobot-twin export`). `soarm_lab.station.Station` reads it.

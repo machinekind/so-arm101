@@ -91,7 +91,7 @@ def test_lift_policy_lifts_a_cube_seen_only_by_cameras(twin_robots):
             q = kin.to_q(joints)
             sent = (twin.status.command or {}).get(grip)
             cmd = kin.to_q({**joints, grip: float(sent)})[g] if sent is not None else q[g]
-            closed = strategy.limits.lo[g] if strategy.limits is not None else kin.to_q({grip: 0.0})[g]
+            closed = strategy.limits.lo[g] if strategy.started else kin.to_q({grip: 0.0})[g]
             got = tracker.update(last["det"], kin.tcp(joints), q[g], cmd, closed, clock["t"])
             return {} if got is None else {"cube": ObjectPose(got[0], got[1], tracker.source)}
 
