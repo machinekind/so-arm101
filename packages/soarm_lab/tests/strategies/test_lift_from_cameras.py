@@ -45,7 +45,7 @@ def look(eye, target):
 
 
 def test_lift_policy_lifts_a_cube_seen_only_by_cameras(twin_robots):
-    ws = Workspace()
+    ws = Workspace(robot="so101")
     K = [[560.0, 0, 322.0], [0, 560.0, 236.0], [0, 0, 1]]
     for name, eye in (("a", [0.55, -0.45, 0.45]), ("b", [0.5, 0.5, 0.5])):
         T = look(eye, [0.2, 0, 0]).tolist()

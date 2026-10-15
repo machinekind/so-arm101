@@ -36,7 +36,7 @@ TWIN_PERIOD = 0.02
 
 @pytest.fixture
 def twin(twin_robots):
-    twin = Twin(Workspace(), clock=VirtualClock(t0=0.0))
+    twin = Twin(Workspace(robot="so101"), clock=VirtualClock(t0=0.0))
     try:
         yield twin
     finally:
