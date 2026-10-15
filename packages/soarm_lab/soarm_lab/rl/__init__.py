@@ -1,11 +1,11 @@
-"""Uczenie ze wzmocnieniem SO-101: zadania, srodowiska CPU i GPU, PPO, polityki.
+"""Reinforcement learning for the SO-101: tasks, CPU and GPU environments, PPO, policies.
 
-Identyfikacja dynamiki serw zostaje w blizniaku; jej wynik przychodzi w `station.json`.
-Import rejestruje srodowiska Gymnasium:
+The twin identifies the servo dynamics; the result arrives as data in the exported `station.json`.
+Importing this package registers the Gymnasium environments:
 
-    SoArmLab/Reach-v0       dojazd TCP do punktu (cel losowany z osiagalnych)
-    SoArmLab/Lift-v0        chwyt i podniesienie kostki 3 cm
-    SoArmLab/PickPlace-v0   kostka przeniesiona na cel na blacie i puszczona
+    SoArmLab/Reach-v0       the TCP drives to a point (the goal is sampled from reachable ones)
+    SoArmLab/Lift-v0        grasp and lift a 3 cm cube
+    SoArmLab/PickPlace-v0   carry the cube onto a target on the table and release it
 """
 
 from __future__ import annotations

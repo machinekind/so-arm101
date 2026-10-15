@@ -1,28 +1,30 @@
-"""Most COM <-> TCP: udostepnia port szeregowy ramienia maszynie po sieci.
+"""COM <-> TCP bridge: makes the arm's serial port available to a machine over the network.
 
-Po co to jest
--------------
-Ramie nie jest "urzadzeniem USB", ktore trzeba przepuscic w calosci - jest
-przejsciowka USB-serial, a jedyne, co z niej wychodzi, to strumien bajtow.
-Przekierowanie calego USB wklada siec do srodka petli sterownika portu
-szeregowego: kazda transakcja z serwem czeka wtedy na kilka przebiegow URB
-tam i z powrotem. Most przenosi przez siec sam strumien bajtow, wiec jedna
-transakcja to jeden przebieg, a nie kilka.
+What it is for
+--------------
+The arm is not a "USB device" that has to be passed through whole: it is a
+USB-serial adapter, and all that comes out of it is a byte stream. Redirecting
+the whole USB device puts the network inside the serial port driver's loop:
+every servo transaction then waits for several URB round trips. The bridge
+carries only the byte stream over the network, so one transaction is one
+round trip, not several.
 
-Po stronie maszyny zdalnej wystarczy dowolny sterownik wirtualnego portu
-szeregowego po TCP (HW VSP3, com0com + com2tcp, socat). Aplikacja widzi tam
-zwykly `COM3` czy `/dev/ttyS10` i nie wie, ze port jest gdzie indziej.
+On the remote machine any virtual serial port driver over TCP will do (HW VSP3,
+com0com + com2tcp, socat). The application there sees a plain `COM3` or
+`/dev/ttyS10` and does not know that the port is elsewhere. The `feetech` backend
+needs no driver: it opens `socket://host:5555` itself.
 
-Ograniczenie, ktore trzeba znac
--------------------------------
-Protokol Feetech to pytanie-odpowiedz, a sterownik ma wlasny limit czasu na
-odpowiedz (w feetech-servo-sdk okolo 34 ms przy 1 Mbaud). Lokalnie jedna
-transakcja kosztuje ~0,3 ms, wiec zapas jest ogromny; przez siec kosztuje
-tyle, ile wynosi RTT. Przy laczu ponizej ~20 ms to dziala, powyzej sterownik
-zaczyna zglaszac bledy odczytu. `--stats` pokazuje, ile faktycznie schodzi.
+A limitation to know about
+--------------------------
+The Feetech protocol is request-reply, and the servo driver has its own reply
+timeout (about 34 ms at 1 Mbaud in feetech-servo-sdk). Locally one transaction
+costs ~0.3 ms, so the margin is huge; over the network it costs one RTT. On a
+link under ~20 ms it works; above that the driver starts reporting read errors.
+(The `feetech` backend over `socket://` waits up to 0.25 s.) `--stats` shows
+the actual traffic.
 
-Uruchomienie
-------------
+Running it
+----------
     soarm-bridge --port COM5 --listen 0.0.0.0:5555 --allow 1.2.3.4
 """
 
@@ -37,14 +39,14 @@ from typing import Protocol
 
 logger = logging.getLogger(__name__)
 
-#: Ile czekac na bajty z portu, zanim watek sprawdzi, czy ma sie zatrzymac.
+#: How long to wait for bytes from the port before the thread checks whether to stop.
 POLL_S = 0.02
-#: Gorny limit jednorazowego odczytu - tylko po to, zeby nie alokowac bez konca.
+#: Upper bound of a single read, only so as not to allocate without limit.
 CHUNK = 4096
 
 
 class SerialLike(Protocol):
-    """Tyle z `serial.Serial`, ile most naprawde uzywa (ulatwia testy)."""
+    """As much of `serial.Serial` as the bridge really uses (makes testing easier)."""
 
     in_waiting: int
 
@@ -56,7 +58,7 @@ class SerialLike(Protocol):
 
 
 class Counters:
-    """Licznik bajtow w obie strony - do `--stats` i do testow."""
+    """Byte counts in both directions, for `--stats` and for the tests."""
 
     def __init__(self) -> None:
         self.to_net = 0
@@ -76,11 +78,11 @@ class Counters:
 def _pump_port_to_net(
     link: SerialLike, conn: socket.socket, stop: threading.Event, counters: Counters
 ) -> None:
-    """Port -> siec. Czyta blokujaco jeden bajt, potem zabiera cala reszte naraz.
+    """Port -> network. Reads one byte, blocking (up to POLL_S), then takes all the rest at once.
 
-    Ten uklad daje najmniejsze opoznienie, jakie da sie wycisnac z pyserial:
-    nie ma aktywnego czekania, a odpowiedz serwa idzie dalej w tej samej
-    chwili, w ktorej przyszla - bez doklejania sztucznego okna zbierania.
+    This gives the lowest latency pyserial can deliver: there is no busy
+    waiting, and a servo reply goes on the moment it arrives, without an
+    artificial collection window.
     """
     while not stop.is_set():
         try:
@@ -102,7 +104,7 @@ def _pump_port_to_net(
 def _pump_net_to_port(
     link: SerialLike, conn: socket.socket, stop: threading.Event, counters: Counters
 ) -> None:
-    """Siec -> port."""
+    """Network -> port."""
     while not stop.is_set():
         try:
             data = conn.recv(CHUNK)
@@ -123,7 +125,7 @@ def handle_client(
     counters: Counters | None = None,
     stop: threading.Event | None = None,
 ) -> Counters:
-    """Przepuszcza bajty w obie strony az do rozlaczenia. Blokuje."""
+    """Passes bytes both ways until the client disconnects. Blocks."""
     counters = counters or Counters()
     stop = stop or threading.Event()
     conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -156,10 +158,10 @@ def serve(
     stats_every_s: float = 0.0,
     on_ready: Callable[[int], None] | None = None,
 ) -> None:
-    """Nasluchuje i obsluguje po jednym kliencie naraz.
+    """Listens and serves one client at a time.
 
-    Port szeregowy otwieramy dopiero na polaczenie i zamykamy przy rozlaczeniu -
-    dzieki temu most moze czekac w tle, nie trzymajac urzadzenia zajetego.
+    The serial port is opened only when a client connects and closed when it
+    disconnects, so the bridge can wait in the background without holding the device.
     """
     stop = stop or threading.Event()
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -203,7 +205,7 @@ def serve(
                     reporter.set()
                 try:
                     link.close()
-                except Exception:  # pragma: no cover - zamkniecie nie moze wysypac mostu
+                except Exception:  # pragma: no cover - closing must not crash the bridge
                     logger.exception("Blad przy zamykaniu portu")
                 conn.close()
                 to_net, to_port = counters.snapshot()
@@ -233,7 +235,7 @@ def _start_reporter(counters: Counters, every_s: float) -> threading.Event:
 
 
 def split_listen(value: str) -> tuple[str, int]:
-    """`5555`, `0.0.0.0:5555` albo `127.0.0.1:5555`."""
+    """Parses `--listen`: `5555` (localhost only), `0.0.0.0:5555` or `127.0.0.1:5555`."""
     if ":" in value:
         host, _, port = value.rpartition(":")
         return host or "0.0.0.0", int(port)
@@ -289,8 +291,8 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     def open_link() -> SerialLike:
-        # `timeout` musi byc skonczony, zeby watek portu mogl zauwazyc koniec pracy;
-        # `write_timeout` chroni przed zawieszeniem, gdy plytka przestanie odbierac.
+        # `timeout` must be finite so that the port thread can notice the end of work;
+        # `write_timeout` guards against hanging when the board stops receiving.
         link = serial.Serial(args.port, args.baud, timeout=POLL_S, write_timeout=1.0)
         link.reset_input_buffer()
         link.reset_output_buffer()
@@ -304,5 +306,5 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-if __name__ == "__main__":  # pragma: no cover - wejscie z linii polecen
+if __name__ == "__main__":  # pragma: no cover - command-line entry
     raise SystemExit(main())

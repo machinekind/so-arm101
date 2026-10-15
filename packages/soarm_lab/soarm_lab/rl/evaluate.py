@@ -1,9 +1,8 @@
-"""Ewaluacja polityki na CPU - w zwyklym MuJoCo, nie w tym, w ktorym sie uczyla.
+"""Policy evaluation on the CPU: in plain MuJoCo, not in the engine the policy was trained in.
 
-Polityka uczona w MuJoCo Warp (float32, GPU) jedzie tu w MuJoCo na CPU
-(float64), z randomizacja albo bez. To najtanszy test przenoszenia: jesli
-polityka nie przezywa zmiany silnika fizyki, na pewno nie przezyje zmiany
-na prawdziwe ramie.
+A policy trained in MuJoCo Warp (float32, GPU) runs here in MuJoCo on the CPU (float64), with or
+without randomization. It is the cheapest transfer test: a policy that does not survive a change of
+physics engine will surely not survive the move to the real arm.
 """
 
 from __future__ import annotations
@@ -20,11 +19,12 @@ from .randomize import Dynamics, Randomization
 
 def evaluate(policy: Policy, episodes: int = 50, *, randomization: Randomization | None = None,
              station: Station | None = None, seed: int = 10_000, on_frame=None) -> dict[str, Any]:
-    """`randomization=None` - ramie nominalne: dynamika z `station.dynamics` (identyfikacja), bez rozrzutu.
+    """Success rates and median end distance or height of `policy` over `episodes` CPU episodes.
 
-    Wczesniej None znaczylo model Menagerie, wiec "CPU bez randomizacji" po identyfikacji
-    nie mowilo nic o zmierzonym ramieniu. W wyniku `randomized` mowi, czy dynamika byla
-    losowana naprawde, a `centre` - wokol czego.
+    `randomization=None` is the nominal arm: the dynamics from `station.dynamics` (identification)
+    without spread, so "CPU without randomization" tells about the measured arm, not the Menagerie
+    model (which is what it uses when no `station` is given). In the result, `randomized` says whether
+    the dynamics were really sampled, and `centre` around what.
     """
     spec = (station or Station.load()).spec()
     if policy.meta.robot != spec.name:
@@ -56,6 +56,6 @@ def evaluate(policy: Policy, episodes: int = 50, *, randomization: Randomization
            "randomized": rand.randomized, "centre": rand.centre.source}
     key = "final_distance_mm" if task.name == "reach" else "final_height_mm"
     out[key] = float(np.median(final) * 1000)
-    if place:                                          # pickplace: kostka od celu (xy) na koniec epizodu
+    if place:                                          # pickplace: cube to target (xy) at the episode's end
         out["final_place_mm"] = float(np.median(place) * 1000)
     return out

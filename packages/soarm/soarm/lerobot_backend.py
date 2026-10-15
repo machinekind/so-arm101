@@ -1,9 +1,9 @@
-"""Sterowanie prawdziwym ramieniem SO-101 przez biblioteke LeRobot.
+"""Driving a real SO-101 arm through the LeRobot library.
 
-Uklad modulow w LeRobot zmienial sie miedzy wydaniami (0.4 scalilo SO-100 i
-SO-101 w `lerobot.robots.so_follower`, wczesniej byl osobny `so101_follower`,
-a jeszcze wczesniej caly pakiet siedzial pod `lerobot.common`). Zamiast zakladac
-jedna wersje, szukamy klas po kolei we wszystkich znanych lokalizacjach.
+LeRobot's module layout changed between releases (0.4 merged SO-100 and SO-101
+into `lerobot.robots.so_follower`; before that there was a separate `so101_follower`,
+and earlier still the whole package lived under `lerobot.common`). Instead of
+assuming one version, the classes are looked up in every known location in turn.
 """
 
 from __future__ import annotations
@@ -24,27 +24,27 @@ from .settings import from_mapping
 
 logger = logging.getLogger(__name__)
 
-#: Co tyle odczytow pozycji odczyt rejestru Status serw (bity ochrony: przeciazenie,
-#: przegrzanie, napiecie). `sync_read` LeRobota nie oddaje bajtu bledu odpowiedzi,
-#: wiec bez tego serwo w ochronie (zwolniony moment, dalej grzecznie odpowiada)
-#: wygladalo na zdrowe, a fala i identyfikacja jechaly dalej reszta ramienia.
-#: Przy odczycie pozycji 10 Hz to jeden krotki SYNC READ co 0,3 s - petla tego nie czuje.
-#: Liczone w odczytach, nie w sekundach: blizniak bez watku (testy) ma wlasny zegar,
-#: a zegar sciany stal wtedy w miejscu i Status nie byl czytany wcale.
+#: Read the servos' Status register (protection bits: overload, overheating, voltage) every
+#: this many position reads. LeRobot's `sync_read` does not return the reply error byte, so
+#: without this a servo in protection (torque released, still answering politely) looks
+#: healthy, and the wave and identification carry on with the rest of the arm.
+#: At 10 Hz position reads that is one short SYNC READ every 0.3 s; the loop does not feel it.
+#: Counted in reads, not seconds: the twin without its thread (tests) runs on its own clock,
+#: the wall clock barely moves between its steps, and a time-based interval would never come round.
 STATUS_EVERY_READS = 3
 
-#: Tyle KOLEJNYCH nieudanych odczytow Status (~1,5 s przy 10 Hz) = ochrona serw niewidoczna,
-#: co jest usterka sama w sobie. Pojedyncza czkawka magistrali nie zatrzymuje ramienia.
+#: This many CONSECUTIVE failed Status reads (~1.5 s at 10 Hz) = servo protection is invisible,
+#: which is a fault in itself. A single bus hiccup does not stop the arm.
 STATUS_FAIL_LIMIT = 5
 
-#: Tiki na obrot STS3215, gdy magistrala LeRobota nie poda wlasnej tabeli rozdzielczosci.
+#: STS3215 ticks per turn, when LeRobot's bus gives no resolution table of its own.
 DEFAULT_RESOLUTION = 4096
 
-#: O tyle tikow (~1,8 st.) zero stawu LeRobota (srodek zakresu z kalibracji) moze
-#: odbiegac od zera, ktore zaklada blizniak (`lerobot.center_ticks`), zanim ostrzezemy.
+#: LeRobot's joint zero (the middle of the calibration range) may differ from the zero
+#: the twin assumes (`lerobot.center_ticks`) by this many ticks (~1.8 degrees) before a warning.
 ZERO_TOLERANCE_TICKS = 20
 
-#: Kolejne lokalizacje klas SO-follower - od najnowszej do najstarszej.
+#: Locations of the SO-follower classes to try, newest first.
 _MODULE_CANDIDATES: tuple[str, ...] = (
     "lerobot.robots.so_follower",
     "lerobot.robots.so101_follower",
@@ -78,7 +78,7 @@ def create(ctx: BackendContext) -> LeRobotArm:
 
 
 class LeRobotArm(RobotBackend):
-    """Adapter na `SO101Follower` / `SO100Follower` z LeRobot."""
+    """Adapter for LeRobot's SO follower (`SO101Follower` / `SO100Follower` / `SOFollower`)."""
 
     def __init__(self, ctx: BackendContext):
         self.settings: LeRobotSettings = from_mapping(LeRobotSettings, ctx.settings, "lerobot")
@@ -98,10 +98,10 @@ class LeRobotArm(RobotBackend):
             simulated=False,
         )
 
-    # ------------------------------------------------------------- importy
+    # ------------------------------------------------------------- imports
     @staticmethod
     def _resolve_classes(kind: str) -> tuple[Any, Any, str]:
-        """Znajduje (klasa_robota, klasa_konfiguracji, nazwa_modulu) w LeRobot."""
+        """Finds (robot class, config class, module name) in LeRobot."""
         robot_names = [f"{kind.upper()}Follower", "SOFollower"]
         config_names = [f"{kind.upper()}FollowerConfig", "SOFollowerRobotConfig", "SOFollowerConfig"]
 
@@ -126,7 +126,7 @@ class LeRobotArm(RobotBackend):
         )
 
     def _build_config(self, config_cls: Any) -> Any:
-        """Sklada obiekt konfiguracji, pomijajac pola nieznane danej wersji."""
+        """Builds the config object, skipping fields the installed version does not know."""
         rc = self.settings
         if not self.port:
             raise ValueError(
@@ -144,8 +144,8 @@ class LeRobotArm(RobotBackend):
             # (measured on the real LeRobot stack over an emulator; without the clamp STOP came
             # after 0.78 s). The twin's supervisor limits speed anyway.
             "max_relative_target": None,
-            # LeRobot domyslnie zdejmuje moment przy rozlaczeniu - ramie opada pod
-            # wlasnym ciezarem. U nas decyduje o tym ta sama opcja co w `feetech`.
+            # LeRobot disables torque on disconnect by default, and the arm drops under
+            # its own weight. Here the same option as in `feetech` decides.
             "disable_torque_on_disconnect": rc.torque_off_on_exit,
         }
         if rc.calibration_dir:
@@ -164,7 +164,7 @@ class LeRobotArm(RobotBackend):
             )
         return config_cls(**kwargs)
 
-    # ------------------------------------------------------------ polaczenie
+    # ------------------------------------------------------------ connection
     def connect(self) -> None:
         robot_cls, config_cls, module_name = self._resolve_classes(self._kind)
         logger.info("Uzywam klas LeRobot z modulu %s", module_name)
@@ -193,13 +193,13 @@ class LeRobotArm(RobotBackend):
                 "- albo uzyj backendu `feetech`.")
 
     def _require_calibration_file(self, robot: Any) -> None:
-        """Odmawia polaczenia, zanim cokolwiek dotknie portu, gdy LeRobot nie ma pliku kalibracji.
+        """Refuses to connect, before anything touches the port, when LeRobot has no calibration file.
 
-        Bez pliku `SOFollower.connect()` wola `calibrate()`: zdejmuje moment ze
-        wszystkich serw (ramie trzymane przez poprzednia sesje opada na stol)
-        i czeka na `input()` w konsoli serwera - w panelu nic nie widac, a watek
-        wisi. Dokonczona kalibracja nadpisalaby jeszcze Homing_Offset i limity
-        w EEPROM, czyli zero i zakresy, na ktorych stoi backend `feetech`.
+        Without the file `SOFollower.connect()` calls `calibrate()`: it disables torque on
+        all servos (an arm held by the previous session drops onto the table) and waits
+        for `input()` in the server console; nothing shows in the panel and the thread
+        hangs. A finished calibration would also overwrite Homing_Offset and the limits
+        in EEPROM, i.e. the zero and the ranges the `feetech` backend relies on.
         """
         if getattr(robot, "calibration", None):
             return
@@ -211,12 +211,12 @@ class LeRobotArm(RobotBackend):
         )
 
     def _connect_without_calibration(self, robot: Any) -> None:
-        """Laczy tak, zeby LeRobot nigdy nie zdjal momentu ani nie zapytal o nic w konsoli."""
+        """Connects so that LeRobot never disables torque or asks anything in the console."""
         bus = getattr(robot, "bus", None)
-        # `getattr_static`, nie `hasattr`: `is_calibrated` magistrali LeRobota to wlasciwosc,
-        # ktora CZYTA serwa, a na niepolaczonej rzuca DeviceNotConnectedError (ConnectionError,
-        # nie AttributeError). `hasattr` wywolywal ja przed `bus.connect()` i LeRobot 0.6.1
-        # z plikiem kalibracji nie laczyl sie NIGDY (odtworzone na emulatorze magistrali).
+        # `getattr_static`, not `hasattr`: `is_calibrated` of LeRobot's bus is a property that
+        # READS the servos, and on an unconnected bus it raises DeviceNotConnectedError (a
+        # ConnectionError, not AttributeError). `hasattr` would call it before `bus.connect()`, and
+        # LeRobot 0.6.1 with a calibration file would NEVER connect (reproduced on a bus emulator).
         missing = object()
         if (bus is not None and callable(getattr(bus, "connect", None))
                 and inspect.getattr_static(bus, "is_calibrated", missing) is not missing):
@@ -234,10 +234,10 @@ class LeRobotArm(RobotBackend):
                     "albo kalibracja zmieniona gdzie indziej). " + self._calibrate_hint()
                 )
             if holding:
-                # `configure()` LeRobota robi swoje zapisy pod `torque_disabled()` - przy
-                # ramieniu trzymajacym poze (np. zaraz po sesji `feetech`) to zdjety moment
-                # na czas kilkudziesieciu transakcji, a przez most sekunda swobodnego spadku.
-                # Ustawienia z poprzednich polaczen LeRobota i tak siedza w EEPROM serw.
+                # LeRobot's `configure()` does its writes under `torque_disabled()`. With the
+                # arm holding a pose (e.g. right after a `feetech` session) that is torque off
+                # for a few dozen transactions, and over the bridge a second of free fall.
+                # The settings from earlier LeRobot connections are in the servos' EEPROM anyway.
                 logger.warning("Serwa trzymaja pozycje - pomijam konfiguracje LeRobota, "
                                "zeby nie zdejmowac momentu (ustawienia zostaja z EEPROM).")
                 return
@@ -252,7 +252,7 @@ class LeRobotArm(RobotBackend):
         if not robot.is_calibrated:
             try:
                 robot.disconnect()
-            except Exception:  # pragma: no cover - rozlaczenie nie moze przykryc wlasciwego bledu
+            except Exception:  # pragma: no cover - disconnecting must not hide the real error
                 logger.exception("Blad przy rozlaczaniu robota")
             raise RuntimeError(
                 "Kalibracja LeRobota w pliku nie zgadza sie z zapisana w serwach. " + self._calibrate_hint()
@@ -260,7 +260,7 @@ class LeRobotArm(RobotBackend):
 
     @staticmethod
     def _torque_on(bus: Any) -> bool:
-        """Czy ktores serwo trzyma moment. W razie watpliwosci - tak (bezpieczniej)."""
+        """Whether any servo holds torque. When in doubt, yes (safer)."""
         try:
             return any(int(v) for v in bus.sync_read("Torque_Enable").values())
         except Exception:
@@ -271,23 +271,23 @@ class LeRobotArm(RobotBackend):
     def _close_bus_keeping_torque(bus: Any) -> None:
         try:
             bus.disconnect(disable_torque=False)
-        except Exception:  # pragma: no cover - rozlaczenie nie moze przykryc wlasciwego bledu
+        except Exception:  # pragma: no cover - disconnecting must not hide the real error
             logger.exception("Blad przy zamykaniu magistrali LeRobota")
 
     def motor_names(self) -> list[str]:
-        """Nazwy stawow zgloszone przez LeRobot (kolejnosc jak w sterowniku)."""
+        """Joint names reported by LeRobot (in the driver's order)."""
         if self._robot is None:
             return list(self.joints)
         try:
             return [key.removesuffix(".pos") for key in self._robot.action_features]
-        except Exception:  # pragma: no cover - zalezne od wersji LeRobot
+        except Exception:  # pragma: no cover - depends on the LeRobot version
             return list(self.joints)
 
     def disconnect(self) -> None:
         if self._robot is not None and self._connected:
             try:
                 self._robot.disconnect()
-            except Exception:  # pragma: no cover - rozlaczenie nie moze wysypac aplikacji
+            except Exception:  # pragma: no cover - disconnecting must not crash the application
                 logger.exception("Blad przy rozlaczaniu robota")
         self._connected = False
         self._robot = None
@@ -297,15 +297,15 @@ class LeRobotArm(RobotBackend):
     def is_connected(self) -> bool:
         return self._connected
 
-    # ------------------------------------------------------------- wymiana IO
+    # ------------------------------------------------------------- I/O
     def read_joints(self) -> dict[str, float]:
-        """Pozycje stawow; nieudany odczyt oddaje poprzednie i ustawia `link_silent` (jak `feetech`).
+        """Joint positions; a failed read returns the previous ones and sets `link_silent` (as `feetech`).
 
-        LeRobot rzuca ConnectionError, gdy SYNC READ Present_Position nie dostal odpowiedzi
-        w `num_read_retries + 1` probach - krotka seria zaklocen przy ruchu kilku stawow.
-        Wyjatek konczyl petle blizniaka (rozlaczenie, ponowne laczenie w panelu), a `feetech`
-        przezywa to samo bez mrugniecia. Kolejne nieudane cykle ida do `faults()`
-        ("brak odpowiedzi serw ..."), ktore blizniak traktuje jak zerwane lacze.
+        LeRobot raises ConnectionError when the SYNC READ of Present_Position got no reply
+        in `num_read_retries + 1` tries: a short burst of noise while several joints move.
+        Raising would end the twin's loop (disconnect, reconnect in the panel), while `feetech`
+        rides out the same thing. Consecutive failed cycles go to `faults()`
+        ("brak odpowiedzi serw ..."), which the twin treats as a dead link.
         """
         if self._robot is None:
             raise RuntimeError("Robot nie jest polaczony")
@@ -313,7 +313,7 @@ class LeRobotArm(RobotBackend):
             observation = self._robot.get_observation()
         except ConnectionError as exc:
             if not self._positions or not self._robot_connected():
-                raise                               # nie ma czego oddac albo robot naprawde rozlaczony
+                raise                               # nothing to return, or the robot really is disconnected
             self._link_silent, self._stale = True, list(self._positions)
             self._failed_cycles += 1
             self._link_error = f"{type(exc).__name__}: {exc}"
@@ -335,24 +335,25 @@ class LeRobotArm(RobotBackend):
         return dict(positions)
 
     def _robot_connected(self) -> bool:
-        """`DeviceNotConnectedError` to tez ConnectionError - rozlaczony robot nie jest czkawka lacza."""
+        """Whether the robot is still connected: `DeviceNotConnectedError` is a ConnectionError too, and a
+        disconnected robot is not a link hiccup."""
         try:
             return bool(getattr(self._robot, "is_connected", True))
-        except Exception:  # pragma: no cover - zalezne od wersji LeRobot
+        except Exception:  # pragma: no cover - depends on the LeRobot version
             return False
 
     def send_joints(self, targets: dict[str, float]) -> dict[str, float]:
         if self._robot is None:
             raise RuntimeError("Robot nie jest polaczony")
         if self._link_silent:
-            # Jak `feetech`: ostatni odczyt nie dostal odpowiedzi - nic nie wysylamy, dopoki
-            # odczyt nie potwierdzi, ze serwa slysza i gdzie ramie naprawde jest.
+            # As in `feetech`: the last read got no reply, so nothing is sent until a read
+            # confirms that the servos hear and where the arm really is.
             return {}
         known = set(self.motor_names())
-        # W stopniach LeRobot nie przycina celu (przycina tylko skale -100..100 i 0..100),
-        # a serwo robi to po cichu do Min/Max_Position_Limit z EEPROM. Przycinamy tutaj,
-        # zeby wyzej wrocilo to, co NAPRAWDE pojechalo - inaczej nadzor, polityka
-        # i identyfikacja liczyly na pozycji, ktorej ramie nigdy nie osiagnelo (jak w `feetech`).
+        # In degrees LeRobot does not clamp the goal (it clamps only the -100..100 and 0..100 scales),
+        # and the servo silently clamps it to Min/Max_Position_Limit in EEPROM. Clamping here lets
+        # the caller see what ACTUALLY went out; otherwise the supervisor, the policy and
+        # identification would work from a position the arm never reached (as in `feetech`).
         limits = self.joint_limits()
         action: dict[str, float] = {}
         for name, value in targets.items():
@@ -365,8 +366,9 @@ class LeRobotArm(RobotBackend):
         try:
             sent = self._robot.send_action(action)
         except ConnectionError:
-            # Z `max_relative_target` LeRobot czyta Present_Position PRZED zapisem celu - ten
-            # odczyt tez gubi ramki. Nic nie poszlo; wolajacy zostaje przy poprzednim rozkazie.
+            # LeRobot raises ConnectionError when the bus write fails (and, with `max_relative_target`
+            # set, which this backend never does, when the Present_Position read before the write
+            # loses frames). Nothing is reported as sent; the caller stays on its previous command.
             if not self._robot_connected():
                 raise
             logger.debug("Nieudany odczyt pozycji przed wyslaniem celu - nic nie wyslano", exc_info=True)
@@ -377,31 +379,31 @@ class LeRobotArm(RobotBackend):
             if key.endswith(".pos")
         }
 
-    # ------------------------------------------------------------ stan serw
+    # ------------------------------------------------------------ servo state
     def _reset_status(self) -> None:
-        #: Ostatnio odczytany rejestr Status kazdego serwa {staw: bity}.
+        #: The last Status register read from each servo {joint: bits}.
         self._status: dict[str, int] = {}
-        #: Odczyty pozycji do nastepnego odczytu Status (0 = przy najblizszym).
+        #: Position reads left until the next Status read (0 = at the next one).
         self._reads_to_status = 0
-        #: KOLEJNE nieudane odczyty Status i ostatni blad (do komunikatu).
+        #: CONSECUTIVE failed Status reads and the last error (for the message).
         self._status_failures = 0
         self._status_error = ""
-        #: Ostatnie dobre pozycje - oddawane, gdy odczyt nie dostal odpowiedzi.
+        #: The last good positions, returned when a read gets no reply.
         self._positions: dict[str, float] = {}
-        #: Ostatni odczyt pozycji bez odpowiedzi (`link_silent`) i stawy bez swiezej wartosci.
+        #: The last position read got no reply (`link_silent`), and the joints without a fresh value.
         self._link_silent = False
         self._stale: list[str] = []
-        #: KOLEJNE nieudane odczyty pozycji, ostatni blad i czas ostatniego dobrego odczytu.
+        #: CONSECUTIVE failed position reads, the last error, and the time of the last good read.
         self._failed_cycles = 0
         self._link_error = ""
         self._last_full_read = time.monotonic()
 
     def _poll_status(self) -> None:
-        """Czyta rejestr Status wszystkich serw co `STATUS_EVERY_READS` odczytow pozycji. Nigdy nie rzuca.
+        """Reads the Status register of all servos every `STATUS_EVERY_READS` position reads. Never raises.
 
-        Rejestr ma te same bity, co bajt bledu odpowiedzi (0x20 przeciazenie, 0x04
-        przegrzanie...), a SYNC READ odpowiada nawet serwo w ochronie. Nieudany odczyt
-        zostawia poprzedni stan - bity przeciazenia nie znikaja przez jedna zgubiona ramke.
+        The register has the same bits as the reply error byte (0x20 overload, 0x04
+        overheating...), and even a servo in protection answers SYNC READ. A failed read
+        keeps the previous state: overload bits do not vanish because of one lost frame.
         """
         if self._reads_to_status > 0:
             self._reads_to_status -= 1
@@ -421,10 +423,10 @@ class LeRobotArm(RobotBackend):
                 logger.debug("Nieudany odczyt Status serw: %s", self._status_error)
 
     def faults(self) -> list[str]:
-        """Bity ochrony z rejestru Status serw i utrata ich odczytu - zdania dla operatora.
+        """Status protection bits, lost Status reads and link loss, as sentences for the operator.
 
-        Te same zdania co w `feetech` ("staw (serwo N): przeciazenie"), wiec nadzor
-        blizniaka zatrzymuje ramie tak samo na obu backendach.
+        The same sentences as in `feetech` ("shoulder_lift (serwo 2): przeciazenie"), so the
+        twin's supervisor stops the arm the same way on both backends.
         """
         try:
             out: list[str] = []
@@ -436,23 +438,23 @@ class LeRobotArm(RobotBackend):
                 out.append(f"stan serw nieznany - {self._status_failures} nieudanych odczytow rejestru "
                            f"Status z rzedu, ochrona serw niewidoczna ({self._status_error})")
             if self._connected and self._failed_cycles >= LINK_LOSS_CYCLES:
-                # To samo zdanie co `feetech` - blizniak rozpoznaje po nim zerwane lacze.
+                # The same sentence as in `feetech`: the twin recognises a dead link by it.
                 ms = (time.monotonic() - self._last_full_read) * 1000.0
                 out.append(f"brak odpowiedzi serw od {ms:.0f} ms ({self._link_error})")
             return out
-        except Exception as exc:  # pragma: no cover - wolane co cykl petli, nie moze jej wysypac
+        except Exception as exc:  # pragma: no cover - called every loop cycle, must not crash it
             logger.exception("Nie udalo sie sprawdzic stanu serw")
             return [f"nie udalo sie sprawdzic stanu serw: {exc}"]
 
-    # ------------------------------------------------------------ kalibracja
+    # ------------------------------------------------------------ calibration
     def _bus(self) -> Any:
         return getattr(self._robot, "bus", None) if self._robot is not None else None
 
     def _calibration(self) -> dict[str, Any]:
-        """Kalibracja, ktora LeRobot naprawde stosuje (ta z magistrali), inaczej ta z pliku.
+        """The calibration LeRobot actually applies (the bus's), otherwise the one from the file.
 
-        Przy laczeniu `is_calibrated` sprawdzilo, ze zakresy z pliku sa rowne
-        Min/Max_Position_Limit w EEPROM serw - wiec to jest tez to, do czego serwo przycina.
+        Connecting checks (`is_calibrated`) that the file's ranges equal Min/Max_Position_Limit
+        in the servos' EEPROM, so this is also what the servo clamps to.
         """
         cal = getattr(self._bus(), "calibration", None) or getattr(self._robot, "calibration", None)
         return dict(cal) if cal else {}
@@ -464,7 +466,7 @@ class LeRobotArm(RobotBackend):
         return {str(name): int(getattr(m, "id", 0)) for name, m in self._motors().items()}
 
     def _norm_mode(self, name: str) -> str:
-        """Tryb normalizacji stawu w LeRobot: DEGREES, RANGE_M100_100 albo RANGE_0_100."""
+        """LeRobot's normalisation mode of the joint: DEGREES, RANGE_M100_100 or RANGE_0_100."""
         mode = getattr(self._motors().get(name), "norm_mode", None)
         return str(getattr(mode, "name", mode) or "").upper()
 
@@ -476,8 +478,10 @@ class LeRobotArm(RobotBackend):
         return bool(getattr(self._bus(), "apply_drive_mode", True)) and bool(getattr(cal, "drive_mode", 0))
 
     def _ticks_to_units(self, name: str, ticks: float) -> float | None:
-        """Tiki serwa -> jednostki LeRobota, tym samym wzorem co `MotorsBus._normalize`
-        (bez przycinania do zakresu). None = staw bez kalibracji albo w nieznanym trybie."""
+        """Servo ticks -> LeRobot units, by the same formula as `MotorsBus._normalize`, unclamped.
+
+        None = a joint without calibration or in an unknown mode.
+        """
         cal = self._calibration().get(name)
         if cal is None:
             return None
@@ -486,7 +490,7 @@ class LeRobotArm(RobotBackend):
             return None
         mode = self._norm_mode(name)
         if mode == "DEGREES":
-            # Zero stawu w stopniach to SRODEK zakresu z kalibracji; drive_mode tu nie dziala.
+            # In degrees joint zero is the MIDDLE of the calibration range; drive_mode does not apply.
             return (ticks - (lo + hi) / 2.0) * 360.0 / (self._resolution(name) - 1)
         if mode == "RANGE_M100_100":
             norm = (ticks - lo) / (hi - lo) * 200.0 - 100.0
@@ -497,11 +501,11 @@ class LeRobotArm(RobotBackend):
         return None
 
     def joint_limits(self) -> dict[str, tuple[float, float]]:
-        """Zakres z kalibracji LeRobota (= Min/Max_Position_Limit w EEPROM) w jednostkach aplikacji.
+        """The range from LeRobot's calibration (= Min/Max_Position_Limit in EEPROM) in app units.
 
-        Tylko stawy, ktore serwo naprawde ogranicza - pelny obrot (0..4095, zwykle
-        wrist_roll) jest pomijany jak w `feetech`. Bez tego nadzor liczyl na cele
-        spoza zakresu, ktore serwo po cichu przycinalo.
+        Only the joints the servo really limits: a full turn (0..4095, usually wrist_roll)
+        is skipped, as in `feetech`. Without this the supervisor would work with targets
+        outside the range, which the servo silently clamps.
         """
         out: dict[str, tuple[float, float]] = {}
         for name, cal in self._calibration().items():
@@ -534,13 +538,13 @@ class LeRobotArm(RobotBackend):
         return (closed - zero) * 2.0 * math.pi / res, (opened - zero) * 2.0 * math.pi / res
 
     def joint_zero_offsets(self) -> dict[str, float]:
-        """O ile stopni zero stawu LeRobota lezy od zera blizniaka: {staw: stopnie} (ponad tolerancje).
+        """How far LeRobot's joint zero lies from the twin's: {joint: degrees} (beyond the tolerance).
 
-        W stopniach LeRobot liczy kat od SRODKA zakresu z kalibracji, a blizniak
-        (kinematyka, polityki) od `lerobot.center_ticks` - tak jak backend `feetech`.
-        Dla typowej kalibracji SO-101 to kilka stopni na stawie, dla zakresu nagranego
-        tylko w jedna strone (limity ramienia nr 1: wrist_flex 2025..2858) ~35 st.
-        Nie przeliczamy tego po cichu - zmienilyby sie jednostki zapisow zgodnych z LeRobotem.
+        In degrees LeRobot counts the angle from the MIDDLE of the calibration range, the twin
+        (kinematics, policies) from `lerobot.center_ticks`, as the `feetech` backend does.
+        For a typical SO-101 calibration that is a few degrees per joint; for a range recorded
+        in one direction only (the limits of arm no. 1: wrist_flex 2025..2858) ~35 degrees.
+        This is not converted silently: that would change the units of LeRobot-compatible recordings.
         """
         center = float(self.settings.center_ticks)
         out: dict[str, float] = {}
@@ -553,17 +557,17 @@ class LeRobotArm(RobotBackend):
         return out
 
     def non_degree_joints(self) -> list[str]:
-        """Stawy ramienia (bez chwytaka), ktorych LeRobot NIE podaje w stopniach.
+        """Arm joints (not the gripper) that LeRobot does NOT report in degrees.
 
-        `lerobot.use_degrees: false` przestawia je na -100..100 procent zakresu z kalibracji,
-        a kinematyka, polityki i IK traktuja kazda liczbe jak stopnie - 100 "stopni" to wtedy
-        koniec zakresu stawu. Wczesniej nic w panelu o tym nie mowilo.
+        `lerobot.use_degrees: false` switches them to -100..100 percent of the calibration range,
+        while kinematics, policies and IK treat every number as degrees: 100 "degrees" is then
+        the end of the joint's range. `calibration_warnings` reports them to the panel.
         """
         return [str(name) for name in self._motors()
                 if name != self.gripper and self._norm_mode(str(name)) != "DEGREES"]
 
     def calibration_warnings(self) -> list[str]:
-        """Niefatalne zastrzezenia do kalibracji tego ramienia - zdania dla panelu. Nigdy nie rzuca."""
+        """Non-fatal caveats about this arm's calibration, as sentences for the panel. Never raises."""
         try:
             out: list[str] = []
             wrong_units = self.non_degree_joints()
@@ -580,7 +584,7 @@ class LeRobotArm(RobotBackend):
                            f"przesuniete wzgledem modelu ({shifts}) - do pracy z blizniakiem uzyj backendu "
                            "`feetech`.")
             return out
-        except Exception as exc:  # pragma: no cover - sama diagnostyka nie moze zablokowac polaczenia
+        except Exception as exc:  # pragma: no cover - diagnostics alone must not block connecting
             logger.debug("Nie udalo sie porownac zera stawow z kalibracja LeRobota", exc_info=True)
             return [f"nie udalo sie sprawdzic kalibracji LeRobota: {exc}"]
 

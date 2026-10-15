@@ -1,4 +1,4 @@
-"""Srodowiska RL laboratorium: zgodnosc numpy/torch, identyfikatory Gymnasium, render z kamer stanowiska."""
+"""The lab's RL environments: numpy/torch agreement, Gymnasium ids, renders from the station's cameras."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from soarm_lab.station import Station  # noqa: E402
 
 
 def test_observation_and_reward_are_the_same_in_numpy_and_torch():
-    """Jedna definicja zadania dla CPU, GPU i ramienia - wzory nie moga sie rozjechac."""
+    """One task definition for the CPU, the GPU and the arm: the formulas must not drift apart."""
     torch = pytest.importorskip("torch")
     task = tk.make_task("pickplace")
     env = ArmEnv(task, randomization=Randomization.none())
@@ -33,16 +33,16 @@ def test_observation_and_reward_are_the_same_in_numpy_and_torch():
     jaws = rng.integers(0, 2, (n, 2)).astype(float)
 
     task = tk.make_task("pickplace", limit_penalty=0.5, hold_still=0.5, end_on_success=2, roll_penalty=0.3)
-    cube[: n // 2, 2] = 0.09                                   # polowa "podniesiona" - sukces i kara za ruch
+    cube[: n // 2, 2] = 0.09                                   # half lifted: the carry latch, the lift term
     streak = rng.integers(0, 3, n)
-    # Cel, predkosc kostki, zatrzask i otwarty chwytak - tak, zeby czesc swiatow miala sukces.
+    # Target, cube velocity, latch and open gripper, set so that some worlds succeed.
     target = np.c_[rng.normal(0, 0.2, (n, 2)), np.zeros(n)]
     vel = rng.normal(0, 0.02, (n, 3))
     carried = rng.integers(0, 2, n).astype(bool)
     opened = rng.integers(0, 2, n).astype(bool)
     cube[n // 2:, 2] = task.cube_half + rng.uniform(-0.002, 0.004, n - n // 2)
     cube[n // 2::2, :2] = target[n // 2::2, :2] + rng.normal(0, 0.01, (len(cube[n // 2::2]), 2))
-    ok = slice(n // 2, n, 4)                                   # tu wszystkie warunki sukcesu naraz
+    ok = slice(n // 2, n, 4)                                   # every success condition at once here
     vel[ok], jaws[ok], carried[ok], opened[ok] = 0.001, 0.0, True, True
 
     def run(xp, conv):
@@ -63,11 +63,11 @@ def test_observation_and_reward_are_the_same_in_numpy_and_torch():
     for x, y in zip(a, b):
         assert np.allclose(x, y, atol=1e-9)
     assert a[0].shape == (n, task.obs_dim)
-    assert 0 < a[2].sum() < n                                  # sukces w czesci swiatow - obie galezie liczone
+    assert 0 < a[2].sum() < n                                  # success in some worlds: both branches run
 
 
 def test_gymnasium_ids_of_the_lab():
-    """Import rejestruje srodowiska laboratorium pod `SoArmLab/*-v0`."""
+    """Importing `soarm_lab.rl` registers the lab's environments as `SoArmLab/*-v0`."""
     import soarm_lab.rl  # noqa: F401
 
     env = gym.make("SoArmLab/Reach-v0")

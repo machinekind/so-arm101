@@ -26,16 +26,16 @@ REST_TICKS = 2048
 
 
 class FakeBusLink:
-    """Szesc serw na jednej magistrali - tyle protokolu, ile backend uzywa."""
+    """Servos on one bus (six by default): as much of the protocol as the backend uses."""
 
-    #: Starszy firmware nie zna SYNC READ i po prostu milczy.
+    #: Older firmware does not know SYNC READ and simply stays silent.
     knows_sync_read = True
 
     def __init__(self, ids=(1, 2, 3, 4, 5, 6), start_ticks: int = REST_TICKS):
         self.registers = {
             dev_id: {
                 ADDR_TORQUE_ENABLE: 0,
-                ADDR_GOAL_POSITION: 3000,  # celowo INNY niz pozycja biezaca
+                ADDR_GOAL_POSITION: 3000,  # deliberately DIFFERENT from the present position
                 ADDR_PRESENT_POSITION: start_ticks,
                 ADDR_PRESENT_VOLTAGE: 119,
                 ADDR_MIN_ANGLE_LIMIT: 0,
@@ -43,16 +43,17 @@ class FakeBusLink:
             }
             for dev_id in ids
         }
-        #: Slad operacji: ("ping"|"read"|"write"|"sync", id, addr, wartosc).
+        #: Operation trace: (kind, id, addr, value). Kinds: "ping", "read", "write", "sync" (one
+        #: SYNC WRITE target), "syncread" (value = the ids asked) and "cisza" (an id not on the bus).
         self.log: list[tuple] = []
-        #: Bajt bledu, ktory serwo wpisuje w kazda odpowiedz (0x20 = przeciazenie).
+        #: The error byte the servo puts in every reply (0x20 = overload).
         self.status: dict[int, int] = {}
-        #: Serwa, ktore przestaly odpowiadac (odlaczony przewod, zgubione ramki).
+        #: Servos that stopped answering (unplugged cable, lost frames).
         self.mute: set[int] = set()
-        #: Cala magistrala milczy - tak wyglada zerwany most sieciowy.
+        #: The whole bus is silent: this is what a dead network bridge looks like.
         self.silent = False
-        #: Serwa, ktorych NASTEPNA odpowiedz z danymi dostanie przeklamany bit
-        #: przy niezmienionej sumie kontrolnej - zaklocenie na linii TTL.
+        #: Servos whose NEXT reply with data gets a flipped bit while the checksum
+        #: stays the same: noise on the TTL line.
         self.corrupt_next: set[int] = set()
         self._out = bytearray()
         self.closed = False
@@ -78,7 +79,7 @@ class FakeBusLink:
     def in_waiting(self) -> int:
         return len(self._out)
 
-    # --------------------------------------------------------------- serwo
+    # --------------------------------------------------------------- servo
     def write(self, data: bytes) -> int:
         assert data[:2] == b"\xff\xff", "brak naglowka pakietu"
         dev_id, length, instruction = data[2], data[3], data[4]
@@ -86,8 +87,8 @@ class FakeBusLink:
         assert checksum(data[2:-1]) == data[-1], "zla suma kontrolna"
         assert length == len(params) + 2, "dlugosc nie zgadza sie z parametrami"
 
-        # Serwo, ktorego nie ma na magistrali, po prostu milczy - i tak wlasnie
-        # wyglada brakujacy staw dla backendu.
+        # A servo that is not on the bus simply stays silent, and that is exactly
+        # what a missing joint looks like to the backend.
         if dev_id != BROADCAST_ID and dev_id not in self.registers:
             self.log.append(("cisza", dev_id, None, None))
             return len(data)
@@ -123,7 +124,7 @@ class FakeBusLink:
                 value = int.from_bytes(body[offset + 1 : offset + stride], "little")
                 self.registers[target][addr] = value
                 self.log.append(("sync", target, addr, value))
-        else:  # pragma: no cover - backend nie uzywa innych instrukcji
+        else:  # pragma: no cover - the backend uses no other instructions
             raise AssertionError(f"nieznana instrukcja 0x{instruction:02X}")
         return len(data)
 
@@ -134,9 +135,9 @@ class FakeBusLink:
         packet = bytearray(b"\xff\xff" + body + bytes([checksum(body)]))
         if dev_id in self.corrupt_next and payload:
             self.corrupt_next.discard(dev_id)
-            packet[-2] ^= 0x08                       # bit 3 starszego bajtu: 2048 tikow -> 0
+            packet[-2] ^= 0x08                       # bit 3 of the high byte: 2048 ticks -> 0
         self._out += packet
 
-    # ------------------------------------------------------------- pomocnicze
+    # ------------------------------------------------------------- helpers
     def ops(self, kind: str) -> list[tuple]:
         return [entry for entry in self.log if entry[0] == kind]

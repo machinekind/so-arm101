@@ -32,7 +32,7 @@ def mlp(sizes: list[int], out: int) -> nn.Sequential:
 
 
 class Normalizer(nn.Module):
-    """Srednia i wariancja obserwacji liczone w trakcie treningu, potem zamrozone."""
+    """The observations' running mean and variance: updated during training (`update`), fixed after."""
 
     def __init__(self, dim: int, clip: float = 5.0):
         super().__init__()
@@ -68,7 +68,7 @@ class TorchPolicy(nn.Module):
 
     @torch.no_grad()
     def act(self, obs: np.ndarray) -> np.ndarray:
-        """Akcja deterministyczna (srednia rozkladu), przycieta do [-1, 1]."""
+        """The deterministic action (the distribution's mean), clipped to [-1, 1]."""
         x = torch.as_tensor(np.asarray(obs, np.float32), device=self.norm.mean.device)
         single = x.ndim == 1
         a = self(x[None] if single else x).clamp(-1.0, 1.0).cpu().numpy()

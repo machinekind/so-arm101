@@ -1,37 +1,36 @@
-"""Srodowisko wsadowe na GPU: tysiace swiatow MuJoCo Warp, obserwacje jako tensory torch.
+"""The GPU batch environment: thousands of MuJoCo Warp worlds, observations as torch tensors.
 
     env = BatchEnv("reach", num_envs=4096)
-    obs = env.reset()                                  # (N, obs_dim) na cuda
-    obs, rew, done, info = env.step(actions)           # actions (N, act_dim) w [-1, 1]
+    obs = env.reset()                                  # (N, obs_dim) on cuda
+    obs, rew, done, info = env.step(actions)           # actions (N, act_dim) in [-1, 1]
 
-Ta sama scena, te same wzory (`task`) co `env.ArmEnv` na CPU - roznica to
-tylko, gdzie liczy sie fizyka. Na RTX A4500 scena z kostka robi ok.
-1,1 mln krokow fizyki na sekunde przy 8192 swiatach, a trajektoria jednego
-swiata zgadza sie z MuJoCo na CPU do 0,001 st. po 2 s.
+The same scene and the same formulas (`task`) as `env.ArmEnv` on the CPU; the only difference is
+where the physics runs. On an RTX A4500 the cube scene does about 1.1 million physics steps per
+second with 8192 worlds, and the trajectory of one world matches CPU MuJoCo to 0.001 deg after 2 s.
 
-Konwencja jak w legged_gym / rsl_rl: srodowiska resetuja sie same, `done`
-oznacza koniec epizodu w tym kroku, a zwracana obserwacja jest juz z nowego
-epizodu. `info["time_outs"]` mowi, ktore skonczyly sie limitem czasu albo seria
-sukcesow (`task.end_on_success`, wtedy tez `info["finished"]`) - PPO dolicza
-im wartosc stanu zamiast zera.
+The convention follows legged_gym / rsl_rl: environments reset themselves, `done` marks the end of an
+episode in this step, and the returned observation already belongs to the new episode.
+`info["time_outs"]` says which worlds ended on the time limit or on a success streak
+(`task.end_on_success`, then `info["finished"]` too): PPO bootstraps them with the state value
+instead of zero.
 
-Srodowisko dawnego trenera w torchu: potrzebuje dodatkow `soarm-lab[torch]` i `soarm-lab[train]`.
+This is the environment of the legacy torch trainer: it needs the `soarm-lab[torch]` and
+`soarm-lab[train]` extras.
 
-Stan MuJoCo Warp jest wystawiony jako widoki torch (`wp.to_torch`) - bez kopii.
-Fizyka to jeden przechwycony graf CUDA z `substeps` krokami; torch i Warp
-synchronizujemy jawnie przed i po nim (dwa synchronizacje na krok polityki,
-nieistotne przy kilkudziesieciu milisekundach fizyki).
+The MuJoCo Warp state is exposed as torch views (`wp.to_torch`), without copies. The physics is one
+captured CUDA graph of `substeps` steps; torch and Warp are synchronized explicitly before and after
+it (two synchronizations per policy step, negligible next to tens of milliseconds of physics).
 
-pickplace: cel odlozenia to podkladka mocap (`d.mocap_pos` - osobna w kazdym swiecie),
-bez kolizji, wiec budzet kontaktow jest ten sam co w lift. Zatrzask "kostka niesiona"
-(`self.carried`) i losowanie celow (`_sample_targets`) to linia w linie to samo co
-`env.ArmEnv` i `task.sample_targets` - pilnuje tego test zgodnosci GPU/CPU.
+pickplace: the place target is a mocap pad (`d.mocap_pos`, separate in every world) without
+collisions, so the contact budget is the same as in lift. The "cube carried" latch (`self.carried`)
+is the same `task.carry_latch` that `env.ArmEnv` uses, and target sampling (`_sample_targets`)
+follows the same rule as `task.sample_targets`.
 
-Budzet kontaktow na swiat (`CONTACTS`: nconmax, njmax) dla zadan z kostka. Zmierzone
-w MuJoCo na CPU (najwiecej w jednym kroku fizyki, epizody losowe i ekspert pickplace):
-SO-101 24 kontakty / 142 wiersze wiezow (ekspert, chwyt), A1X 12 / 49. MuJoCo Warp
-generuje kontakty siatek (otoczki wypukle ogniw A1X) inaczej niz CPU - A1X dostaje
-zapas 64 / 384, do potwierdzenia na GPU (`int(env.d.ncon.numpy().max())` po 200 krokach).
+The contact budget per world (`CONTACTS`: nconmax, njmax) for the tasks with a cube. Measured in
+CPU MuJoCo (the most in one physics step, over random episodes and a scripted pickplace expert):
+SO-101 24 contacts / 142 constraint rows (expert, grasp), A1X 12 / 49. MuJoCo Warp generates mesh
+contacts (the convex hulls of the A1X links) differently from the CPU, so the A1X gets a margin of
+64 / 384, still to be confirmed on a GPU (`int(env.d.ncon.numpy().max())` after 200 steps).
 """
 
 from __future__ import annotations
@@ -46,7 +45,8 @@ from ._torch import torch
 from .env import TARGET_SIZE, scene_config
 from .randomize import Randomization
 
-#: (nconmax, njmax) na swiat w zadaniach z kostka; bez kostki (reach) 16 / 64. Patrz docstring modulu.
+#: (nconmax, njmax) per world in the tasks with a cube; without a cube (reach) 16 / 64. See the module
+#: docstring.
 CONTACTS = {"so101": (32, 192), "a1x": (64, 384)}
 
 
@@ -88,8 +88,8 @@ class BatchEnv:
                                 "body_invweight0", "dof_invweight0")}
         self.m = mjw.put_model(mjm, batch_sizes=batch)
         if hasattr(self.m.opt, "warn_overflow"):
-            # Przepelnienie iteracji solvera to w MuJoCo zwykle "zatrzymaj sie tu",
-            # nie blad - na CPU nikt o tym nie krzyczy. Tu drukowaloby sie co krok.
+            # In MuJoCo a solver iteration overflow usually means "stop here", not an error;
+            # the CPU does not complain about it. Here it would print every step.
             self.m.opt.warn_overflow = 0
         cube = self.task.cube is not None
         nconmax, njmax = CONTACTS.get(spec.name, CONTACTS["so101"]) if cube else (16, 64)
@@ -100,7 +100,7 @@ class BatchEnv:
         self.qacc_ws = t(self.d.qacc_warmstart)
         self.site_xpos, self.xpos, self.xmat = t(self.d.site_xpos), t(self.d.xpos), t(self.d.xmat)
         self.sensordata = t(self.d.sensordata) if cube else None
-        #: pickplace: polozenia cial mocap (N, nmocap, 3) - podkladka celu.
+        #: pickplace: positions of the mocap bodies (N, nmocap, 3): the target pad.
         self.mocap_pos = t(self.d.mocap_pos) if self.task.target else None
         self.f = {k: t(getattr(self.m, k)) for k in batch}
         self.nominal = {k: v[0].clone() for k, v in self.f.items()}
@@ -135,24 +135,25 @@ class BatchEnv:
             self.goal_pool = torch.as_tensor(pool, **f32)
 
         self.goal = torch.zeros(N, 3, **f32)
-        #: pickplace: cel odlozenia na blacie (z = 0) i zatrzask "kostka niesiona" (`task.carry_latch`).
+        #: pickplace: the place target on the table top (z = 0) and the "cube carried" latch
+        #: (`task.carry_latch`).
         self.target = torch.zeros(N, 3, **f32)
         self.carried = torch.zeros(N, dtype=torch.bool, device=dev)
         self.q_cmd = self.home.repeat(N, 1)
         self.prev_action = torch.zeros(N, self.task.act_dim, **f32)
-        # Opoznienie akcji: ostatnie akcje w buforze pierscieniowym, dla kazdego swiata
-        # wlasne {min_delay .. max_delay} taktow - jak kolejka w ArmEnv. Wczesniej byl tu
-        # jeden slot i opoznienie sciete do 0/1 taktu: po identyfikacji (1,4 taktu,
-        # max_delay 3) trening nie widzial nigdy 2-3 taktow, a ewaluacja na CPU - tak.
+        # Action delay: the latest actions in a ring buffer, each world with its own delay of
+        # {min_delay .. max_delay} ticks, like the queue in ArmEnv. A single slot would cap the
+        # delay at 0/1 tick: after an identification of 1.4 ticks (max_delay 3) training would
+        # never see a delay of 2-3 ticks, while the CPU evaluation does.
         self.Hd = int(self.rand.max_delay) + 1
         self.act_hist = torch.zeros(self.Hd, N, self.task.act_dim, **f32)
         self.delay_n = torch.zeros(N, dtype=torch.long, device=dev)
         self.ar = torch.arange(N, device=dev)
         self.t = torch.zeros(N, dtype=torch.long, device=dev)
-        self.streak = torch.zeros(N, dtype=torch.long, device=dev)   # takty sukcesu z rzedu
+        self.streak = torch.zeros(N, dtype=torch.long, device=dev)   # success ticks in a row
         self.noise = float(np.radians(self.rand.obs_noise_deg))
-        # Percepcja kostki (patrz Randomization.cube_*): historia w buforze pierscieniowym,
-        # opoznienie i okres odswiezania osobno dla kazdego swiata.
+        # Cube perception (see Randomization.cube_*): the history in a ring buffer, the delay and
+        # the refresh period separate for every world.
         self.H = int(self.rand.cube_delay) + 1
         self.hist_pos = torch.zeros(self.H, N, 3, **f32)
         self.hist_rot = torch.eye(3, **f32).repeat(self.H, N, 1, 1)
@@ -162,17 +163,17 @@ class BatchEnv:
         self.seen_pos = torch.zeros(N, 3, **f32)
         self.seen_rot = torch.eye(3, **f32).repeat(N, 1, 1)
 
-        mjw.step(self.m, self.d)                          # kompilacja kerneli (raz, potem z cache)
+        mjw.step(self.m, self.d)                          # compiles the kernels (once, then cached)
         wp.synchronize_device()
         with wp.ScopedCapture() as cap:
             for _ in range(self.task.substeps):
                 mjw.step(self.m, self.d)
-            # Jak w ArmEnv.step: po krokach xpos/site_xpos sa sprzed ostatniego calkowania,
-            # wiec kinematyka od nowa - TCP i kostka z tego samego q, co katy w obserwacji.
+            # As in ArmEnv.step: after the steps xpos/site_xpos are from before the last integration,
+            # so the kinematics run again: the TCP and the cube from the same q as the observed angles.
             mjw.kinematics(self.m, self.d)
         self.graph = cap.graph
 
-    # ------------------------------------------------------------ pomocnicze
+    # ------------------------------------------------------------ helpers
     def _u(self, *shape, lo=0.0, hi=1.0):
         return lo + (hi - lo) * torch.rand(*shape, generator=self.gen, device=self.device)
 
@@ -185,7 +186,7 @@ class BatchEnv:
             out["jaws"] = self.sensordata[:, self.jaw_adr]
             if self.task.target:
                 a = self.cube_dadr
-                out["cube_vel"] = self.qvel[:, a:a + 3] @ R          # R^T v jako wiersze (jak w ArmEnv)
+                out["cube_vel"] = self.qvel[:, a:a + 3] @ R          # R^T v as rows (as in ArmEnv)
                 out["target"] = self.target
         return out
 
@@ -199,7 +200,7 @@ class BatchEnv:
                           cube_rot=self.seen_rot if cube else None, target=self.target)
 
     def _perceive(self, s: dict[str, torch.Tensor]) -> None:
-        """Nowy wpis historii kostki i odswiezenie tego, co widzi polityka (co `cube_p` taktow)."""
+        """A new entry in the cube history, and a refresh of what the policy sees (every `cube_p` ticks)."""
         self.hist_i = (self.hist_i + 1) % self.H
         self.hist_pos[self.hist_i] = s["cube_pos"]
         self.hist_rot[self.hist_i] = s["cube_rot"]
@@ -219,7 +220,7 @@ class BatchEnv:
         self.seen_rot = torch.where(upd[:, None, None], rot, self.seen_rot)
 
     def _randomize(self, ids: torch.Tensor) -> None:
-        """Nowa dynamika dla swiatow `ids` - mnozniki od nominalu, potem `set_const`."""
+        """New dynamics for the worlds `ids`: multipliers of the nominal values, then `set_const`."""
         s = {k: torch.as_tensor(v, dtype=torch.float32, device=self.device)
              for k, v in self.rand.sample(self.np_rng, len(ids)).items()}
         f, nom, act, dof = self.f, self.nominal, self.act, self.dadr
@@ -237,15 +238,15 @@ class BatchEnv:
         self.cube_d[ids] = s["cube_delay"].long()
         self.cube_p[ids] = s["cube_period"].long()
         torch.cuda.synchronize(self.device)
-        # Bez tego kontakty kostki o zmienionej masie licza sie "od innej kostki"
-        # (body_invweight0) - na CPU konczylo sie to wystrzeleniem kostki.
+        # Without it the contacts of a cube with a changed mass are computed "for another cube"
+        # (body_invweight0); on the CPU that shoots the cube away (see env.ModelFields.apply).
         self.mjw.set_const(self.m, self.d)
 
     def _sample_targets(self, cube_p: torch.Tensor) -> torch.Tensor:
-        """Cele pickplace (n, 3) dla kostek `cube_p` (n, 3) - to samo co `task.sample_targets`.
+        """pickplace targets (n, 3) for the cubes `cube_p` (n, 3), as `task.sample_targets` draws them.
 
-        Ta sama regula: losowanie biegunowe, za bliskie wiersze od nowa (tylko one),
-        najwyzej `TARGET_TRIES` razy, potem cel na zewnetrznym promieniu po drugiej stronie.
+        The same rule: polar sampling, rows too close to their cube drawn again (only those), at most
+        `TARGET_TRIES` times, then a target on the outer radius at the far end of the bearing range.
         """
         tsk = self.task
         n = len(cube_p)
@@ -268,7 +269,7 @@ class BatchEnv:
         return out
 
     def set_targets(self, ids: torch.Tensor, target: torch.Tensor) -> None:
-        """Cele pickplace swiatow `ids` (n, 3) w ukladzie podstawy; z = 0, podkladka mocap idzie za nimi."""
+        """pickplace targets (n, 3) of the worlds `ids`, in the base frame; z = 0, the mocap pad follows."""
         p = target.to(self.device, torch.float32).clone()
         p[:, 2] = 0.0
         self.target[ids] = p
@@ -292,7 +293,7 @@ class BatchEnv:
 
         qpos = self.qpos0.repeat(n, 1)
         qpos[:, self.qadr] = q0
-        for k, adr, g in self.kin.mirror:               # stawy sprzezone (druga szczeka A1X)
+        for k, adr, g in self.kin.mirror:               # coupled joints (e.g. the A1X's second jaw)
             qpos[:, adr] = g * q0[:, k]
         if tsk.cube:
             r = self._u(n, lo=tsk.cube_radius[0], hi=tsk.cube_radius[1])
@@ -300,14 +301,14 @@ class BatchEnv:
             p = torch.stack([r * torch.cos(b), r * torch.sin(b), torch.full_like(r, tsk.cube_half)], 1)
             yaw = self._u(n, lo=-np.pi, hi=np.pi)
             qb = self.q_base
-            # obrot wokol z w ukladzie podstawy, potem do swiata: q_base * q_yaw
+            # a rotation about z in the base frame, then into the world: q_base * q_yaw
             cw, sw = torch.cos(yaw / 2), torch.sin(yaw / 2)
             quat = torch.stack([qb[0] * cw - qb[3] * sw, qb[1] * cw + qb[2] * sw,
                                 qb[2] * cw - qb[1] * sw, qb[0] * sw + qb[3] * cw], 1)
             a = self.cube_qadr
             qpos[:, a:a + 3] = p @ self.R_b.T + self.t_b
             qpos[:, a + 3:a + 7] = quat
-            # Pierwsza detekcja na starcie: kostka lezy, wiec cala historia to ta sama poza.
+            # The first detection at the start: the cube lies still, so the whole history is one pose.
             z0, o1 = torch.zeros_like(yaw), torch.ones_like(yaw)
             R = torch.stack([torch.stack([torch.cos(yaw), -torch.sin(yaw), z0], -1),
                              torch.stack([torch.sin(yaw), torch.cos(yaw), z0], -1),
@@ -342,7 +343,8 @@ class BatchEnv:
     @torch.no_grad()
     def step(self, action: torch.Tensor):
         action = torch.clamp(action.to(self.device, torch.float32), -1.0, 1.0)
-        # Akcja sprzed `delay_n` taktow; w pierwszych taktach epizodu zero (jak kolejka zer na CPU).
+        # The action from `delay_n` ticks ago; zero in the episode's first ticks (like the queue of
+        # zeros on the CPU).
         self.act_hist[self.t % self.Hd, self.ar] = action
         executed = self.act_hist[(self.t - self.delay_n) % self.Hd, self.ar]
         executed = torch.where((self.t >= self.delay_n)[:, None], executed, torch.zeros_like(executed))
@@ -365,13 +367,13 @@ class BatchEnv:
         self.streak, finished = tk.success_streak(torch, self.task, self.streak, success)
         if self.task.cube:
             self._perceive(s)
-        # Straznik: swiat, ktory mimo wszystko wybuchl, konczy epizod bez nagrody,
-        # zanim jego liczby zatruja gradient.
+        # Guard: a world that blew up anyway ends its episode without reward before its numbers
+        # poison the gradient.
         broken = ~torch.isfinite(self.qvel).all(1) | (self.qvel.abs().amax(1) > 100.0)
         rew = torch.where(broken, torch.zeros_like(rew), rew)
         self.prev_action = action
-        # Seria sukcesow konczy epizod jak limit czasu - PPO dolicza wartosc stanu
-        # (patrz `task.success_streak`), inaczej oplacaloby sie nie konczyc.
+        # A success streak ends the episode like the time limit: PPO bootstraps the state value
+        # (see `task.success_streak`), otherwise not finishing would pay.
         time_out = (self.t >= self.task.episode_steps) | finished
         terminated = failure | broken
         done = terminated | time_out

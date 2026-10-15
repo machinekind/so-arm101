@@ -1,15 +1,16 @@
-"""Caly lancuch sim-2-real naraz: polityka lift na zywym blizniaku, kostka WYLACZNIE z kamer.
+"""The whole sim-to-real chain at once: the lift policy on a live twin, the cube ONLY from the cameras.
 
-Polityka jako strategia laboratorium: kadry symulowanych kamer -> dopasowanie sylwetki (z maska
-ramienia) -> sledzenie kostki w dloni (percepcja blizniaka) -> `ObjectPose` w obserwacji ->
-`PolicyStrategy` w `StrategyRunner` blizniaka -> nadzor bezpieczenstwa -> fizyka. Sprawdzamy na
-prawdzie z fizyki, czy kostka zostala podniesiona. Test jedzie na bazowej `lift-v3`.
+The policy as the lab's strategy: frames of simulated cameras -> silhouette matching (with the arm
+masked out) -> tracking the cube in the hand (the twin's perception) -> `ObjectPose` in the observation
+-> `PolicyStrategy` in the twin's `StrategyRunner` -> the safety supervisor -> physics. The physics
+truth tells whether the cube was lifted. The test runs the bundled `lift-v3`.
 
-Caly lancuch idzie w czasie SYMULOWANYM, bez watkow: petla blizniaka 50 Hz (`Twin.step`), wizja
-co 0,1 s, strategia 20 Hz (`StrategyRunner.step_once`) na jednym zegarze.
+The whole chain runs in SIMULATED time, without threads: the twin's loop at 50 Hz (`Twin.step`), vision
+every 0.1 s and the strategy at 20 Hz (`StrategyRunner.step_once`) on one clock.
 
-Dostawca kostki bierze rozkaz chwytaka z `status.command` blizniaka (jak panel, `_vision_cube`),
-a nie z `runner.q_cmd`: `StrategyRunner` pyta o obiekty juz przed `start` strategii.
+The cube provider takes the gripper command from the twin's `status.command` (as the panel does,
+`_vision_cube`), not from the strategy's `q_cmd`: `StrategyRunner` asks for objects before the
+strategy's `start`.
 """
 
 from __future__ import annotations
@@ -97,7 +98,7 @@ def test_lift_policy_lifts_a_cube_seen_only_by_cameras(twin_robots):
 
         runner = StrategyRunner(twin, strategy, objects=objects)
         runner.start(threaded=False)
-        # Zegar co 10 ms: fizyka co 20 ms, wizja co 100 ms, strategia co 50 ms.
+        # A clock tick every 10 ms: physics every 20 ms, vision every 100 ms, the strategy every 50 ms.
         for k in range(1, int(30.0 / 0.01) + 1):
             clock["t"] = k * 0.01
             if k % 2 == 0:
@@ -112,7 +113,8 @@ def test_lift_policy_lifts_a_cube_seen_only_by_cameras(twin_robots):
             height = (Ti[:3, :3] @ s.data.xpos[s.model.body("cube").id] + Ti[:3, 3])[2] - h
         where = (f"takt {strategy.status.step}, powod {strategy.status.stopped_because!r}, kostka ze zrodla "
                  f"{tracker.source!r}, {height * 100:.1f} cm nad blatem")
-        # Koniec po sukcesie (kostka nad blatem przez `end_on_success` taktow) albo limit epizodu.
+        # The run ends on success (the cube above the table for `end_on_success` ticks) or at the
+        # episode limit.
         assert strategy.status.stopped_because in ("zadanie wykonane", "koniec epizodu"), where
         assert height > task.lift_height, where
     finally:

@@ -1,7 +1,8 @@
 """torch for the modules that need it (`ppo`, `batch`, `torch_policy`), with an error naming the extra.
 
 Running a policy needs numpy only (`policy.Policy`). torch is the optional extra `soarm-lab[torch]`:
-the legacy PPO trainer and the converter of torch checkpoints. The JAX trainer replaces them.
+the legacy PPO trainer and the converter of torch checkpoints. A JAX trainer will replace the torch
+one; it is not written yet.
 """
 
 from __future__ import annotations

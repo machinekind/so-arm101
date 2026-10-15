@@ -1,16 +1,16 @@
-"""Wiersz polecen laboratorium: `soarm-lab <polecenie>` (trening, ewaluacja i polityki z `lerobot-twin`).
+"""The lab's command line: `soarm-lab <command>` (training, evaluation and policies, on twin stations).
 
-    soarm-lab train --task reach                     # polityka PPO na GPU (MuJoCo Warp) + ewaluacja na CPU
-    soarm-lab train --task lift --station ~/desk1    # ... na stanowisku z `lerobot-twin export ~/desk1`
-    soarm-lab train --task pickplace                 # ... kostka przeniesiona na cel na blacie
-    soarm-lab eval lift-v3 --rand                    # ewaluacja polityki w zwyklym MuJoCo
-    soarm-lab policies                               # polityki bazowe i uczone tutaj, z wynikami
-    soarm-lab convert old/policy.pt                  # punkt kontrolny torcha -> policy.npz
+    soarm-lab train --task reach                     # a PPO policy on the GPU (MuJoCo Warp) + CPU evaluation
+    soarm-lab train --task lift --station ~/desk1    # ... on the station from `lerobot-twin export ~/desk1`
+    soarm-lab train --task pickplace                 # ... the cube carried onto a target on the table
+    soarm-lab eval lift-v3 --rand                    # evaluate a policy in plain MuJoCo
+    soarm-lab policies                               # bundled policies and those trained here, with results
+    soarm-lab convert old/policy.pt                  # a torch checkpoint -> policy.npz
 
-`--station` to folder eksportu blizniaka (`scene.xml`, `assets/`, `station.json`) albo nazwa
-stanowiska dostarczanego z pakietem (`sim`, domyslnie). `eval` i `policies` potrzebuja tylko numpy.
-`train` to dawny trener w torchu: potrzebuje dodatkow `train` (`mujoco-warp`) i `torch` (torch z CUDA).
-`convert` potrzebuje dodatku `torch`.
+`--station` is a folder the twin exported (`scene.xml`, `assets/`, `station.json`) or the name of a
+station bundled with the package (`sim`, the default). `eval` and `policies` need no torch. `train` is
+the legacy torch trainer: it needs the extras `train` (`mujoco-warp`) and `torch` (torch with CUDA).
+`convert` needs the `torch` extra.
 """
 
 from __future__ import annotations
@@ -26,13 +26,13 @@ def _station(a: argparse.Namespace):
 
 
 def _train_plan(dyn, no_rand: bool, spread: float):
-    """(randomizacja treningu, [(etykieta, klucz w meta.evals, randomizacja ewaluacji)]).
+    """(training randomization, [(label, key in meta.evals, evaluation randomization)]).
 
-    "Bez randomizacji" to zmierzona dynamika bez rozrzutu - nie model Menagerie
-    (`Randomization.none()` gubil identyfikacje i model percepcji kostki, a log
-    i tak pisal "dynamika: identyfikacja"). Ewaluacja "z randomizacja" jest tylko
-    wtedy, gdy trening ja mial: wczesniej przy --no-rand druga ewaluacja nominalna
-    trafiala do `cpu_rand` i panel pokazywal ja jako odpornosc na randomizacje.
+    Training without randomization (`--no-rand`) is the measured dynamics with zero spread, not
+    `Randomization.none()`: that is the Menagerie model with ideal perception, which would drop both the
+    identified dynamics and the cube perception model. The randomized evaluation runs only when training
+    was randomized: otherwise a second nominal evaluation would land in `cpu_rand`, and the panel would
+    show it as robustness to randomization.
     """
     from .rl.randomize import Randomization
 
@@ -73,8 +73,8 @@ def _train(a: argparse.Namespace) -> int:
 
         init = Policy.load(find_policy(a.init))
         a.task = init.task.name
-        cfg.init_std = 0.25                            # douczanie: mniejsza eksploracja na starcie
-        cfg.critic_warmup = 30                         # dla polityk bez zapisanego krytyka (patrz ppo)
+        cfg.init_std = 0.25                            # fine-tuning: less exploration at the start
+        cfg.critic_warmup = 30                         # for policies saved without a critic (see ppo)
         print(f"Start z polityki {a.init} ({init.task.name})")
     print(f"Trening {a.task} na stanowisku {st.folder}: {a.envs} swiatow x {a.iters} iteracji -> {out}")
     print(f"  {_describe(rand)}{'' if a.no_rand else f', rozrzut x{a.spread}'}")
@@ -86,7 +86,7 @@ def _train(a: argparse.Namespace) -> int:
 
     stop = None
     if a.stop_file:
-        # Zatrzymanie z zewnatrz: plik - polityka z tego miejsca zostaje zapisana.
+        # Stopping from outside: a file. The policy as it is at that point is saved.
         import threading
 
         stop = threading.Event()
@@ -118,7 +118,7 @@ def _eval(a: argparse.Namespace) -> int:
     st = _station(a)
     path = find_policy(a.policy)
     pol = Policy.load(path)
-    # Randomizacja wokol zmierzonej dynamiki - jak w treningu, nie wokol Menagerie.
+    # Randomization around the station's measured dynamics, as in training, not around Menagerie.
     rand = Randomization.around(Dynamics.from_dict(st.dynamics)) if a.rand else None
     res = evaluate(pol, a.episodes, randomization=rand, station=st, seed=a.seed)
     print(f"{path}: {res}")

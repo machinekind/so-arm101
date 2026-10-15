@@ -1,23 +1,22 @@
-"""PPO na srodowisku wsadowym GPU - krotko, bez zaleznosci poza torchem.
+"""PPO on the GPU batch environment: short, plain torch, no RL library.
 
     pol = train("reach", PPOConfig(iterations=200), station=Station.load("sim"))
     pol.save("workspace/policies/reach/policy.npz")
 
-Dawny trener w torchu: potrzebuje dodatkow `soarm-lab[torch]` i `soarm-lab[train]` (MuJoCo Warp).
-Stos treningowy laboratorium to JAX i MuJoCo Warp, a trener w JAX zastapi ten. Uczy
-`torch_policy.TorchPolicy`, a zwraca i zapisuje polityke numpy `policy.Policy` (`policy.npz`, z krytykiem
-do douczania).
+The legacy torch trainer: it needs the `soarm-lab[torch]` and `soarm-lab[train]` (MuJoCo Warp)
+extras. The lab's training stack is JAX and MuJoCo Warp; a JAX trainer will replace this one, but it
+is not written yet. This one trains a `torch_policy.TorchPolicy`, and returns and saves the numpy
+policy `policy.Policy` (`policy.npz`, with the critic for fine-tuning).
 
-Klasyczny przepis z rsl_rl / legged_gym, dobrany do tysiecy rownoleglych
-swiatow: krotkie przebiegi (`horizon` krokow na swiat), GAE, kilka epok na
-minipaczkach, stala uczenia regulowana przez KL, a srodowiska, ktore
-skonczyly sie limitem czasu, dostaja do nagrody wartosc stanu zamiast zera
-(inaczej krytyk uczy sie, ze swiat konczy sie po 5 s - a na ramieniu sie nie
-konczy).
+The classic recipe of rsl_rl / legged_gym, tuned for thousands of parallel worlds: short rollouts
+(`horizon` steps per world), GAE, a few epochs over minibatches, a learning rate adapted to the KL,
+and environments that ended on the time limit get the state value added to their reward instead of
+zero (otherwise the critic learns that the world ends with the episode, after 5 s for reach, and on
+the arm it does not end).
 
-Postep leci do `on_progress(dict)` i do `progress.json` w katalogu przebiegu,
-skad czyta go panel. Przerwanie: `stop` (threading.Event) - polityka z tego
-miejsca zostaje zapisana.
+Progress goes to `on_progress(Progress)` and, with `out_dir`, to `progress.json` in the run's folder.
+Interrupting: `stop` (threading.Event); the policy as it is at that point is returned, and saved with
+`out_dir`.
 """
 
 from __future__ import annotations
@@ -59,11 +58,12 @@ class PPOConfig:
     value_coef: float = 1.0
     max_grad_norm: float = 1.0
     init_std: float = 0.6
-    #: Pierwsze iteracje douczania ucza tylko krytyka (aktor stoi) - patrz `train`.
+    #: Fine-tuning a policy saved without a critic: this many first iterations train only the critic
+    #: (the actor holds), see `train`.
     critic_warmup: int = 0
     hidden: tuple[int, ...] = (256, 256, 128)
     seed: int = 0
-    #: Co ile iteracji zapisywac punkt kontrolny (0 = tylko na koncu).
+    #: Save a checkpoint every this many iterations (0 = only at the end).
     save_every: int = 50
 
 
@@ -101,10 +101,10 @@ def train(task: str | tk.TaskConfig, cfg: PPOConfig | None = None, *, station: S
           randomization: Randomization | None = None, out_dir: str | Path | None = None,
           on_progress: Callable[[Progress], None] | None = None,
           stop: threading.Event | None = None, device: str = "cuda:0", init: Policy | None = None) -> Policy:
-    """`init` - start z istniejacej polityki (aktor, normalizacja i krytyk, jesli zapisany).
+    """Trains a policy for `task`; `init` starts from an existing one (actor, normalizer, critic if saved).
 
-    Do douczania: po identyfikacji dynamiki na ramieniu, po zmianie randomizacji
-    albo percepcji - zamiast odkrywac chwyt od zera.
+    `init` is for fine-tuning: after identifying the arm's dynamics, after a change of randomization
+    or perception, instead of discovering the grasp from scratch.
     """
     cfg = cfg or PPOConfig()
     torch.manual_seed(cfg.seed)
@@ -114,7 +114,7 @@ def train(task: str | tk.TaskConfig, cfg: PPOConfig | None = None, *, station: S
     if init is not None:
         if init.meta.robot != spec.name:
             raise RuntimeError(f"polityka uczona na {init.meta.robot}, stanowisko ma {spec.name}")
-        tsk = init.task                                # to samo zadanie, na ktorym sie uczyla
+        tsk = init.task                                # the task it was trained on
     rand = randomization if randomization is not None else Randomization()
     env = BatchEnv(tsk, cfg.num_envs, station=station, randomization=rand, device=device, seed=cfg.seed)
     meta = PolicyMeta(task=asdict(tsk), hidden=list(cfg.hidden), obs_dim=tsk.obs_dim, act_dim=tsk.act_dim,
@@ -157,14 +157,14 @@ def train(task: str | tk.TaskConfig, cfg: PPOConfig | None = None, *, station: S
 
     for it in range(1, cfg.iterations + 1):
         t0 = time.perf_counter()
-        # Douczanie startuje z krytykiem od zera: jego przewagi sa wtedy szumem, a przy
-        # malej eksploracji (init_std 0,25) krytyk dlugo nie odroznia "przy celu" od
-        # "kilka mm obok". Zmierzone na reach-v1: 98% sukcesu do 60. iteracji, potem
-        # spadek do 9%, a polityka deterministyczna odplywala od celu (3 -> 29 mm pod
-        # koniec epizodu). Aktor - razem z normalizacja wejscia - stoi, dopoki krytyk
-        # sie nie nauczy. Polityka z zapisanym krytykiem rozgrzewki nie potrzebuje.
+        # Fine-tuning a policy saved without a critic starts with a new critic: its advantages are
+        # noise at first, and with little exploration (init_std 0.25) it takes long to tell "at the
+        # goal" from "a few mm off". Measured on reach-v1: 98% success up to iteration 60, then a
+        # drop to 9%, and the deterministic policy drifted off the goal (3 -> 29 mm at the end of
+        # the episode). The actor, together with the input normalizer, holds until the critic has
+        # learned. A policy with a saved critic needs no warm-up.
         warming = it <= warmup
-        # ---------------------------------------------------------- zbieranie
+        # ---------------------------------------------------------- rollout
         with torch.no_grad():
             for t in range(T):
                 if not warming:
@@ -197,7 +197,7 @@ def train(task: str | tk.TaskConfig, cfg: PPOConfig | None = None, *, station: S
                 adv[t] = gae
             ret = adv + buf_val
 
-        # ------------------------------------------------------ aktualizacja
+        # ------------------------------------------------------------ update
         b_obs, b_act = buf_obs.reshape(T * N, -1), buf_act.reshape(T * N, -1)
         b_logp, b_val = buf_logp.reshape(-1), buf_val.reshape(-1)
         b_adv, b_ret = adv.reshape(-1), ret.reshape(-1)
@@ -225,7 +225,7 @@ def train(task: str | tk.TaskConfig, cfg: PPOConfig | None = None, *, station: S
                     continue
                 loss = pg + cfg.value_coef * vl - cfg.entropy * ent
                 with torch.no_grad():
-                    # KL miedzy starym a nowym rozkladem (przyblizenie Schulmana).
+                    # KL between the old and the new distribution (Schulman's approximation).
                     kl = ((ratio - 1) - (logp - b_logp[idx])).mean().item()
                 if cfg.desired_kl > 0:
                     if kl > 2.0 * cfg.desired_kl:
@@ -241,7 +241,7 @@ def train(task: str | tk.TaskConfig, cfg: PPOConfig | None = None, *, station: S
                 with torch.no_grad():
                     ac.log_std.clamp_(np.log(0.05), np.log(1.5))
 
-        # ------------------------------------------------------------ postep
+        # ---------------------------------------------------------- progress
         dt = time.perf_counter() - t0
         keep = max(cfg.num_envs, 200)
         recent_succ, recent_ret, recent_len = recent_succ[-keep:], recent_ret[-keep:], recent_len[-keep:]
@@ -280,7 +280,7 @@ def _finish(ac: ActorCritic, prog: Progress, path: Path | None) -> Policy:
 
 def _rand_dict(r: Randomization) -> dict[str, Any]:
     d = asdict(r)
-    # Dynamics.to_dict: niepewnosc inf jako "inf" - asdict dalby Infinity w config.json/meta.json,
-    # ktorego scisly JSON (przegladarka panelu) nie czyta.
+    # Dynamics.to_dict writes an infinite band as "inf": asdict would give Infinity in
+    # config.json / meta.json, which strict JSON parsers (a browser's) reject.
     d["centre"] = r.centre.to_dict()
     return d

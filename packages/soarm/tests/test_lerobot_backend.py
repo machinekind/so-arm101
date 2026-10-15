@@ -1,12 +1,12 @@
-"""Backend `lerobot` z panelu: nigdy nie zdejmuje momentu i nie pyta o nic w konsoli.
+"""The `lerobot` backend from the panel: it never disables torque and never asks anything in the console.
 
-Odtworzone na tej maszynie: bez pliku kalibracji `SOFollower.connect()` wolal
-`calibrate()`, ten zdejmowal moment ze wszystkich serw (ramie trzymane przez
-sesje `feetech` spadalo na stol) i wisial na `input()` w konsoli serwera.
-Testy chodza na atrapie klas LeRobota - bez biblioteki i bez sprzetu.
+Without a calibration file `SOFollower.connect()` calls `calibrate()`, which disables
+torque on all servos (an arm held by a `feetech` session drops onto the table) and hangs
+on `input()` in the server console (reproduced). The tests run on stand-ins for LeRobot's
+classes, without the library and without hardware.
 
-Do tego bity ochrony serw (`faults`) i zgubione odczyty pozycji (cisza na lini
-nie wysyla nic do serw) - jak w `feetech`.
+Also the servo protection bits (`faults`) and lost position reads (while the link is
+silent nothing goes to the servos), as in `feetech`.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ class FakeConfig:
 
 
 class NormMode(enum.Enum):
-    """Nazwy jak `lerobot.motors.MotorNormMode`."""
+    """Names as in `lerobot.motors.MotorNormMode`."""
 
     DEGREES = "degrees"
     RANGE_M100_100 = "range_m100_100"
@@ -39,7 +39,7 @@ class NormMode(enum.Enum):
 
 @dataclasses.dataclass
 class Cal:
-    """Pola jak `lerobot.motors.MotorCalibration` - tak wyglada wpis w pliku kalibracji."""
+    """Fields as in `lerobot.motors.MotorCalibration`: what an entry in the calibration file looks like."""
 
     id: int
     drive_mode: int
@@ -55,7 +55,7 @@ class Motor:
     norm_mode: NormMode
 
 
-#: Typowa kalibracja SO-101 z `lerobot-calibrate` (zakresy nagrane reka, wrist_roll pelny obrot).
+#: A typical SO-101 calibration from `lerobot-calibrate` (ranges recorded by hand, wrist_roll a full turn).
 TYPICAL_CALIBRATION = {
     "shoulder_pan": (1, 0, -1470, 758, 3292),
     "shoulder_lift": (2, 0, 157, 815, 3264),
@@ -79,7 +79,7 @@ class FakeBus:
             name: Motor(fields[0], "sts3215", NormMode.RANGE_0_100 if name == "gripper" else NormMode.DEGREES)
             for name, fields in TYPICAL_CALIBRATION.items()
         }
-        #: Rejestr Status kazdego serwa (0x20 = przeciazenie) i czy jego odczyt sie udaje.
+        #: The Status register of each servo (0x20 = overload) and whether reading it succeeds.
         self.status = {name: 0 for name in self.motors}
         self.status_fails = False
         self.status_reads = 0
@@ -96,8 +96,8 @@ class FakeBus:
 
     @property
     def is_calibrated(self) -> bool:
-        # Jak `FeetechMotorsBus`: wlasciwosc czyta serwa, wiec na niepolaczonej magistrali
-        # rzuca (DeviceNotConnectedError to ConnectionError) - `hasattr` tego nie polyka.
+        # As in `FeetechMotorsBus`: the property reads the servos, so on an unconnected bus it
+        # raises (DeviceNotConnectedError is a ConnectionError), which `hasattr` does not swallow.
         if not self.connected:
             raise ConnectionError("FeetechMotorsBus is not connected. Run `.connect()` first.")
         return self.calibrated
@@ -118,7 +118,7 @@ class FakeBus:
 
 
 class FakeRobot:
-    """Tyle `SOFollower`, ile backend dotyka - z ta sama logika `connect(calibrate=True)`."""
+    """As much of `SOFollower` as the backend touches, with the same `connect(calibrate=True)` logic."""
 
     calibration_file = True
     servos_calibrated = True
@@ -155,7 +155,7 @@ class FakeRobot:
         input("Move the arm to the middle ...")
 
     def configure(self) -> None:
-        # Jak w LeRobot: zapisy pod `torque_disabled()`.
+        # As in LeRobot: the writes happen under `torque_disabled()`.
         self.bus.disable_torque()
         self.configured = True
         self.bus.torque = 1
@@ -167,7 +167,7 @@ class FakeRobot:
     def action_features(self) -> dict:
         return {f"{name}.pos": float for name in TYPICAL_CALIBRATION}
 
-    #: Tyle kolejnych odczytow pozycji konczy sie jak w LeRobot po `num_read_retries + 1` ciszach.
+    #: This many consecutive position reads fail, as in LeRobot after `num_read_retries + 1` silences.
     lost_reads = 0
 
     def get_observation(self) -> dict:
@@ -202,7 +202,7 @@ def test_missing_calibration_file_is_refused_before_touching_the_port(arm):
     with pytest.raises(RuntimeError, match="lerobot-calibrate"):
         arm.connect()
     robot = FakeRobot.last
-    assert robot.bus.log == []                      # port nietkniety - moment zostaje tam, gdzie byl
+    assert robot.bus.log == []                      # port untouched: torque stays as it was
     assert robot.bus.torque == 1
     assert not arm.is_connected
 
@@ -218,7 +218,7 @@ def test_calibration_that_differs_from_the_servos_is_refused_without_dropping_to
 
 
 def test_an_arm_holding_a_pose_is_connected_without_lerobot_configure(arm):
-    """`configure()` zdejmuje moment na czas zapisow - ramie w powietrzu by opadlo."""
+    """`configure()` disables torque for its writes: an arm in the air would drop."""
     arm.connect()
     robot = FakeRobot.last
     assert arm.is_connected and robot.bus.connected
@@ -227,7 +227,7 @@ def test_an_arm_holding_a_pose_is_connected_without_lerobot_configure(arm):
 
 
 def test_lerobot_never_clamps_the_step_and_the_setting_is_gone(arm, so101_context):
-    """LeRobot's +-12 degree clamp hid collisions from the twin's tracking guard (25 degrees)."""
+    """LeRobot's +-12 degree step clamp hides collisions from the twin's tracking guard (25 degrees)."""
     arm.connect()
     assert FakeRobot.last.config.max_relative_target is None
     with pytest.raises(ValueError, match="max_relative_target"):
@@ -242,7 +242,7 @@ def test_disconnect_keeps_torque_unless_configured_otherwise(arm):
     assert robot.bus.torque == 1
 
 
-# ------------------------------------------------------------ bity ochrony serw
+# ------------------------------------------------------------ servo protection bits
 @pytest.fixture
 def live(arm):
     arm.connect()
@@ -250,14 +250,14 @@ def live(arm):
 
 
 def cycle(arm, n: int = 1) -> None:
-    """`n` okien po STATUS_EVERY_READS odczytow pozycji - w kazdym dokladnie jeden odczyt Status (na poczatku)."""
+    """`n` windows of STATUS_EVERY_READS position reads, each with exactly one Status read (at its start)."""
     for _ in range(n * STATUS_EVERY_READS):
         arm.read_joints()
 
 
 def test_servo_protection_bits_are_reported_as_faults(live):
-    """Przeciazony bark zwalnia moment, ale dalej odpowiada - bez Status wygladal na zdrowy,
-    a fala jechala dalej reszta ramienia. Zdanie takie samo jak w `feetech`."""
+    """An overloaded shoulder releases torque but keeps answering: without Status it looks healthy
+    and the wave carries on with the rest of the arm. The sentence is the same as in `feetech`."""
     arm, robot = live
     cycle(arm)
     assert arm.faults() == []
@@ -269,18 +269,18 @@ def test_servo_protection_bits_are_reported_as_faults(live):
     assert arm.faults() == []
 
 
-# ------------------------------------------------------------ zgubione odczyty pozycji
+# ------------------------------------------------------------ lost position reads
 def test_a_lost_position_read_keeps_the_last_positions_and_marks_the_link_silent(live):
-    """Trzy zgubione odpowiedzi (num_read_retries=2) konczyly petle blizniaka rozlaczeniem."""
+    """Three lost replies (num_read_retries=2) make LeRobot raise; that must not end the twin's loop."""
     arm, robot = live
     robot.positions["shoulder_pan"] = 12.5
     assert arm.read_joints()["shoulder_pan"] == 12.5 and not arm.link_silent
     robot.positions["shoulder_pan"] = 40.0
     robot.lost_reads = 1
-    assert arm.read_joints()["shoulder_pan"] == 12.5     # stara pozycja, nie wyjatek
+    assert arm.read_joints()["shoulder_pan"] == 12.5     # the old position, not an exception
     assert arm.link_silent
-    assert arm.faults() == []                            # jedna czkawka to jeszcze nie awaria
-    # Jak `feetech`: dopoki odczyt nie potwierdzi lacza, nic nie idzie do serw.
+    assert arm.faults() == []                            # one hiccup is not a failure yet
+    # As in `feetech`: until a read confirms the link, nothing goes to the servos.
     assert arm.send_joints({"shoulder_pan": 30.0}) == {}
     assert robot.sent == []
     assert arm.read_joints()["shoulder_pan"] == 40.0
