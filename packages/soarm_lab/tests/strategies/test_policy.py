@@ -27,7 +27,7 @@ SPEC = load_robot()
 
 
 def constant_policy(task: tk.TaskConfig, action: dict[int, float] | None = None) -> Policy:
-    """Polityka, ktora zawsze daje te sama akcje (zera + `action`)."""
+    """A policy that always gives the same action (zeros + `action`)."""
     pol = Policy(PolicyMeta(task=asdict(task), hidden=[8], obs_dim=task.obs_dim, act_dim=task.act_dim))
     for k, v in (action or {}).items():
         pol.actor[-1][1][k] = v                                  # bias of the output layer
@@ -52,12 +52,12 @@ def strategy(task: str = "reach", action: dict[int, float] | None = None, **sett
     return PolicyStrategy(PolicySettings(**settings), policy=constant_policy(tk.make_task(task), action))
 
 
-# ------------------------------------------------------------ rozjazd = kolizja
+# ------------------------------------------------------------ lag = collision
 def test_tracking_stop_holds_the_measured_pose_instead_of_pressing_on():
-    """Staw zablokowany (kolizja): polityka staje, a ramie trzyma ZMIERZONA poze.
+    """A blocked joint (a collision): the policy stops, and the arm holds the MEASURED pose.
 
-    W blizniaku `_halt` robil tylko `set_engaged(False)`, a nadzor trzymal ostatni rozkaz -
-    ~25 st. za przeszkoda. Strategia konczy przebieg celem rownym pomiarowi.
+    Holding the last command would keep pressing ~25 deg past the obstacle, so the strategy ends the run
+    with a target equal to the measured pose.
     """
     s = strategy("reach", {0: 1.0}, episode_limit=False)
     blocked = dict(SPEC.home, shoulder_pan=10.0)
@@ -85,9 +85,9 @@ def test_tracking_stop_holds_the_measured_pose_instead_of_pressing_on():
     assert last.target == pytest.approx({k: v for k, v in squeezing.items() if k != "gripper"})
 
 
-# ------------------------------------------------------------ polityka z innego ramienia
+# ------------------------------------------------------------ a policy from another arm
 def test_strategy_refuses_a_policy_trained_for_another_robot():
-    """Polityka z innego ramienia (inne stawy, inne jednostki chwytaka) nie rusza ramienia."""
+    """A policy from another arm (other joints, other gripper units) does not move the arm."""
     task = tk.make_task("reach")
     pol = constant_policy(task)
     pol.meta.robot = "a1x"
@@ -99,17 +99,17 @@ def test_strategy_refuses_a_policy_trained_for_another_robot():
         PolicyStrategy(policy=pol).start(run_info(), obs(dict(SPEC.home)))
     with pytest.raises(RuntimeError, match="stanowisko ma a1x"):
         PolicyStrategy(policy=constant_policy(task)).start(run_info(robot="a1x"), obs(dict(SPEC.home)))
-    PolicyStrategy(policy=constant_policy(task)).start(run_info(), obs(dict(SPEC.home)))   # SO-101 na SO-101
+    PolicyStrategy(policy=constant_policy(task)).start(run_info(), obs(dict(SPEC.home)))   # SO-101 on SO-101
 
 
-# ------------------------------------------------------------ start, cel, limity
+# ------------------------------------------------------------ start, goal, limits
 def test_start_keeps_a_squeezing_gripper_command():
-    """Chwytak sciska kostke (rozkaz ciasniej niz pomiar): start zaczyna od rozkazu, nie od pomiaru."""
+    """A gripper squeezing a cube (commanded tighter than measured): start begins from the command."""
     measured = dict(SPEC.home, gripper=30.0)
     s = strategy("lift")
     s.start(run_info(), obs(measured, command={"gripper": 5.0}))
     assert s.q_cmd[s.g] == pytest.approx(s.kin.to_q({"gripper": 5.0})[s.g])
-    s.start(run_info(), obs(measured, command={"gripper": 29.0}))        # nie sciska - od pomiaru
+    s.start(run_info(), obs(measured, command={"gripper": 29.0}))        # not squeezing: the measured angle
     assert s.q_cmd[s.g] == pytest.approx(s.kin.to_q(measured)[s.g])
 
 
@@ -147,7 +147,7 @@ def test_project_goal_and_target_stay_in_the_training_rings():
     assert np.arctan2(t[1], t[0]) == pytest.approx(task.target_bearing[1])
 
 
-# ------------------------------------------------------------ kostka
+# ------------------------------------------------------------ the cube
 def test_the_arm_waits_for_the_first_cube_then_gives_up():
     s = strategy("lift", wait_for_cube_s=1.0)
     s.start(run_info(), obs(dict(SPEC.home)))
@@ -159,14 +159,14 @@ def test_the_arm_waits_for_the_first_cube_then_gives_up():
 
 
 def test_lift_success_needs_a_fresh_cube_and_a_holding_jaw():
-    """Kostka nad blatem liczy sie tylko ze swiezej pozy i gdy szczeka trzyma (stoi, ciasniej rozkazana)."""
-    s = strategy("lift", {5: -1.0})                     # chwytak zamyka sie, ramie stoi
-    held = dict(SPEC.home, gripper=25.0)                  # szczeka zablokowana na kostce
+    """A lifted cube counts only from a fresh pose and while the jaw holds (still, commanded tighter)."""
+    s = strategy("lift", {5: -1.0})                     # the gripper closes, the arm stays
+    held = dict(SPEC.home, gripper=25.0)                  # the jaw blocked on the cube
     s.start(run_info(), obs(held))
     lifted = [0.2, 0.0, s.task.cube_half + s.task.lift_height + 0.02]
     for k in range(10):
         s.act(obs(held, t=0.05 * k, objects=cube(lifted, "ostatnie widziane")))
-    assert not s.status.success                          # poza nieswieza
+    assert not s.status.success                          # a stale pose
     streak = []
     for k in range(10, 30):
         a = s.act(obs(held, t=0.05 * k, objects=cube(lifted, "w dloni")))

@@ -15,7 +15,7 @@ from typing import Any, Union, get_args, get_origin, get_type_hints
 
 
 def _coerce(value: Any, target_type: Any, where: str) -> Any:
-    """Casts a YAML value to the dataclass field type: tuples, nested mappings, dataclasses."""
+    """Casts a YAML value to the dataclass field type: optionals, nested dataclasses, tuples, dicts, paths."""
     origin = get_origin(target_type)
     args = get_args(target_type)
 

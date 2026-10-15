@@ -1,31 +1,31 @@
-"""Zadania RL: co polityka widzi, co robi i za co dostaje nagrode.
+"""RL tasks: what the policy sees, what it does and what it is rewarded for.
 
-Jedna definicja dla trzech miejsc, w ktorych polityka zyje:
+One definition for the three places a policy lives in:
 
-* srodowisko Gymnasium na CPU (`env.ArmEnv`, numpy, jedno srodowisko),
-* srodowisko wsadowe na GPU (`batch.BatchEnv`, torch, tysiace swiatow MuJoCo Warp),
-* petla na prawdziwym ramieniu (`strategies.policy.PolicyStrategy` w `StrategyRunner` blizniaka, numpy, katy z serw).
+* the Gymnasium environment on the CPU (`env.ArmEnv`, numpy, one environment),
+* the batch environment on the GPU (`batch.BatchEnv`, torch, thousands of MuJoCo Warp worlds),
+* the loop on the real arm (`strategies.policy.PolicyStrategy` in the twin's `StrategyRunner`, numpy,
+  angles from the servos).
 
-Funkcje ponizej biora tablice z wymiarem wsadu `(N, ...)` i modul `xp` - numpy
-albo torch - wiec wszystkie trzy licza DOKLADNIE te same wzory. Dwie kopie
-"prawie tej samej" obserwacji to klasyczne ciche zrodlo sim-2-real: polityka
-uczy sie na jednej, a jezdzi na drugiej.
+The functions below take arrays with a batch dimension `(N, ...)` and a module `xp`, numpy or torch,
+so all three compute EXACTLY the same formulas. Two copies of "almost the same" observation are a
+classic silent source of sim-to-real gaps: the policy trains on one and runs on the other.
 
-Wszystkie polozenia sa w ukladzie PODSTAWY ramienia (blat na z = 0), katy
-stawow w radianach MJCF, w kolejnosci `RobotSpec.joints` (chwytak ostatni).
+All positions are in the arm's BASE frame (the table top at z = 0), joint angles in MJCF radians, in
+the order of `RobotSpec.joints` (gripper last).
 
-Akcja ma `n_joints` liczb w [-1, 1] (6 dla SO-101: piec stawow ramienia i chwytak):
+The action is `n_joints` numbers in [-1, 1] (6 for the SO-101: five arm joints and the gripper):
 
-* stawy ramienia - PRZYROST celu o najwyzej `arm_step` rad na takt, liczony od
-  poprzedniego celu (jak `runtime.Twin.set_target`), przyciety do tych samych
-  limitow, ktore stosuje `SafetySupervisor` na prawdziwym ramieniu;
-* chwytak - cel BEZWZGLEDNY (-1 zamkniety, +1 otwarty), ograniczony co do
-  predkosci tak, jak ogranicza go nadzor (`grip_step` zakresu na takt).
+* arm joints: an INCREMENT of the target by at most `arm_step` rad per tick, from the previous
+  target (not from the measured angles), clipped to the same limits the twin's safety supervisor
+  enforces on the real arm;
+* gripper: an ABSOLUTE target (-1 closed, +1 open), rate-limited the way the supervisor limits it
+  (`grip_step` of the range per tick).
 
-Zadania: `reach` (TCP do punktu), `lift` (chwyt i podniesienie kostki) i `pickplace`
-(kostka przeniesiona na cel na blacie i puszczona). W pickplace sukcesem jest tylko
-kostka NIESIONA (zatrzask `carry_latch`: chwycona i uniesiona ponad `lift_height`),
-potem lezaca na celu, puszczona i nieruchoma - dopchniecie jej po blacie sie nie liczy.
+Tasks: `reach` (the TCP to a point), `lift` (grasp and lift the cube) and `pickplace` (carry the cube
+onto a target on the table and release it). In pickplace only a CARRIED cube counts (the
+`carry_latch`: grasped and lifted above `lift_height`), then lying on the target, released and
+still; pushing it along the table does not count.
 """
 
 from __future__ import annotations
@@ -43,62 +43,62 @@ TASKS = ("reach", "lift", "pickplace")
 @dataclass(frozen=True)
 class TaskConfig:
     name: str = "reach"
-    #: Czestotliwosc polityki i krok fizyki [s]. 20 Hz przy 5 ms to 10 krokow na akcje.
+    #: Policy frequency and physics step [s]. 20 Hz at 5 ms is 10 physics steps per action.
     control_hz: float = 20.0
     timestep: float = 0.005
     episode_steps: int = 100
-    #: Najwiekszy przyrost celu stawu ramienia na takt [rad] (0,05 przy 20 Hz = 57 st/s).
+    #: The largest increment of an arm joint's target per tick [rad] (0.05 at 20 Hz = 57 deg/s).
     arm_step: float = 0.05
-    #: Najwiekszy ruch celu chwytaka na takt, jako czesc zakresu (0,15 przy 20 Hz =
-    #: 300 jednostek/s - tyle, ile przepuszcza nadzor bezpieczenstwa).
+    #: The largest move of the gripper's target per tick, as a fraction of its range (0.15 at 20 Hz =
+    #: 300 units/s, as much as the safety supervisor lets through).
     grip_step: float = 0.15
-    #: reach: sukces, gdy TCP jest blizej celu niz tyle [m].
+    #: reach: success when the TCP is closer to the goal than this [m].
     success_dist: float = 0.02
-    #: reach: skad losowany jest cel - promien od osi podstawy i wysokosc nad blatem [m].
+    #: reach: where the goal is sampled: radius from the base axis and height above the table [m].
     goal_radius: tuple[float, float] = (0.13, 0.32)
     goal_height: tuple[float, float] = (0.03, 0.22)
-    #: lift: kostka (polowa boku [m], masa [kg]) i gdzie lezy na blacie.
+    #: lift and pickplace: the cube (half side [m], mass [kg]) and where it lies on the table.
     cube_half: float = 0.015
     cube_mass: float = 0.03
     cube_radius: tuple[float, float] = (0.15, 0.25)
     cube_bearing: tuple[float, float] = (-0.8, 0.8)
-    #: lift: sukces, gdy spod kostki jest wyzej nad blatem niz tyle [m].
-    #: pickplace: kostka chwycona wyzej niz tyle jest "niesiona" (`carry_latch`).
+    #: lift: success when the cube's bottom is higher above the table than this [m].
+    #: pickplace: a cube grasped higher than this is "carried" (`carry_latch`).
     lift_height: float = 0.06
-    #: Start ramienia: poza domowa plus/minus tyle stopni na kazdym stawie ramienia.
+    #: The arm's start: the home pose plus/minus this many degrees on every arm joint.
     start_noise_deg: float = 8.0
-    #: Kara za szarpanie: waga ||a - a_poprzednie||^2.
+    #: Penalty for jerky actions: the weight of ||a - a_previous||^2.
     action_rate: float = 0.02
-    #: Ile taktow sukcesu Z RZEDU konczy epizod (0 = nigdy). Tak samo zatrzymuje sie
-    #: runner na ramieniu ("zadanie wykonane"). Bez tego lift-v2 po chwycie jechal
-    #: dalej: podstawa -105 st., lokiec -92, nadgarstek +95 i -150 (wszystkie limity),
-    #: kostka 37 cm nad blatem zamiast 6 - i trzymal tak do konca epizodu (8,5 s).
+    #: How many success ticks IN A ROW end the episode (0 = never). The strategy on the arm stops the
+    #: same way ("task done"). Without it lift-v2 kept moving after the grasp: base -105 deg, elbow
+    #: -92, wrist +95 and -150 (all at their limits), the cube 37 cm above the table instead of 6, and
+    #: it held that until the end of the episode (8.5 s).
     end_on_success: int = 0
-    #: Kara za cel stawu ramienia przy limicie: waga * sum((1 - zapas/limit_margin)^2)
-    #: po stawach blizej limitu niz `limit_margin` [rad]. Nagroda nie mowila nic o
-    #: postawie, wiec nic nie trzymalo polityki z dala od limitow.
+    #: Penalty for an arm joint target near its limit: weight * sum((1 - room/limit_margin)^2) over
+    #: the joints closer to a limit than `limit_margin` [rad]. Without it the reward says nothing
+    #: about posture, so nothing keeps the policy away from the limits.
     limit_penalty: float = 0.0
     limit_margin: float = 0.15
-    #: Kara za ruch ramienia, gdy zadanie jest juz wykonane: waga * ||a_ramie||^2.
-    #: Seria `end_on_success` ma byc trzymaniem kostki, a nie wymachem z nia.
+    #: Penalty for moving the arm once the task is done: weight * ||a_arm||^2. The `end_on_success`
+    #: streak is meant to hold the cube, not to swing it around.
     hold_still: float = 0.0
-    #: Kara za obrot nadgarstka od pozy domowej: waga * ((q_roll - dom) / pi)^2. W reach
-    #: nagroda liczy tylko polozenie TCP, a obrot nadgarstka go nie zmienia - reach-v2
-    #: krecila nim do limitu +150 st. w kazdym epizodzie (643 z 2000 taktow przy limicie).
+    #: Penalty for rolling the wrist away from the home pose: weight * ((q_roll - home) / pi)^2. In
+    #: reach the reward counts only the TCP position, which the wrist roll does not change: reach-v2
+    #: turned it to the +150 deg limit in every episode (643 of 2000 ticks at the limit).
     roll_penalty: float = 0.0
-    #: Liczba stawow ramienia razem z chwytakiem (chwytak ostatni) - wymiar akcji.
-    #: Polityki zapisane przed tym polem to SO-101, czyli 6.
+    #: The number of arm joints including the gripper (gripper last): the action dimension. A
+    #: `meta.json` without it is an SO-101 policy, so 6.
     n_joints: int = 6
-    #: pickplace: kostka "na celu", gdy jej srodek jest blizej srodka celu (w xy) niz
-    #: `place_radius` [m], a spod kostki nizej nad blatem niz `place_height` [m].
+    #: pickplace: the cube is "on the target" when its centre is closer to the target's centre (in xy)
+    #: than `place_radius` [m] and its bottom is lower above the table than `place_height` [m].
     place_radius: float = 0.03
     place_height: float = 0.01
-    #: pickplace: cel co najmniej tyle [m] (w xy) od kostki na starcie.
+    #: pickplace: the target is at least this far [m] (in xy) from the cube at the start.
     target_min_sep: float = 0.10
-    #: pickplace: kostka "lezy", gdy jej predkosc jest mniejsza niz tyle [m/s].
+    #: pickplace: the cube "lies still" when its speed is below this [m/s].
     settle_speed: float = 0.02
-    #: pickplace: skad losowany jest cel na blacie - jak kostka (`make_task(spec=)` bierze
-    #: pierscien kostki ze `spec.desk`).
+    #: pickplace: where the target on the table is sampled, like the cube (`make_task(spec=)` takes
+    #: the cube's ring from `spec.desk`).
     target_radius: tuple[float, float] = (0.15, 0.25)
     target_bearing: tuple[float, float] = (-0.8, 0.8)
 
@@ -120,22 +120,26 @@ class TaskConfig:
 
     @property
     def target(self) -> str | None:
-        """Nazwa ciala celu odlozenia (podkladka mocap w scenie) albo None."""
+        """The name of the place target's body (the mocap pad in the scene), or None."""
         return "target" if self.name == "pickplace" else None
 
 
 def obs_dim(name: str, n: int) -> int:
-    """q(n) + cel stawow(n) + TCP(3) + [cel(3) + cel-TCP(3)] + [kostka(3) + kostka-TCP(3) + obrot(6)]
-    + [pickplace: cel odlozenia(3) + cel-kostka(3)] + akcja(n)."""
+    """The observation size of task `name` with `n` joints.
+
+    q(n) + joint targets(n) + TCP(3) + [reach: goal(3) + goal-TCP(3)]
+    + [lift, pickplace: cube(3) + cube-TCP(3) + rotation(6)]
+    + [pickplace: place target(3) + target-cube(3)] + action(n).
+    """
     return 2 * n + 3 + (6 if name == "reach" else 12) + (6 if name == "pickplace" else 0) + n
 
 
-#: Wymiary obserwacji SO-101 (6 stawow) - uklad polityk bazowych.
+#: Observation sizes for the SO-101 (6 joints): the layout of the base policies.
 OBS_DIMS = {name: obs_dim(name, 6) for name in TASKS}
 
 
 def make_task(name: str = "reach", spec: RobotSpec | None = None, **overrides) -> TaskConfig:
-    """Zadanie `name`; ze `spec` - w skali tego ramienia (liczba stawow, pierscienie celow i kostek)."""
+    """The task `name`; with `spec`, scaled to that arm (number of joints, rings of goals and cubes)."""
     if name not in TASKS:
         raise ValueError(f"nieznane zadanie {name!r}; dostepne: {', '.join(TASKS)}")
     base = TaskConfig(name=name, episode_steps=100 if name == "reach" else 200)
@@ -153,23 +157,23 @@ def make_task(name: str = "reach", spec: RobotSpec | None = None, **overrides) -
     return replace(base, **overrides)
 
 
-# --------------------------------------------------------------- limity
+# --------------------------------------------------------------- limits
 @dataclass(frozen=True)
 class Limits:
-    """Zakres celow stawow [rad]: przeciecie limitow nadzoru z zakresami MJCF.
+    """The range of joint targets [rad]: the supervisor's limits intersected with the MJCF ranges.
 
-    Limity nadzoru to `limits` z `robot.yaml` - te same, ktore blizniak bierze domyslnie
-    (`robot_config` bez pliku konfiguracji).
+    The supervisor's limits are `limits` from `robot.yaml`, the ones the twin uses by default
+    (`robot_config` without a config file).
     """
 
     lo: np.ndarray
     hi: np.ndarray
     home: np.ndarray
-    #: Liczba stawow ramienia (bez chwytaka) - to one ida przyrostem `arm_step`.
+    #: The number of arm joints (without the gripper): these move by `arm_step` increments.
     n_arm: int
-    #: Indeks chwytaka (ostatni staw).
+    #: The gripper's index (the last joint).
     grip: int
-    #: Indeks stawu obrotu narzedzia (`spec.roll_joint`) - kara `roll_penalty`; None = brak.
+    #: The index of the tool roll joint (`spec.roll_joint`) for `roll_penalty`; None = no such joint.
     roll: int | None
 
     @staticmethod
@@ -199,13 +203,13 @@ def _norm(x):
 
 
 def _as(xp, a, like):
-    """Stala numpy jako tablica tego samego rodzaju i urzadzenia co `like`."""
+    """A numpy constant as an array of the same kind, dtype and device as `like`."""
     return np.asarray(a, like.dtype) if xp is np else xp.as_tensor(a, dtype=like.dtype, device=like.device)
 
 
-# ---------------------------------------------------------------- akcja
+# ---------------------------------------------------------------- action
 def apply_action(xp, task: TaskConfig, limits: Limits, q_cmd, action):
-    """Nowy cel stawow (N, n_joints) z poprzedniego celu i akcji w [-1, 1]."""
+    """The new joint target (N, n_joints) from the previous target and an action in [-1, 1]."""
     na = limits.n_arm
     lo, hi = _as(xp, limits.lo, q_cmd), _as(xp, limits.hi, q_cmd)
     a = _clip(xp, action, -1.0, 1.0)
@@ -217,7 +221,7 @@ def apply_action(xp, task: TaskConfig, limits: Limits, q_cmd, action):
     return _cat(xp, [arm, grip])
 
 
-# ------------------------------------------------------------ obserwacja
+# ----------------------------------------------------------- observation
 def normalize_q(xp, limits: Limits, q):
     lo, hi = _as(xp, limits.lo, q), _as(xp, limits.hi, q)
     return 2.0 * (q - lo) / (hi - lo) - 1.0
@@ -225,9 +229,9 @@ def normalize_q(xp, limits: Limits, q):
 
 def observe(xp, task: TaskConfig, limits: Limits, q, q_cmd, tcp, prev_action, goal=None,
             cube_pos=None, cube_rot=None, target=None):
-    """Wektor obserwacji (N, obs_dim). `cube_rot` to macierze obrotu (N, 3, 3).
+    """The observation vector (N, obs_dim). `cube_rot` are rotation matrices (N, 3, 3).
 
-    `target` (N, 3) - pickplace: cel odlozenia na blacie (z = 0) w ukladzie podstawy.
+    `target` (N, 3), pickplace: the place target on the table top (z = 0) in the base frame.
     """
     parts = [normalize_q(xp, limits, q), normalize_q(xp, limits, q_cmd), tcp]
     if task.name == "reach":
@@ -242,7 +246,7 @@ def observe(xp, task: TaskConfig, limits: Limits, q, q_cmd, tcp, prev_action, go
 
 
 def fold_yaw(xp, R):
-    """Obrot wokol z zlozony do +-45 st. - tak widzi kostke detektor (symetria 90 st.)."""
+    """The rotation about z folded to +-45 deg: how the detector sees the cube (a 90 deg symmetry)."""
     yaw = xp.arctan2(R[..., 1, 0], R[..., 0, 0]) if xp is np else xp.atan2(R[..., 1, 0], R[..., 0, 0])
     yaw = (yaw + np.pi / 4) % (np.pi / 2) - np.pi / 4
     c, s = xp.cos(yaw), xp.sin(yaw)
@@ -251,9 +255,9 @@ def fold_yaw(xp, R):
     return xp.stack(rows, -2)
 
 
-# ---------------------------------------------------------------- nagroda
+# ---------------------------------------------------------------- reward
 def limit_cost(xp, task: TaskConfig, limits: Limits, q_cmd):
-    """(N,) kara za cele stawow ramienia blizej limitu niz `limit_margin` (0 w srodku zakresu)."""
+    """(N,) penalty for arm joint targets closer to a limit than `limit_margin` (0 mid-range)."""
     na = limits.n_arm
     lo, hi = _as(xp, limits.lo[:na], q_cmd), _as(xp, limits.hi[:na], q_cmd)
     room = xp.minimum(q_cmd[..., :na] - lo, hi - q_cmd[..., :na])
@@ -266,23 +270,23 @@ def _float(xp, b, like):
 
 
 def grasped(xp, jaw_contacts):
-    """(N,) czy kostka dotyka obu szczek naraz (`jaw_contacts` (N, 2))."""
+    """(N,) whether the cube touches both jaws at once (`jaw_contacts` (N, 2))."""
     return (jaw_contacts[..., 0] > 0.5) & (jaw_contacts[..., 1] > 0.5)
 
 
 def carry_latch(xp, task: TaskConfig, carried, jaw_contacts, cube_pos):
-    """(N,) zatrzask "kostka byla niesiona": chwycona obiema szczekami wyzej nad blatem niz `lift_height`.
+    """(N,) the "cube was carried" latch: grasped by both jaws higher above the table than `lift_height`.
 
-    Raz ustawiony trzyma do resetu (wywolujacy zeruje go na starcie epizodu). Liczony
-    PRZED nagroda i do niej podawany - bez niego kostka dopchnieta po blacie na cel
-    bylaby "odlozona", a `reward` zostaje funkcja bez stanu.
+    Once set it holds until a reset (the caller clears it at the start of an episode). It is computed
+    BEFORE the reward and passed to it: without it a cube pushed along the table onto the target would
+    count as "placed", and with it `reward` stays a function without state.
     """
     height = cube_pos[..., 2] - task.cube_half
     return carried | (grasped(xp, jaw_contacts) & (height > task.lift_height))
 
 
 def grip_is_open(xp, limits: Limits, q_cmd):
-    """(N,) czy rozkaz chwytaka jest w otwartej polowie zakresu (puszczenie kostki)."""
+    """(N,) whether the gripper command is in the open half of its range (the cube is released)."""
     g = limits.grip
     lo, hi = float(limits.lo[g]), float(limits.hi[g])
     return q_cmd[..., g] > lo + 0.5 * (hi - lo)
@@ -291,15 +295,16 @@ def grip_is_open(xp, limits: Limits, q_cmd):
 def reward(xp, task: TaskConfig, tcp, action, prev_action, goal=None, cube_pos=None, jaw_contacts=None,
            q_cmd=None, limits: Limits | None = None, target=None, cube_vel=None, carried=None,
            grip_open=None):
-    """(nagroda, sukces, porazka) dla kazdego swiata.
+    """(reward, success, failure) for every world.
 
-    `jaw_contacts` (N, 2): czy kostka dotyka szczeki stalej i ruchomej.
-    Porazka = kostka spadla ze stolu; epizod sie wtedy konczy.
-    `q_cmd` (N, n_joints) i `limits` - do kary za limity (`limit_penalty`); bez nich jej nie ma.
+    `jaw_contacts` (N, 2): whether the cube touches the fixed and the moving jaw.
+    Failure = the cube fell off the table; the episode then ends.
+    `q_cmd` (N, n_joints) and `limits` are for the limit and roll penalties (`limit_penalty`,
+    `roll_penalty`); without them there are none.
 
-    pickplace: `target` (N, 3) cel na blacie, `cube_vel` (N, 3) predkosc kostki [m/s],
-    `carried` (N,) zatrzask z `carry_latch` (policzony przed nagroda), `grip_open` (N,)
-    rozkaz chwytaka otwarty (domyslnie z `q_cmd` i `limits`, patrz `grip_is_open`).
+    pickplace: `target` (N, 3) the target on the table, `cube_vel` (N, 3) the cube's velocity [m/s],
+    `carried` (N,) the latch from `carry_latch` (computed before the reward), `grip_open` (N,) the
+    gripper command is open (by default from `q_cmd` and `limits`, see `grip_is_open`).
     """
     cost = task.action_rate * ((action - prev_action) ** 2).sum(-1)
     if task.limit_penalty > 0 and q_cmd is not None and limits is not None:
@@ -310,10 +315,10 @@ def reward(xp, task: TaskConfig, tcp, action, prev_action, goal=None, cube_pos=N
         cost = cost + task.roll_penalty * roll * roll
     if task.name == "reach":
         d = _norm(goal - tcp)
-        # Dwie skale: zgrubna ciagnie z daleka, dokladna nagradza ostatnie milimetry.
+        # Two scales: the coarse one pulls from afar, the fine one rewards the last millimetres.
         r = 0.5 * (1.0 - xp.tanh(d / 0.10)) + 0.5 * (1.0 - xp.tanh(d / 0.01))
         success = d < task.success_dist
-        failure = d < -1.0                                  # w reach nie ma porazki
+        failure = d < -1.0                                  # reach has no failure
         return r - cost, success, failure
     if task.name == "pickplace":
         return _reward_pickplace(xp, task, tcp, action, cost, cube_pos, jaw_contacts, limits, target,
@@ -336,11 +341,11 @@ def reward(xp, task: TaskConfig, tcp, action, prev_action, goal=None, cube_pos=N
 
 def _reward_pickplace(xp, task: TaskConfig, tcp, action, cost, cube_pos, jaw_contacts, limits, target,
                       cube_vel, carried, opened):
-    """pickplace: podejdz, chwyc, unies, przenies nad cel, odloz, pusc.
+    """pickplace: approach, grasp, lift, carry over the target, put down, release.
 
-    Sukces = byla niesiona (`carried`) & lezy na celu (`placed`) & szczeki jej nie
-    trzymaja, a rozkaz chwytaka jest otwarty (`released`) & stoi (`still`). Nagroda
-    za "na celu" tez tylko po niesieniu - inaczej dopychanie po blacie by sie oplacalo.
+    Success = it was carried (`carried`) & it lies on the target (`placed`) & the jaws do not hold it
+    and the gripper command is open (`released`) & it is still (`still`). The rewards for nearing
+    and being on the target also count only after carrying, otherwise pushing along the table would pay.
     """
     d = _norm(cube_pos - tcp)
     g = grasped(xp, jaw_contacts)
@@ -363,25 +368,25 @@ def _reward_pickplace(xp, task: TaskConfig, tcp, action, cost, cube_pos, jaw_con
 
 
 def success_streak(xp, task: TaskConfig, streak, success):
-    """(nowa seria sukcesow z rzedu, czy konczy epizod) - to samo w env, batch i runnerze.
+    """(the new count of successes in a row, whether it ends the episode), for env and batch.
 
-    Koniec epizodu po serii jest "ucieciem" (jak limit czasu), a nie stanem koncowym:
-    PPO dolicza mu wartosc stanu. Gdyby liczyl zero, polityka nauczylaby sie NIE konczyc
-    - kostka trzymana tuz ponizej `lift_height` daje ~6 na takt przez reszte epizodu,
-    a zakonczenie tylko 8 x 10 taktow.
+    The strategy on the arm counts its streak by the same rule. An end after a streak is a truncation
+    (like the time limit), not a terminal state: PPO bootstraps it with the state value. With zero
+    instead, the policy would learn NOT to finish: a cube held just below `lift_height` earns ~6 per
+    tick for the rest of the episode, finishing only 8 x 10 ticks.
     """
     streak = xp.where(success, streak + 1, streak * 0)
     done = streak >= task.end_on_success if task.end_on_success > 0 else success & ~success
     return streak, done
 
 
-# ---------------------------------------------------------------- starty
+# ---------------------------------------------------------------- starts
 def sample_goals(kin: RobotKinematics, task: TaskConfig, rng: np.random.Generator, n: int) -> np.ndarray:
-    """Cele `reach` (n, 3) w ukladzie podstawy - na pewno osiagalne.
+    """`reach` goals (n, 3) in the base frame, all of them reachable.
 
-    Losujemy w przestrzeni STAWOW i bierzemy TCP z kinematyki prostej, jak fala
-    kalibracyjna: kazdy cel jest osiagalny z definicji, a filtr trzyma go nad
-    stolem i przed ramieniem.
+    Samples in JOINT space (`spec.wave_ranges`, else the MJCF range) and takes the TCP from forward
+    kinematics, like the calibration wave: every goal is reachable by construction, and the filter
+    keeps it within `goal_radius` / `goal_height` and in front of the arm (x > 0.05 m).
     """
     spec = kin.spec
     out = []
@@ -398,7 +403,7 @@ def sample_goals(kin: RobotKinematics, task: TaskConfig, rng: np.random.Generato
 
 
 def sample_start(task: TaskConfig, limits: Limits, rng: np.random.Generator, n: int) -> np.ndarray:
-    """Katy startowe (n, n_joints): poza domowa z szumem, chwytak otwarty w zadaniach z kostka."""
+    """Start angles (n, n_joints): the home pose with noise, the gripper open in the tasks with a cube."""
     na, g = limits.n_arm, limits.grip
     q = np.repeat(limits.home[None], n, axis=0)
     q[:, :na] += np.radians(rng.uniform(-task.start_noise_deg, task.start_noise_deg, (n, na)))
@@ -409,7 +414,7 @@ def sample_start(task: TaskConfig, limits: Limits, rng: np.random.Generator, n: 
 
 
 def sample_cubes(task: TaskConfig, rng: np.random.Generator, n: int) -> tuple[np.ndarray, np.ndarray]:
-    """Kostki na blacie: polozenia (n, 3) w ukladzie podstawy i kwaterniony (n, 4) obrotu wokol z."""
+    """Cubes on the table: positions (n, 3) in the base frame and quaternions (n, 4) of a turn about z."""
     r = rng.uniform(*task.cube_radius, n)
     b = rng.uniform(*task.cube_bearing, n)
     pos = np.stack([r * np.cos(b), r * np.sin(b), np.full(n, task.cube_half)], axis=1)
@@ -418,17 +423,17 @@ def sample_cubes(task: TaskConfig, rng: np.random.Generator, n: int) -> tuple[np
     return pos, quat
 
 
-#: Ile razy `sample_targets` losuje od nowa cel za blisko kostki, zanim wezmie zapasowy.
+#: How many times `sample_targets` redraws a target too close to the cube before taking the fallback.
 TARGET_TRIES = 64
 
 
 def sample_targets(task: TaskConfig, rng: np.random.Generator, cube_pos: np.ndarray) -> np.ndarray:
-    """Cele pickplace (n, 3) na blacie (z = 0), co najmniej `target_min_sep` (xy) od kostek `cube_pos` (n, 3).
+    """pickplace targets (n, 3) on the table (z = 0), at least `target_min_sep` (xy) from the cubes (n, 3).
 
-    Losowanie biegunowe w `target_radius` / `target_bearing`, jak kostki; za bliskie
-    wiersze losujemy od nowa (tylko je), najwyzej `TARGET_TRIES` razy. Wiersz, ktory
-    wciaz nie pasuje, dostaje cel na zewnetrznym promieniu po drugiej stronie pierscienia.
-    Na GPU: `batch.BatchEnv._sample_targets` - ta sama regula.
+    Polar sampling in `target_radius` / `target_bearing`, like the cubes; rows too close to their
+    cube are drawn again (only those), at most `TARGET_TRIES` times. A row that still does not fit
+    gets a target on the outer radius at the end of the bearing range away from its cube.
+    On the GPU: `batch.BatchEnv._sample_targets`, the same rule.
     """
     cube = np.asarray(cube_pos, float).reshape(-1, 3)
     n = len(cube)

@@ -1,16 +1,16 @@
-"""Polityka jako plik: siec aktora, normalizacja obserwacji i wszystko, co trzeba wiedziec o treningu.
+"""A policy as a file: the actor network, the observation normalizer and what to know about its training.
 
     pol = Policy.load("workspace/policies/reach-20260924-0130/policy.npz")
-    action = pol.act(obs)                   # numpy (obs_dim,) albo (N, obs_dim) -> [-1, 1]
+    action = pol.act(obs)                   # numpy (obs_dim,) or (N, obs_dim) -> [-1, 1]
 
-W `meta.json` obok wag jest konfiguracja zadania, na ktorym polityka sie uczyla
-(czestotliwosc, krok akcji, limity) - uruchomienie jej z innymi daloby inne ruchy niz w
-treningu, a to wyglada na prawdziwym ramieniu jak "polityka nie dziala".
-Dlatego strategia i ewaluacja buduja zadanie Z PLIKU, a nie z domyslnych.
+`meta.json` next to the weights holds the configuration of the task the policy was trained on
+(frequency, action step, limits). Running it with other values would move differently than in
+training, and on the real arm that looks like "the policy does not work". That is why the strategy
+and the evaluation build the task FROM THE FILE, not from the defaults.
 
-Polityki sa w dwoch miejscach: bazowe dostarczane z pakietem (`soarm_lab/policies`,
-`bundled_dir`) i uczone na stanowisku (`DEFAULT_DIR`, patrz `soarm_lab.paths`).
-`find_policy` znajduje plik po nazwie albo sciezce.
+Policies live in two places: the base ones bundled with the package (`soarm_lab/policies`,
+`bundled_dir`) and the ones trained here (`DEFAULT_DIR`, see `soarm_lab.paths`). `find_policy`
+finds the file by name or path.
 
 Running a policy needs numpy only: the strategy, evaluation and `soarm-lab eval` never import torch.
 The weights file is `policy.npz`, format 1, read with `np.load(allow_pickle=False)`; all arrays float32:
@@ -29,7 +29,8 @@ The weights file is `policy.npz`, format 1, read with `np.load(allow_pickle=Fals
 
 with ELU (alpha 1) after every layer but the last. The action is the mean of the Gaussian the
 policy was trained with. The weights keep torch's `nn.Linear` layout (n_out, n_in): the same
-matrix products as torch, so a single observation's action matches torch's to a few float32 ulps. A torch checkpoint (`policy.pt`, the format before this one) converts with
+matrix products as torch, so a single observation's action matches torch's to a few float32 ulps.
+A torch checkpoint (`policy.pt`, the format before this one) converts with
 `soarm-lab convert <policy.pt>`, which needs `soarm-lab[torch]` (`torch_policy.convert`).
 """
 
@@ -46,9 +47,9 @@ import numpy as np
 from ..paths import policies_dir
 from . import task as tk
 
-#: Polityki stanowiska. W klonie repozytorium wzgledem jego korzenia (`soarm_lab.paths`).
+#: Policies trained here. In a checkout of the repository, relative to its root (`soarm_lab.paths`).
 DEFAULT_DIR = policies_dir()
-#: Polityki bazowe dostarczane z pakietem.
+#: The base policies bundled with the package.
 BUNDLED_DIR = Path(__file__).resolve().parents[1] / "policies"
 #: The weights of a policy (numpy), next to its `meta.json`.
 POLICY_FILE = "policy.npz"
@@ -75,16 +76,18 @@ class PolicyMeta:
     iterations: int = 0
     success: float = float("nan")
     randomization: dict[str, Any] = field(default_factory=dict)
-    #: Wyniki ewaluacji: {"gpu": ..., "cpu": ..., "real": ...} - uzupelniane pozniej.
+    #: Evaluation results by key: "gpu" (the trainer's own, `ppo`), "cpu_nominal" and "cpu_rand"
+    #: (`soarm-lab train` evaluates on the CPU after training).
     evals: dict[str, Any] = field(default_factory=dict)
     notes: str = ""
-    #: Ramie, na ktorym polityka sie uczyla (`RobotSpec.name`). Polityki sprzed tego pola - SO-101.
+    #: The arm the policy was trained on (`RobotSpec.name`). A `meta.json` without it is an SO-101's.
     robot: str = "so101"
 
     def task_config(self) -> tk.TaskConfig:
-        # Pola dodane pozniej (np. `end_on_success`) biora wartosc zadania z `make_task`,
-        # a nie zero z klasy: stara lift-v2 ma sie na ramieniu zatrzymac po sukcesie tak
-        # samo jak nowa, a douczana z niej - dostac nowe kary. Bez `n_joints` - SO-101 (6).
+        # Fields missing from an older `meta.json` (e.g. `end_on_success`) take the task's value from
+        # `make_task`, not the class default of zero: an older lift policy then stops after success on
+        # the arm like a new one, and one fine-tuned from it gets the current penalties. Without
+        # `n_joints` it is an SO-101 (6).
         data = {**asdict(tk.make_task(self.task.get("name", "reach"))), **self.task}
         for k, v in data.items():
             if isinstance(v, list):
@@ -124,8 +127,8 @@ class Policy:
         self.obs_count = np.float32(1e-4)
         self.obs_clip = np.float32(OBS_CLIP)
         self.actor: Layers = zero_layers(self.sizes)
-        #: Wagi krytyka z treningu (tylko do douczania; do jazdy niepotrzebne). Polityki
-        #: zapisane przed jego dodaniem go nie maja - douczanie grzeje wtedy krytyka od zera.
+        #: The critic's weights from training (for fine-tuning only; running does not need them). None
+        #: for a policy saved without one: fine-tuning then warms up a new critic (`PPOConfig.critic_warmup`).
         self.critic: Layers | None = None
 
     @property
@@ -139,7 +142,7 @@ class Policy:
         return np.clip(x, -self.obs_clip, self.obs_clip)
 
     def act(self, obs: np.ndarray) -> np.ndarray:
-        """Akcja deterministyczna (srednia rozkladu), przycieta do [-1, 1]."""
+        """The deterministic action (the distribution's mean), clipped to [-1, 1]."""
         x = np.asarray(obs, np.float32)
         single = x.ndim == 1
         a = np.clip(run_mlp(self.actor, self.normalize(x[None] if single else x)), -1.0, 1.0)
@@ -149,7 +152,7 @@ class Policy:
     def task(self) -> tk.TaskConfig:
         return self.meta.task_config()
 
-    # ----------------------------------------------------------------- dysk
+    # ----------------------------------------------------------------- disk
     def arrays(self) -> dict[str, np.ndarray]:
         """The contents of `policy.npz` (see the module's docstring)."""
         out = {"format": np.asarray(FORMAT, np.int64), "sizes": np.asarray(self.sizes, np.int64),
@@ -199,7 +202,7 @@ class Policy:
 
 
 def bundled_dir() -> Path:
-    """Polityki bazowe z pakietu (`reach-v3`, `lift-v3`) - start do douczania na swoim ramieniu."""
+    """The package's base policies (`reach-v3`, `lift-v3`): a start for fine-tuning on your own arm."""
     return BUNDLED_DIR
 
 
@@ -212,9 +215,9 @@ def is_bundled(path: str | Path) -> bool:
 
 
 def list_policies(root: str | Path = DEFAULT_DIR) -> list[dict[str, Any]]:
-    """Polityki stanowiska i bazowe z repozytorium, najnowsze pierwsze.
+    """The policies in `root` and the bundled base policies, newest first.
 
-    Nazwa ze stanowiska przeslania bazowa o tej samej nazwie. A folder with only a torch checkpoint
+    A policy in `root` hides a base policy of the same name. A folder with only a torch checkpoint
     (`policy.pt`) is not listed: `torch_checkpoints` finds those.
     """
     out: dict[str, dict[str, Any]] = {}
@@ -239,10 +242,10 @@ def torch_checkpoints(root: str | Path = DEFAULT_DIR) -> list[Path]:
 
 
 def find_policy(name: str | Path, root: str | Path | None = None) -> Path:
-    """Plik polityki `name` (`policy.npz`): sciezka do pliku albo folderu, nazwa ze stanowiska, nazwa bazowej.
+    """The policy file (`policy.npz`) of `name`: a path to the file or its folder, or a policy's name.
 
-    Kolejnosc jak w `list_policies`: polityka stanowiska (`root`, domyslnie `paths.policies_dir()`)
-    przeslania bazowa o tej samej nazwie. A folder with only a `policy.pt` gives that file;
+    The order is that of `list_policies`: a policy in `root` (by default `paths.policies_dir()`)
+    hides a base policy of the same name. A folder with only a `policy.pt` gives that file;
     `Policy.load` then says how to convert it.
     """
     path = Path(name).expanduser()

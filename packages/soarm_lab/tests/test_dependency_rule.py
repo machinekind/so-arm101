@@ -59,7 +59,7 @@ def test_the_contracts_are_not_the_twin() -> None:
 def test_no_forbidden_imports(path: Path) -> None:
     modules, levels = imports(path)
     assert forbidden(modules) == set()
-    # A relative import may not reach above its own package (`from ..base import ...`: the twin's layout).
+    # A relative import may not reach outside `soarm_lab`.
     assert all(level <= len(path.relative_to(ROOT).parts) for level in levels)
 
 

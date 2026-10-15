@@ -1,18 +1,16 @@
-"""Srodowisko Gymnasium na CPU: `SoArmLab/Reach-v0`, `SoArmLab/Lift-v0`, `SoArmLab/PickPlace-v0`.
+"""The Gymnasium environment on the CPU: `SoArmLab/Reach-v0`, `SoArmLab/Lift-v0`, `SoArmLab/PickPlace-v0`.
 
     import gymnasium as gym, soarm_lab.rl
     env = gym.make("SoArmLab/Reach-v0")
     obs, info = env.reset(seed=0)
 
-To jest wersja "jedno srodowisko, zwykly MuJoCo" - do sprawdzania polityk,
-debugowania nagrody, `check_env` i bibliotek w stylu SB3. Do uczenia na
-tysiacach swiatow naraz sluzy `batch.BatchEnv` na MuJoCo Warp; obie licza
-obserwacje i nagrode tymi samymi funkcjami z `task`.
+This is the "one environment, plain MuJoCo" version: for checking policies, debugging the reward,
+`check_env` and SB3-style libraries. Training on thousands of worlds at once uses `batch.BatchEnv`
+on MuJoCo Warp; both compute the observation and the reward with the same functions from `task`.
 
-Scena jest budowana RAZ (293 ms na laptopie, 111 ms na RTX A4500); reset zmienia
-tylko stan i pola skompilowanego modelu. Stanowisko (stol, kamery, poza podstawy)
-przychodzi z eksportu blizniaka (`station.Station`, `lerobot-twin export`);
-domyslnie stanowisko `sim` dostarczane z pakietem.
+The scene is built ONCE (293 ms on a laptop, 111 ms on an RTX A4500); a reset changes only the state
+and fields of the compiled model. The station (table, cameras, base pose) comes from the twin's export
+(`station.Station`, `lerobot-twin export`); by default it is the `sim` station bundled with the package.
 """
 
 from __future__ import annotations
@@ -29,9 +27,9 @@ from ..station import Station
 from . import task as tk
 from .randomize import Randomization
 
-#: Kamera podgladu, gdy stanowisko nie ma zadnej skalibrowanej.
+#: The preview camera, added when the station has no cameras (`scene_config(view=True)`).
 VIEW = "widok"
-#: Podkladka celu pickplace: polowy bokow [m] i kolor (niebieski - kostka jest czerwona).
+#: The pickplace target pad: half sides [m] and colour (blue; the cube is red).
 TARGET_SIZE = (0.035, 0.035, 0.002)
 TARGET_RGBA = (0.2, 0.4, 0.9, 1.0)
 
@@ -45,7 +43,7 @@ def look_at(eye, target, up=(0.0, 0.0, 1.0)) -> np.ndarray:
 
 
 def scene_config(task: tk.TaskConfig, station: Station | None = None, view: bool = False) -> sc.SceneConfig:
-    """Scena zadania: stanowisko (stol, kamery) plus obiekty zadania."""
+    """The task's scene: the station (table, cameras) plus the task's objects."""
     ws = station or Station.load()
     cfg = sc.SceneConfig(ws)
     if task.cube:
@@ -54,11 +52,12 @@ def scene_config(task: tk.TaskConfig, station: Station | None = None, view: bool
                                             mass=task.cube_mass)]
         cfg.grasp_sensors = [*cfg.grasp_sensors, task.cube]
     if task.target:
-        # Mocap bez kolizji: kostka lezy na blacie, wiec `height` znaczy to samo co w lift.
+        # A mocap body without collisions: the cube lies on the table top, so `height` means the same
+        # as in lift.
         cfg.objects = [*cfg.objects, sc.Box(task.target, TARGET_SIZE, (0.3, 0.1), rgba=TARGET_RGBA, free=False,
                                             mocap=True)]
     if view and not cfg.cameras:
-        # Skala stolu ramienia (SO-101: 0,56 m, mnoznik dokladnie 1).
+        # Scaled to the arm's desk (SO-101: 0.56 m, a factor of exactly 1).
         f = ws.spec().desk.map_side / 0.56
         cfg.cameras = [sc.CameraView.from_fov(VIEW, 480, 360, 50.0, look_at(np.array([0.62, -0.42, 0.42]) * f,
                                                                            np.array([0.18, 0.0, 0.05]) * f))]
@@ -66,7 +65,7 @@ def scene_config(task: tk.TaskConfig, station: Station | None = None, view: bool
 
 
 class ModelFields:
-    """Nominalne pola modelu, ktore randomizacja mnozy - zapamietane raz."""
+    """The nominal model fields that randomization multiplies, stored once."""
 
     def __init__(self, scene: sc.Scene, cube: str | None):
         m = scene.model
@@ -84,21 +83,21 @@ class ModelFields:
         self.cube_friction = m.geom_friction[self.cube_geom].copy() if cube else None
 
     def apply(self, m: mujoco.MjModel, d: mujoco.MjData, s: dict[str, float]) -> None:
-        """Mnozniki `s` na pola modelu, liczone zawsze od nominalu (nie kumuluja sie)."""
+        """Applies the multipliers `s` to the model fields, always from the nominal (they never pile up)."""
         m.actuator_gainprm[self.act, 0] = self.kp * s["kp"]
         m.actuator_biasprm[self.act, 1] = self.bias[:, 0] * s["kp"]
         m.dof_damping[self.dof] = self.damping * s["damping"]
         m.dof_armature[self.dof] = self.armature * s["armature"]
         m.dof_frictionloss[self.dof] = self.frictionloss * s["frictionloss"]
         if self.cube_body is not None:
-            # Masa razem z bezwladnoscia - to ten sam obiekt, tylko ciezszy.
+            # The mass together with the inertia: it is the same object, only heavier.
             m.body_mass[self.cube_body] = self.cube_mass * s["cube_mass"]
             m.body_inertia[self.cube_body] = self.cube_inertia * s["cube_mass"]
             m.geom_friction[self.cube_geom] = self.cube_friction * np.array([s["cube_friction"], 1.0, 1.0])
-        # Masa i armatura wchodza w stale liczone przy kompilacji (body_invweight0,
-        # dof_invweight0), a od nich zalezy miekkosc kontaktow. Bez przeliczenia
-        # kostka o zmienionej masie miala kontakty "od innej kostki" i przy
-        # zakleszczeniu miedzy szczeka a blatem wylatywala z predkoscia 10-180 m/s.
+        # Mass and armature enter constants computed at compile time (body_invweight0,
+        # dof_invweight0), and the softness of contacts depends on them. Without recomputing them a
+        # cube with a changed mass gets the contacts of another cube, and when it jams between the
+        # jaw and the table it flies off at 10-180 m/s.
         mujoco.mj_setConst(m, d)
 
 
@@ -131,23 +130,23 @@ class ArmEnv(gym.Env):
         self.observation_space = gym.spaces.Box(-np.inf, np.inf, (self.task.obs_dim,), np.float32)
         self.action_space = gym.spaces.Box(-1.0, 1.0, (self.task.act_dim,), np.float32)
         self.goal = np.zeros(3)
-        #: pickplace: cel odlozenia na blacie (z = 0), uklad podstawy.
+        #: pickplace: the place target on the table top (z = 0), in the base frame.
         self.target = np.zeros(3)
-        #: pickplace: zatrzask "kostka byla niesiona" (`task.carry_latch`), zerowany w `reset`.
+        #: pickplace: the "cube was carried" latch (`task.carry_latch`), cleared in `reset`.
         self._carried = False
         self.q_cmd = self.limits.home.copy()
         self.prev_action = np.zeros(self.task.act_dim)
         self.t = 0
-        self._streak = 0                     # takty sukcesu z rzedu (`task.end_on_success`)
+        self._streak = 0                     # success ticks in a row (`task.end_on_success`)
         self._delay: list[np.ndarray] = []
         self._noise = 0.0
         self._cube_delay, self._cube_period = 0, 1
         self._cube_hist: list[tuple[np.ndarray, np.ndarray]] = []
         self._cube_seen = (np.zeros(3), np.eye(3))
 
-    # ------------------------------------------------------------ stan
+    # ------------------------------------------------------------ state
     def state(self) -> dict[str, np.ndarray]:
-        """Wszystko, z czego licza sie obserwacja i nagroda - w ukladzie podstawy."""
+        """Everything the observation and the reward are computed from, in the base frame."""
         d = self.scene.data
         R, t = self.T_world2base[:3, :3], self.T_world2base[:3, 3]
         out = {"q": d.qpos[self.kin.qadr].copy(), "tcp": R @ d.site_xpos[self.site] + t}
@@ -171,9 +170,10 @@ class ArmEnv(gym.Env):
         return obs[0].astype(np.float32)
 
     def _perceive(self, s: dict[str, np.ndarray], force: bool = False) -> None:
-        """Kostka w obserwacji tak, jak ja widza kamery: z opoznieniem, rzadziej, z szumem.
+        """The cube in the observation as the cameras see it: delayed, less often, with noise.
 
-        Nagroda liczy sie z prawdy; polityka widzi to, co da jej `perception` na biurku.
+        The reward is computed from the truth; the policy sees what the twin's camera perception
+        gives it on the desk.
         """
         if not self.task.cube:
             return
@@ -231,7 +231,7 @@ class ArmEnv(gym.Env):
         return self._obs(s0), {"success": False, "finished": False}
 
     def set_cube(self, pos_base: np.ndarray, quat_base: np.ndarray) -> None:
-        """Kostka w pozie podanej w ukladzie podstawy (kwaternion w, x, y, z)."""
+        """Puts the cube at a pose given in the base frame (quaternion w, x, y, z)."""
         d = self.scene.data
         T = self.scene.T_base2world
         q_base = np.zeros(4)
@@ -244,7 +244,10 @@ class ArmEnv(gym.Env):
         d.qvel[self.cube_dadr:self.cube_dadr + 6] = 0.0
 
     def set_target(self, pos_base: np.ndarray) -> None:
-        """Cel pickplace w (x, y) ukladu podstawy; z zawsze 0 (blat). Podkladka mocap idzie za nim."""
+        """Sets the pickplace target at (x, y) of the base frame; z is always 0 (the table top).
+
+        The mocap pad follows it.
+        """
         p = np.asarray(pos_base, float)
         self.target = np.array([p[0], p[1], 0.0])
         T = self.scene.T_base2world
@@ -260,10 +263,10 @@ class ArmEnv(gym.Env):
         d = self.scene.data
         d.ctrl[self.scene.act_ids] = self.q_cmd
         mujoco.mj_step(self.scene.model, d, nstep=self.task.substeps)
-        # Po mj_step qpos jest juz po calkowaniu, a site_xpos/xpos/xmat - z przejscia w przod
-        # PRZED nim (5 ms starsze). TCP w obserwacji rozjezdzal sie z FK(q) o 4-8 mm w ruchu,
-        # a runner na ramieniu liczy TCP dokladnie z q - polityka uczyla sie relacji,
-        # ktorej na biurku nie ma. Kinematyka od nowa: wszystko z tego samego q.
+        # After mj_step qpos is already integrated, but site_xpos/xpos/xmat come from the forward
+        # pass BEFORE it (5 ms older). In motion that TCP differs from FK(q) by 4-8 mm, while the
+        # strategy on the arm computes the TCP exactly from q: the policy would learn a relation the
+        # desk does not have. So the kinematics run again: everything from the same q.
         mujoco.mj_kinematics(self.scene.model, d)
         self.t += 1
 
@@ -294,7 +297,7 @@ class ArmEnv(gym.Env):
             info["placed"] = bool(d_t < self.task.place_radius and info["height"] < self.task.place_height)
             info["released"] = bool(not info["grasped"] and kw["grip_open"][0])
         terminated = bool(failure[0])
-        # Koniec po serii sukcesow to uciecie jak limit czasu (patrz `task.success_streak`).
+        # An end after a success streak is a truncation, like the time limit (see `task.success_streak`).
         truncated = self.t >= self.task.episode_steps or info["finished"]
         self._perceive(s)
         return self._obs(s), float(r[0]), terminated, truncated, info

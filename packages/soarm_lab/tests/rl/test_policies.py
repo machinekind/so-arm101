@@ -1,17 +1,16 @@
-"""Polityki DOSTARCZANE z pakietem (`soarm_lab/policies`) na CPU - to one pojada na prawdziwym ramieniu.
+"""The policies BUNDLED with the package (`soarm_lab/policies`) on the CPU: these drive the real arm.
 
-Scena to stanowisko `sim` z pakietu.
+The scene is the package's `sim` station.
 
-Testy RL sprawdzaja srodowisko i nagrode; tu sprawdzamy zachowanie samych plikow
-polityk, ktore operator dostaje w panelu. Przeglad zmierzyl na starej `lift-v2`:
-kostka konczyla 13-22 cm nad blatem (zadanie: 6 cm), stawy ramienia przez
-kilkadziesiat taktow przy limitach i wymachy po chwycie do 72 st. - a zaden test
-tego nie widzial, bo sprawdzal tylko "czy podniosla". Progi ponizej przepuszczaja
-`lift-v3` (zmierzone: kostka 8-14 cm, 6 taktow przy limicie po chwycie, ruch po
-pierwszym sukcesie do 46 st.) i zatrzymuja `lift-v2`: kostka srednio 16-18 cm,
-do 22 cm, 24-56 taktow przy limicie po chwycie, ruch po sukcesie do 72 st.
+The other RL tests check the environment and the reward; these check how the policy files the
+operator picks in the panel behave. A test that only asks "did it lift" passes the old `lift-v2`,
+which ended with the cube 13-22 cm above the table (task: 6 cm), held arm joints at their limits for
+tens of ticks and swung up to 72 deg after the grasp. The thresholds below pass `lift-v3` (measured:
+cube at 8-14 cm, 6 ticks at a limit after the grasp, up to 46 deg of motion after the first success)
+and stop `lift-v2`: cube at 16-18 cm on average, up to 22 cm, 24-56 ticks at a limit after the
+grasp, up to 72 deg of motion after success.
 
-Epizod na CPU trwa ~0,07 s, wiec 50 epizodow to kilka sekund.
+An episode on the CPU takes ~0.07 s, so 50 episodes take a few seconds.
 """
 
 from __future__ import annotations
@@ -29,17 +28,17 @@ from soarm_lab.rl.randomize import Randomization  # noqa: E402
 
 REACH = bundled_dir() / "reach-v3" / "policy.npz"
 LIFT = bundled_dir() / "lift-v3" / "policy.npz"
-#: "Przy limicie" = rozkaz stawu blizej niz 1 st. od limitu (`task.Limits`).
+#: "At a limit" = a joint command closer than 1 deg to its limit (`task.Limits`).
 NEAR_LIMIT = np.radians(1.0)
 
 
 @dataclass
 class Episode:
-    q_cmd: np.ndarray            # (T, 6) rozkazy [rad]
+    q_cmd: np.ndarray            # (T, 6) commands [rad]
     success: list[bool]
     grasped: list[bool]
     info: dict
-    end: float                   # reach: odleglosc TCP od celu [m]; lift: wysokosc kostki nad blatem [m]
+    end: float                   # reach: TCP distance to the goal [m]; lift: cube height above the table [m]
 
     def near_limit(self, limits, joints=slice(0, 5)) -> np.ndarray:
         q = self.q_cmd[:, joints]
@@ -72,7 +71,7 @@ def run(policy: Policy, rand: Randomization, episodes: int, seed: int = 10_000) 
 
 
 def lift_report(policy: Policy, rand: Randomization, episodes: int) -> dict:
-    """Liczby, na ktorych przeglad zlapal `lift-v2` - wspolne dla testu i sprawdzenia starej polityki."""
+    """The numbers that tell `lift-v3` from `lift-v2` (see the module docstring)."""
     eps, limits = run(policy, rand, episodes)
     heights = np.array([e.end for e in eps])
     limit_after_grasp, swing = 0, 0.0
@@ -89,15 +88,16 @@ def lift_report(policy: Policy, rand: Randomization, episodes: int) -> dict:
 
 
 def check_lift(rep: dict, lift_height: float) -> None:
-    # Konczy sama: seria sukcesow (`end_on_success`), nie limit czasu - i kostka jest w gorze.
+    # It ends by itself: a success streak (`end_on_success`), not the time limit, with the cube up.
     assert rep["finished"] == rep["episodes"], rep
     assert rep["height_min"] > lift_height, rep
-    # Bez wymachiwania kostka pod sufit: lift-v2 srednio 16-18 cm, do 22 cm.
+    # No waving the cube up to the ceiling: lift-v2 averaged 16-18 cm, up to 22 cm.
     assert rep["height_max"] < 0.16 and rep["height_mean"] < 0.135, rep
-    # Stawy ramienia po chwycie nie siedza na limitach (lift-v2: 24 i 56 taktow).
+    # Arm joints do not sit at their limits after the grasp (lift-v2: 24 and 56 ticks).
     assert rep["limit_ticks_after_grasp"] <= 12, rep
-    # Po pierwszym sukcesie ramie tylko trzyma i konczy (lift-v2: do 72 st. ruchu stawu).
-    # Prog 70 st.: zaokraglenie XML sceny z eksportu rozrzuca trajektorie po kontakcie miedzy przebiegami.
+    # After the first success the arm only holds and finishes (lift-v2: up to 72 deg of joint motion).
+    # Threshold 70 deg: the XML rounding of the exported scene scatters the trajectory after contact
+    # from run to run.
     assert rep["swing_after_success_deg"] < 70.0, rep
 
 
@@ -116,10 +116,10 @@ def test_shipped_reach_ends_near_the_goal():
     eps, limits = run(pol, Randomization.nominal(), 20)
     dist = np.array([e.end for e in eps])
     assert all(e.info["success"] for e in eps)
-    assert dist.max() < 0.005 and np.median(dist) < 0.003, dist           # zmierzone: mediana 1,8 mm, max 2,9 mm
-    # Zaden staw ramienia nie jedzie na limit - takze obrot nadgarstka. Obrot nie zmienia TCP,
-    # wiec nagroda reach go nie widziala: reach-v2 krecila nim do +150 st. w kazdym epizodzie
-    # (729 z 2000 taktow przy limicie). reach-v3 uczona z `roll_penalty`: mediana 13 st., max 48.
+    assert dist.max() < 0.005 and np.median(dist) < 0.003, dist           # measured: median 1.8, max 2.9 mm
+    # No arm joint drives to a limit, the wrist roll included. The roll does not change the TCP, so
+    # the reach reward's TCP terms do not see it: reach-v2 turned it to +150 deg in every episode
+    # (729 of 2000 ticks at the limit). reach-v3, trained with `roll_penalty`: median 13 deg, max 48.
     near = sum(int(e.near_limit(limits).sum()) for e in eps)
     assert near == 0, near
     roll = np.degrees(np.abs(np.concatenate([e.q_cmd[:, 4] for e in eps]) - limits.home[4]))

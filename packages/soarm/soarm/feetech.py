@@ -1,25 +1,24 @@
-"""Bezposrednie sterowanie serwami Feetech STS3215 - bez LeRobot i bez torcha.
+"""Direct control of Feetech STS3215 servos, without LeRobot and without torch.
 
-Po co drugi backend do tego samego ramienia
--------------------------------------------
-`lerobot_backend` daje pelna zgodnosc z ekosystemem LeRobot (kalibracja,
-nagrywanie zbiorow, uczenie), ale ciagnie za soba `torch` i `torchvision` -
-kilka gigabajtow na to, zeby wpisac szesc liczb do rejestrow serw. Do samej
-teleoperacji to nie jest potrzebne: serwa gadaja protokolem, ktory miesci sie
-na jednym ekranie, a caly ruch to jeden pakiet `SYNC WRITE` na cykl petli.
+Why a second backend for the same arm
+-------------------------------------
+`lerobot_backend` is fully compatible with the LeRobot ecosystem (calibration,
+dataset recording, training), but it pulls in `torch` and `torchvision`: several
+gigabytes to write six numbers into servo registers. Teleoperation alone does not
+need that: the servos speak a protocol that fits on one screen, and all the motion
+is one `SYNC WRITE` packet per loop cycle.
 
-Protokol jest zgodny z Dynamixel 1.0:
-    FF FF <ID> <LEN> <INST> [parametry...] <SUMA>
-gdzie ``LEN`` to liczba parametrow + 2, a suma kontrolna to negacja sumy
-wszystkiego po naglowku. Wartosci dwubajtowe ida najmlodszym bajtem naprzod.
+The protocol is compatible with Dynamixel 1.0:
+    FF FF <ID> <LEN> <INST> [parameters...] <CHECKSUM>
+where ``LEN`` is the number of parameters + 2 and the checksum is the bitwise NOT of
+the sum of everything after the header. Two-byte values go least significant byte first.
 
-Czego ten backend NIE robi
---------------------------
-Nie ma tu kalibracji LeRobota, wiec przeliczenie tikow na stopnie zaklada, ze
-mechaniczne zero stawu pokrywa sie ze srodkiem zakresu serwa (tik 2048) - tak
-wychodzi przy standardowym montazu SO-101, w ktorym serwa skladasz wysrodkowane.
-Jesli ktorys staw ma zero przesuniete, popraw go przez `joints.<nazwa>.offset`,
-a zwrot przez `joints.<nazwa>.invert`.
+What this backend does NOT do
+-----------------------------
+There is no LeRobot calibration here, so converting ticks to degrees assumes that a
+joint's mechanical zero is at `feetech.center_ticks` (default tick 2048, the middle
+of the servo range). That is what the standard SO-101 assembly gives, with the servos
+mounted centred. There is no per-joint zero offset or direction setting.
 """
 
 from __future__ import annotations
@@ -45,9 +44,9 @@ INST_SYNC_READ = 0x82
 INST_SYNC_WRITE = 0x83
 BROADCAST_ID = 0xFE
 
-#: Wlasne limity kata serwa, zapisane w jego EEPROM-ie. Serwo przycina do nich
-#: KAZDY rozkaz po cichu, wiec aplikacja, ktora ich nie zna, zadaje pozy
-#: niewykonalne i nie ma jak sie o tym dowiedziec.
+#: The servo's own angle limits, stored in its EEPROM. The servo silently clamps EVERY
+#: command to them, so an application that does not know them commands poses the servo
+#: cannot reach and has no way to find out.
 ADDR_MIN_ANGLE_LIMIT = 9
 ADDR_MAX_ANGLE_LIMIT = 11
 ADDR_TORQUE_ENABLE = 40
@@ -61,15 +60,14 @@ TICK_MIN = 0
 TICK_MAX = 4095
 
 
-#: Ponizej tego napiecia serwo odpowiada (plytka zasila sie z USB), ale nie ma
-#: z czego ruszyc. Warto powiedziec to wprost, zamiast pozwolic uzytkownikowi
-#: szukac bledu w konfiguracji.
+#: Below this voltage the servo answers (the board is powered over USB) but has nothing
+#: to move with. Better to say so plainly than to let the user hunt for a config error.
 MIN_SANE_VOLTAGE = 9.0
 
-#: Bity bajtu bledu w kazdej odpowiedzi serwa (jak ERRBIT_* w scservo_sdk).
-#: Serwo w ochronie zwalnia moment, ale dalej odpowiada - bez tych bitow staw,
-#: ktory opadl, wyglada na zdrowy (odtworzone: przeciazony bark 0x20, a fala
-#: kalibracyjna jechala dalej z 63 stopniami roznicy rozkaz-pomiar).
+#: Bits of the error byte in every servo reply (as ERRBIT_* in scservo_sdk).
+#: A servo in protection releases torque but keeps answering; without these bits a joint
+#: that dropped looks healthy (reproduced: an overloaded shoulder, 0x20, while the calibration
+#: wave carried on with 63 degrees between command and measurement).
 SERVO_ERROR_BITS: tuple[tuple[int, str], ...] = (
     (0x01, "napiecie zasilania poza zakresem"),
     (0x02, "blad czujnika kata / kat poza zakresem"),
@@ -78,29 +76,29 @@ SERVO_ERROR_BITS: tuple[tuple[int, str], ...] = (
     (0x20, "przeciazenie"),
 )
 
-#: Tyle kolejnych nieudanych odczytow ramienia = lacze zerwane (a nie jedna zgubiona ramka).
+#: This many consecutive failed reads of the arm = a dead link (not one lost frame).
 LINK_LOSS_CYCLES = 5
 
-#: Najkrotsze okno ciszy [s], po ktorym lacze po zgubionej odpowiedzi uznajemy za puste.
-#: Wlasciwe okno to ~2x najdluzszy ostatni przebieg tam i z powrotem (patrz `FeetechBus._quiet`).
+#: Shortest quiet window [s] after which the link is taken as empty after a lost reply.
+#: The actual window is ~2x the longest recent round trip (see `FeetechBus._quiet`).
 QUIET_MIN_S = 0.02
 
-#: O tyle tikow (~1 stopien) moga sie roznic dwa odczyty pozycji przy starcie.
-#: Z tej pozycji robi sie cel serwa tuz przed zalaczeniem momentu - jeden
-#: przeklamany odczyt oznaczalby skok ramienia z pelna predkoscia.
+#: Two position reads at start may differ by this many ticks (~1 degree).
+#: That position becomes the servo goal just before torque is enabled; one
+#: garbled read would mean the arm jumping at full speed.
 START_TOLERANCE_TICKS = 12
 
 
 def checksum(payload: bytes) -> int:
-    """Suma kontrolna pakietu: negacja sumy wszystkiego po naglowku."""
+    """Packet checksum: the bitwise NOT of the sum of everything after the header."""
     return (~sum(payload)) & 0xFF
 
 
 def describe_servo_error(name: str, dev_id: int, bits: int) -> str:
-    """Bity bledu serwa jako zdanie dla operatora: "staw (serwo N): przeciazenie, ...".
+    """Servo error bits as a sentence for the operator: "shoulder_lift (serwo 2): przeciazenie, ...".
 
-    Wspolne dla obu backendow (bajt bledu odpowiedzi tu, rejestr Status w `lerobot`
-    - te same bity), zeby panel i nadzor dostawaly to samo zdanie niezaleznie od backendu.
+    Shared by both backends (the reply error byte here, the Status register in `lerobot`:
+    the same bits), so the panel and the supervisor get the same sentence whichever backend runs.
     """
     what = [text for bit, text in SERVO_ERROR_BITS if bits & bit]
     known = sum(bit for bit, _ in SERVO_ERROR_BITS)
@@ -110,45 +108,46 @@ def describe_servo_error(name: str, dev_id: int, bits: int) -> str:
 
 
 class FeetechBus:
-    """Warstwa protokolu na porcie szeregowym. Oddzielona, zeby dala sie testowac."""
+    """Protocol layer over the serial port. Kept separate so that it can be tested."""
 
     def __init__(self, port: str, baudrate: int = 1_000_000, timeout: float = 0.02):
         self.port = port
         self.baudrate = baudrate
         self.timeout = timeout
         self._link: Any = None
-        #: Ostatni bajt bledu z poprawnej odpowiedzi kazdego serwa {id: bity}.
+        #: Last error byte from a valid reply of each servo {id: bits}.
         self.errors: dict[int, int] = {}
-        #: Odpowiedzi odrzucone przez zla sume kontrolna (diagnostyka).
+        #: Replies dropped for a bad checksum (diagnostics).
         self.corrupt_replies = 0
-        #: Jak skonczyl sie ostatni `_receive`: "ok", "lost" (brak/ucieta ramka,
-        #: strumien moze byc przesuniety) albo "corrupt" (cala ramka, zla tresc).
+        #: How the last receive ended: "ok", "lost" (no frame or a truncated one, the stream
+        #: may be misaligned) or "corrupt" (a whole frame with bad content).
         self._last_rx = "ok"
-        #: Najdluzszy ostatni przebieg udanej transakcji [s] (maleje powoli) - z niego okno ciszy.
+        #: Longest recent round trip of a successful transaction [s] (decays slowly); the quiet
+        #: window comes from it.
         self._rtt = 0.0
-        #: Po zgubionej odpowiedzi strumien jest podejrzany: spozniona odpowiedz moze jeszcze
-        #: przyjsc i trafic do nastepnej transakcji. Kasowane dopiero przez czysty odczyt.
+        #: After a lost reply the stream is suspect: a late reply may still arrive and land in the
+        #: next transaction. Cleared only by a clean read.
         self._suspect = False
-        #: Odczyty, w ktorych po odpowiedzi przyszla nowsza - wzieta ta nowsza (diagnostyka).
+        #: Reads where a newer reply followed the first one; the newer one was taken (diagnostics).
         self.late_replies = 0
 
     # ------------------------------------------------------------------ port
     def open(self, link: Any = None) -> None:
-        """Otwiera port. `link` podstawia gotowy obiekt (testy) zamiast pyserial."""
+        """Opens the port. `link` substitutes a ready object (tests) for pyserial."""
         if link is not None:
             self._link = link
             return
         try:
             import serial
-        except ImportError as exc:  # pragma: no cover - zalezne od srodowiska
+        except ImportError as exc:  # pragma: no cover - depends on the environment
             raise RuntimeError(
                 "Backend `feetech` wymaga biblioteki pyserial. "
                 'Zainstaluj:  pip install "soarm[feetech]"'
             ) from exc
         if "://" in self.port:
-            # `socket://adres:5555` - most `soarm-bridge` na maszynie przy ramieniu.
-            # Maszyna zdalna nie potrzebuje wtedy sterownika wirtualnego
-            # portu COM. Limit odpowiedzi rosnie o czas przebiegu przez siec.
+            # `socket://host:5555`: the `soarm-bridge` on the machine next to the arm.
+            # The remote machine then needs no virtual COM port driver. The reply
+            # timeout goes up to at least 0.25 s to cover the network round trip.
             self.timeout = max(self.timeout, 0.25)
             self._link = serial.serial_for_url(self.port, baudrate=self.baudrate, timeout=self.timeout,
                                                write_timeout=1.0)
@@ -159,21 +158,21 @@ class FeetechBus:
         self._link.reset_output_buffer()
 
     def _disable_nagle(self) -> None:
-        """Wylacza algorytm Nagle'a na gniezdzie `socket://` (pyserial go nie rusza).
+        """Turns Nagle's algorithm off on the `socket://` socket (pyserial leaves it on).
 
-        SYNC WRITE nie ma odpowiedzi, wiec most nie ma czym potwierdzic go od razu
-        i czeka ze swoim ACK do konca opoznienia (200 ms na Windowsie, 40 ms na
-        Linuksie). Z wlaczonym Nagle'em kazdy nastepny rozkaz i odczyt czeka na
-        ten ACK - cele dochodza do serw paczkami ~5 razy na sekunde, a odczyty
-        zjadaja caly limit 0,25 s. Most ustawia TCP_NODELAY tylko po swojej
-        stronie, a to dotyczy odpowiedzi, nie rozkazow.
+        SYNC WRITE has no reply, so the bridge has nothing to acknowledge it with right
+        away and holds its ACK until the delayed-ACK timer runs out (200 ms on Windows,
+        40 ms on Linux). With Nagle on, every following command and read waits for that
+        ACK: goals reach the servos in batches ~5 times a second, and reads use up the
+        whole 0.25 s timeout. The bridge sets TCP_NODELAY only on its own side, which
+        covers the replies, not the commands.
         """
         sock = getattr(self._link, "_socket", None)
         if sock is None:
             return
         try:
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        except OSError:  # pragma: no cover - zalezne od systemu
+        except OSError:  # pragma: no cover - depends on the OS
             logger.warning("Nie udalo sie wylaczyc Nagle'a na %s - rozkazy moga isc paczkami.", self.port)
 
     def close(self) -> None:
@@ -185,7 +184,7 @@ class FeetechBus:
     def is_open(self) -> bool:
         return self._link is not None
 
-    # -------------------------------------------------------------- transakcje
+    # -------------------------------------------------------------- transactions
     def _send(self, dev_id: int, instruction: int, params: bytes = b"") -> None:
         body = bytes([dev_id, len(params) + 2, instruction]) + params
         self._link.reset_input_buffer()
@@ -193,13 +192,13 @@ class FeetechBus:
         self._link.flush()
 
     def _receive_frame(self) -> tuple[int, bytes] | None:
-        """Czyta jedna ramke odpowiedzi: (id serwa, dane bez bajtu bledu i sumy).
+        """Reads one reply frame: (servo id, data without the error byte and checksum).
 
-        Ramka z zla suma kontrolna jest traktowana jak zgubiona. Na magistrali
-        TTL miedzy adapterem a serwami to jedyna ochrona danych (TCP mostu
-        chroni tylko odcinek sieciowy) - bez niej przeklamany bit w starszym
-        bajcie pozycji dawal -180 stopni zamiast 0, a twin robil z tego
-        pierwszy rozkaz i ramie skakalo o 105 stopni z pelna predkoscia.
+        A frame with a bad checksum is dropped. On the TTL bus between the adapter and
+        the servos the checksum is the only data protection (the bridge's TCP covers only
+        the network leg). Without it, one flipped bit in the high byte of a position turns
+        0 degrees into -180, the twin makes that its first command, and the arm jumps
+        105 degrees at full speed.
         """
         self._last_rx = "lost"
         head = self._link.read(4)
@@ -207,7 +206,7 @@ class FeetechBus:
             return None
         dev_id, length = head[2], head[3]
         if length < 2:
-            return None                     # nie ma nawet bajtu bledu i sumy - to nie jest odpowiedz
+            return None                     # not even an error byte and a checksum: not a reply
         rest = self._link.read(length)
         if len(rest) < length:
             return None
@@ -224,44 +223,44 @@ class FeetechBus:
         return dev_id, bytes(rest[1:-1])
 
     def _receive(self, dev_id: int) -> bytes | None:
-        """Odbiera odpowiedz serwa `dev_id` i zwraca same dane (bez naglowka, dlugosci i sumy)."""
+        """Receives the reply of servo `dev_id`: its data only (no header, length, error byte, checksum)."""
         frame = self._receive_frame()
         if frame is None:
             return None
         if frame[0] != dev_id:
-            self._last_rx = "lost"          # cudza ramka - nie ta transakcja
+            self._last_rx = "lost"          # another servo's frame: not this transaction
             return None
         return frame[1]
 
-    # ------------------------------------------------- spoznione odpowiedzi
+    # ------------------------------------------------------------- late replies
     def _pending(self) -> bool:
-        """Czy w laczu czekaja bajty (`socket://` pyserial mowi tylko 0/1, a nie ile)."""
+        """Whether bytes are waiting on the link (pyserial's `socket://` says only 0/1, not how many)."""
         try:
             return bool(getattr(self._link, "in_waiting", 0))
-        except Exception:  # pragma: no cover - zamkniete lacze
+        except Exception:  # pragma: no cover - link closed
             return False
 
     def _quiet(self) -> float:
-        """Okno ciszy: ~2x najdluzszy ostatni przebieg, nie krocej niz QUIET_MIN_S, nie dluzej niz timeout."""
+        """Quiet window: ~2x the longest recent round trip, at least QUIET_MIN_S, at most the timeout."""
         return min(max(2.0 * self._rtt + 0.005, QUIET_MIN_S), max(self.timeout, QUIET_MIN_S))
 
     def _note_rtt(self, t0: float) -> None:
         self._rtt = max(time.monotonic() - t0, self._rtt * 0.9)
 
     def _settle(self, ids: list[int], length: int) -> dict[int, int]:
-        """Czyta, co jeszcze przyjdzie, az lacze ucichnie na `_quiet()`, potem czysci bufor.
+        """Reads whatever still arrives until the link is quiet for `_quiet()`, then clears the buffer.
 
-        Zwraca {id: wartosc} z NAJNOWSZYCH pelnych ramek serw `ids` (pusto = nic nowego).
-        Protokol nie numeruje transakcji, a `_send` czysci tylko to, co JUZ przyszlo.
-        Zmierzone przez most: odpowiedz sprzed przestoju sieci (albo spozniona o 0,3 s
-        retransmisja TCP) przychodzila w trakcie NASTEPNEGO odczytu i byla brana za jego
-        odpowiedz - blizniak robil z pozy sprzed 0,3 s rozkaz i serwo cofalo sie o 6-7 st.
-        (takze po STOP-ie). Wlasciwa odpowiedz przychodzi zaraz za spozniona, w kolejnosci
-        TCP, wiec wygrywa ostatnia ramka kazdego serwa, ktora zdazy przed cisza.
+        Returns {id: value} from the NEWEST whole frames of servos `ids` (empty = nothing new).
+        The protocol does not number transactions, and `_send` clears only what has ALREADY arrived.
+        Measured over the bridge: a reply from before a network stall (or a TCP retransmission 0.3 s
+        late) arrives during the NEXT read and, without this, is taken as its reply: the twin turns
+        the 0.3 s old pose into a command and the servo moves back 6-7 degrees (also after STOP).
+        The right reply follows right behind the late one, in TCP order, so the last frame of each
+        servo that arrives before the quiet wins.
         """
         quiet = self._quiet()
         last = time.monotonic()
-        hard = last + self.timeout + quiet          # ciagly szum nie trzyma petli bez konca
+        hard = last + self.timeout + quiet          # continuous noise cannot hold the loop forever
         newer: dict[int, int] = {}
         while True:
             now = time.monotonic()
@@ -273,7 +272,7 @@ class FeetechBus:
             frame = self._receive_frame()
             if frame is None:
                 if self._last_rx == "lost":
-                    break                           # ucieta ramka - strumien przesuniety, bufor do kosza
+                    break                           # truncated frame: stream misaligned, drop the buffer
                 continue
             dev_id, data = frame
             if dev_id in ids and len(data) >= length:
@@ -283,12 +282,12 @@ class FeetechBus:
         return newer
 
     def _finish(self, out: dict[int, int], ids: list[int], length: int, t0: float) -> dict[int, int]:
-        """Konczy odczyt: po zgubionej odpowiedzi oproznia lacze, a pierwszy odczyt po niej sprawdza.
+        """Finishes a read: after a lost reply it drains the link, and it checks the first read after one.
 
-        Odczyt, ktory dostal odpowiedz, gdy strumien byl podejrzany, czeka jeszcze na cisze:
-        jesli za odpowiedzia przyszla nowsza, tamta byla spozniona i liczy sie tylko nowsza.
-        Po zgubionej odpowiedzi lacze jest oprozniane (czytane i wyrzucane do ciszy), zeby
-        spozniona ramka nie trafila do nastepnego rozkazu.
+        A read that got a reply while the stream was suspect also waits for quiet: if a newer reply
+        followed, the first one was late and only the newer one counts. After a lost reply the link
+        is drained (read and discarded until quiet), so that a late frame does not land in the next
+        transaction.
         """
         lost = self._last_rx == "lost"
         if out and self._suspect:
@@ -296,7 +295,7 @@ class FeetechBus:
             if newer:
                 self.late_replies += 1
                 logger.debug("Spozniona odpowiedz serw %s - biore nowsza", sorted(out))
-                out = newer                         # czego nie ma w nowszej, jest nieswieze
+                out = newer                         # what the newer reply lacks is stale
             self._suspect = bool(newer) or lost
         elif lost:
             self._settle([], length)
@@ -327,36 +326,36 @@ class FeetechBus:
             self._suspect = True
 
     def sync_read(self, addr: int, length: int, ids: list[int]) -> dict[int, int]:
-        """Jeden pakiet, odpowiedz kazdego serwa po kolei - {id: wartosc} dla tych, ktore odpowiedzialy.
+        """One packet, each servo replies in turn: {id: value} for those that replied.
 
-        Przez most sieciowy to jeden przebieg tam i z powrotem zamiast szesciu:
-        przy 20 ms RTT odczyt ramienia kosztuje 20 ms, a nie 120.
+        Over the network bridge this is one round trip instead of six: at 20 ms RTT
+        a read of the arm costs 20 ms, not 120.
         """
         params = bytes([addr, length, *ids])
         t0 = time.monotonic()
         self._send(BROADCAST_ID, INST_SYNC_READ, params)
         out: dict[int, int] = {}
-        # Serwa odpowiadaja po kolei, ale to, ktore milczy, nie moze zabrac ze
-        # soba reszty: ramki dopasowujemy po ID, nie po pozycji w strumieniu.
-        # Inaczej jedno gluche serwo nr 1 wygladalo jak zerwane lacze.
+        # Servos reply in turn, but a silent one must not take the rest with it:
+        # frames are matched by ID, not by their position in the stream.
+        # Otherwise one deaf servo 1 would look like a dead link.
         for _ in ids:
             frame = self._receive_frame()
             if frame is None:
                 if self._last_rx == "lost":
-                    break                   # cisza albo ucieta ramka - dalej nic juz nie przyjdzie rowno
-                continue                    # cala ramka przeczytana, strumien rowny - nastepne sa dobre
+                    break                   # silence or a truncated frame: nothing after it lines up
+                continue                    # whole frame read, stream aligned: the next ones are good
             dev_id, data = frame
             if dev_id in ids and dev_id not in out and len(data) >= length:
                 out[dev_id] = int.from_bytes(data[:length], "little")
             if dev_id == ids[-1]:
-                break                       # ostatnie serwo odpowiedzialo - nie czekamy na brakujace
+                break                       # the last servo replied: do not wait for the missing ones
         return self._finish(out, list(ids), length, t0)
 
     def sync_write(self, addr: int, length: int, values: dict[int, int]) -> None:
-        """Jeden pakiet dla wszystkich serw naraz - bez odpowiedzi, wiec bez czekania.
+        """One packet for all servos at once, with no reply, so no waiting.
 
-        To jest powod, dla ktorego petla sterowania nie placi za liczbe stawow:
-        szesc celow kosztuje tyle, co jeden.
+        This is why the control loop does not pay per joint:
+        six goals cost as much as one.
         """
         if not values:
             return
@@ -395,7 +394,7 @@ def create(ctx: BackendContext) -> FeetechArm:
 
 
 class FeetechArm(RobotBackend):
-    """Ramie SO-101 sterowane wprost przez port szeregowy."""
+    """SO-101 arm driven directly over the serial port."""
 
     def __init__(self, ctx: BackendContext, bus: FeetechBus | None = None):
         self.settings: FeetechSettings = from_mapping(FeetechSettings, ctx.settings, "feetech")
@@ -413,20 +412,20 @@ class FeetechArm(RobotBackend):
         self.ids = {name: index for index, name in enumerate(self.joints, start=1)}
         self._connected = False
         self._positions: dict[str, float] = {}
-        #: Limity odczytane z serw [tiki]. Pusty wpis = serwo nie ogranicza.
+        #: Limits read from the servos [ticks]. No entry = the servo does not limit.
         self.servo_limits: dict[str, tuple[int, int]] = {}
         self._sync_read_ok = True
-        #: SYNC READ odpowiedzial choc raz w tej sesji - wtedy cisza na niego to
-        #: lacze, a nie stary firmware, i nie wolno go wylaczyc na stale.
+        #: SYNC READ has answered at least once this session: silence on it is then the
+        #: link, not old firmware, and it must not be switched off for good.
         self._sync_ever_ok = False
-        #: KOLEJNE cykle, w ktorych serwa odpowiedzialy na pojedyncze odczyty,
-        #: a na SYNC READ nie (liczone tylko, zanim SYNC READ raz zadzialal).
+        #: Cycles in which the servos answered single reads but not SYNC READ
+        #: (counted only until SYNC READ first works).
         self._sync_misses = 0
-        #: Kolejne cykle odczytu, w ktorych choc jeden staw nie dostal swiezej pozycji.
+        #: Consecutive read cycles in which at least one joint got no fresh position.
         self._failed_cycles = 0
         self._last_full_read = 0.0
         self._stale: list[str] = []
-        #: Ostatni cykl odczytu bez ANI JEDNEJ odpowiedzi - lacze stoi.
+        #: The last read cycle got NOT ONE reply: the link is down.
         self._link_silent = False
         self.info = RobotInfo(
             name="SO-101 (feetech)",
@@ -434,11 +433,11 @@ class FeetechArm(RobotBackend):
             simulated=False,
         )
 
-    # ------------------------------------------------------------- przeliczenia
+    # ------------------------------------------------------------- conversions
     def _to_ticks(self, name: str, value: float) -> int:
         rc = self.settings
         if name == self.gripper:
-            # Chwytak jedzie w 0..100 (0 = zwarty), a nie w stopniach.
+            # The gripper moves in 0..100 (0 = closed), not in degrees.
             span = rc.gripper_open_ticks - rc.gripper_closed_ticks
             ticks = rc.gripper_closed_ticks + span * (value / 100.0)
         else:
@@ -449,18 +448,18 @@ class FeetechArm(RobotBackend):
         rc = self.settings
         if name == self.gripper:
             span = rc.gripper_open_ticks - rc.gripper_closed_ticks
-            if abs(span) < 1e-6:  # pragma: no cover - konfiguracja bez zakresu
+            if abs(span) < 1e-6:  # pragma: no cover - a config with no range
                 return 0.0
             return (ticks - rc.gripper_closed_ticks) * 100.0 / span
         return (ticks - rc.center_ticks) * 360.0 / TICKS_PER_REV
 
-    # ---------------------------------------------------------------- polaczenie
+    # ---------------------------------------------------------------- connection
     def connect(self) -> None:
-        # Magistrala moze byc juz otwarta - tak wchodzi podstawiona w testach
-        # albo wspoldzielona z diagnostyka. Powtorne otwarcie zerwaloby ja.
+        # The bus may already be open: the tests hand it in opened on a fake link.
+        # Opening it again would break it.
         if not self.bus.is_open:
             self.bus.open()
-        # Nowa sesja - bledy i liczniki poprzedniej nie maja tu nic do powiedzenia.
+        # A new session: the previous session's errors and counters do not apply.
         self.bus.errors.clear()
         self._sync_read_ok, self._sync_ever_ok, self._sync_misses = True, False, 0
 
@@ -476,9 +475,9 @@ class FeetechArm(RobotBackend):
         self._read_servo_limits()
         ticks = self._read_start_positions()
 
-        # KOLEJNOSC MA ZNACZENIE. Rejestr celu pamieta wartosc z poprzedniej
-        # sesji, wiec samo zalaczenie momentu szarpneloby ramie do tamtej pozy.
-        # Najpierw wpisujemy cel = tam, gdzie ramie faktycznie stoi.
+        # ORDER MATTERS. The goal register keeps its value from the previous
+        # session, so enabling torque alone would jerk the arm to that pose.
+        # First set the goal to where the arm actually stands.
         self.bus.sync_write(
             ADDR_GOAL_POSITION, 2, {self.ids[name]: int(value) for name, value in ticks.items()}
         )
@@ -496,12 +495,12 @@ class FeetechArm(RobotBackend):
         )
 
     def _read_start_positions(self) -> dict[str, int]:
-        """Pozycja startowa z DWOCH zgodnych odczytow kazdego stawu.
+        """Start position from TWO matching reads of each joint.
 
-        Ta pozycja staje sie celem serw tuz przed zalaczeniem momentu, wiec
-        jeden przeklamany odczyt (8-bitowa suma kontrolna nie lapie kazdego
-        zaklocenia) oznaczalby skok ramienia z pelna predkoscia. Dwa niezalezne
-        odczyty, ktore sie zgadzaja, praktycznie to wykluczaja.
+        This position becomes the servo goal just before torque is enabled, so
+        one garbled read (an 8-bit checksum does not catch every disturbance)
+        would mean the arm jumping at full speed. Two independent reads that
+        agree practically rule that out.
         """
         problem = "Nie udalo sie odczytac pozycji wszystkich stawow."
         for _ in range(3):
@@ -519,11 +518,11 @@ class FeetechArm(RobotBackend):
         raise RuntimeError(problem)
 
     def _read_servo_limits(self) -> None:
-        """Odczytuje wlasne limity serw i mowi glosno, gdy sa ciasniejsze niz konfiguracja.
+        """Reads the servos' own limits and warns loudly when they are tighter than the config.
 
-        Bez tego aplikacja zadaje pozy, ktorych serwo nie wykona: przycina je
-        po cichu do swojego zakresu i wraca w zupelnie inne miejsce. Widac to
-        wtedy jako "staw nie slucha rozkazu", chociaz rozkaz doszedl poprawnie.
+        Without this the application commands poses the servo will not reach: it
+        silently clamps them to its range and ends up somewhere else entirely. That
+        shows up as "the joint ignores the command", although the command arrived intact.
         """
         self.servo_limits = {}
         conflicts: list[str] = []
@@ -533,7 +532,7 @@ class FeetechArm(RobotBackend):
             if low is None or high is None or low >= high:
                 continue
             if low <= TICK_MIN and high >= TICK_MAX:
-                continue  # pelny zakres = serwo niczego nie ogranicza
+                continue  # full range = the servo limits nothing
             self.servo_limits[name] = (low, high)
 
             lo, hi = self.limits[name]
@@ -553,7 +552,7 @@ class FeetechArm(RobotBackend):
             )
 
     def _check_power(self) -> None:
-        """Ostrzega, gdy ramie odpowiada, ale nie ma z czego ruszyc."""
+        """Warns when the arm answers but has nothing to move with."""
         raw = self.bus.read(self.ids[self.joints[0]], ADDR_PRESENT_VOLTAGE, 1)
         if raw is None:
             return
@@ -571,13 +570,13 @@ class FeetechArm(RobotBackend):
         if not self._connected:
             self.bus.close()
             return
-        # Momentu NIE wylaczamy: ramie zostaloby wtedy wiotkie i opadlo pod
-        # wlasnym ciezarem. Zostaje tam, gdzie stanelo.
+        # Torque stays on unless `torque_off_on_exit` is set: a limp arm would drop
+        # under its own weight. By default the arm stays where it stopped.
         if self.settings.torque_off_on_exit:
             for dev_id in self.ids.values():
                 try:
                     self.bus.write(dev_id, ADDR_TORQUE_ENABLE, 0, 1)
-                except Exception:  # pragma: no cover - rozlaczenie nie moze wysypac aplikacji
+                except Exception:  # pragma: no cover - disconnecting must not crash the application
                     logger.exception("Nie udalo sie wylaczyc momentu serwa %d", dev_id)
         self._connected = False
         self.bus.close()
@@ -586,13 +585,13 @@ class FeetechArm(RobotBackend):
     def is_connected(self) -> bool:
         return self._connected
 
-    # ------------------------------------------------------------------ wymiana
+    # ------------------------------------------------------------------ I/O
     def read_joints(self) -> dict[str, float]:
-        """Pozycje stawow; staw bez swiezej odpowiedzi zostaje przy poprzedniej wartosci.
+        """Joint positions; a joint without a fresh reply keeps its previous value.
 
-        Nie rzuca z powodu zgubionych ramek - jedna zgubiona ramka nie ma prawa
-        udawac skoku stawu ani zatrzymywac petli. Za to liczy KOLEJNE nieudane
-        cykle, a `faults()` mowi glosno, gdy lacze padlo.
+        Does not raise on lost frames: one lost frame must not fake a joint jump
+        or stop the loop. It counts CONSECUTIVE failed cycles instead, and
+        `faults()` reports loudly when the link is down.
         """
         if not self._connected:
             raise RuntimeError("Ramie nie jest polaczone")
@@ -603,13 +602,13 @@ class FeetechArm(RobotBackend):
             fresh = {name: got[dev_id] for name, dev_id in self.ids.items() if dev_id in got}
             sync_silent = not fresh
             if fresh:
-                # Choc jedna odpowiedz = firmware zna SYNC READ; brak reszty to juz lacze albo serwo.
+                # One reply means the firmware knows SYNC READ; a missing rest is the link or a servo.
                 self._sync_ever_ok, self._sync_misses = True, 0
 
         missing = [name for name in self.ids if name not in fresh]
-        # Cisza na SYNC READ, ktory juz w tej sesji dzialal, to stojace lacze, nie
-        # firmware: szesc kolejnych odczytow po 0,25 s przez most trzymaloby
-        # petle 1,75 s na cykl i nic by nie dalo. Wtedy nie probujemy po kolei.
+        # Silence on a SYNC READ that has already worked this session is a stalled
+        # link, not the firmware: single reads, with a 0.25 s timeout each over the
+        # bridge, would add 0.5 s or more to the cycle and get nothing. Skip them then.
         if missing and not (sync_silent and self._sync_ever_ok):
             failures = 0
             for name in missing:
@@ -617,16 +616,16 @@ class FeetechArm(RobotBackend):
                 if ticks is None:
                     failures += 1
                     if failures >= 2:
-                        break                   # drugie milczenie w cyklu - nie placimy dalej timeoutami
+                        break                   # second silence in the cycle: stop paying for timeouts
                     continue
                 fresh[name] = ticks
             if sync_silent and not self._sync_ever_ok and fresh:
-                # Serwa odpowiadaja po kolei, a na SYNC READ milcza. Liczone KOLEJNE
-                # cykle - wczesniej trzy przypadkowe czkawki sieci w calej sesji
-                # wylaczaly SYNC READ na zawsze i petla przez most spadala do ~7 Hz.
+                # The servos answer single reads but not SYNC READ. This counts only until
+                # SYNC READ first works (`_sync_ever_ok`), so network hiccups later in the
+                # session cannot switch it off for good and drop the loop over the bridge to ~7 Hz.
                 self._sync_misses += 1
                 if self._sync_misses >= 3:
-                    # Starsze wersje firmware'u nie znaja SYNC READ - wtedy zostajemy przy odczytach po kolei.
+                    # Older firmware versions do not know SYNC READ: stay with single reads.
                     self._sync_read_ok = False
                     logger.info("Serwa nie odpowiadaja na SYNC READ - odczyt po kolei.")
 
@@ -645,7 +644,7 @@ class FeetechArm(RobotBackend):
         return dict(self._positions)
 
     def faults(self) -> list[str]:
-        """Bity bledu z ostatnich odpowiedzi serw i utrata lacza - zdania dla operatora."""
+        """Error bits from the servos' latest replies and link loss, as sentences for the operator."""
         try:
             out: list[str] = []
             for name, dev_id in self.ids.items():
@@ -657,7 +656,7 @@ class FeetechArm(RobotBackend):
                 which = "" if len(self._stale) == len(self.ids) else f" ({', '.join(self._stale)})"
                 out.append(f"brak odpowiedzi serw od {ms:.0f} ms{which}")
             return out
-        except Exception as exc:  # pragma: no cover - wolane co cykl petli, nie moze jej wysypac
+        except Exception as exc:  # pragma: no cover - called every loop cycle, must not crash it
             logger.exception("Nie udalo sie sprawdzic stanu serw")
             return [f"nie udalo sie sprawdzic stanu serw: {exc}"]
 
@@ -674,7 +673,7 @@ class FeetechArm(RobotBackend):
                 self.limits[name] = (float(lo), float(hi))
 
     def joint_limits(self) -> dict[str, tuple[float, float]]:
-        """Limity kata z EEPROM serw w jednostkach aplikacji (tylko stawy, ktore je maja)."""
+        """The servos' EEPROM angle limits in app units (only the joints that have them)."""
         out: dict[str, tuple[float, float]] = {}
         for name, (low, high) in self.servo_limits.items():
             a, b = self._to_units(name, low), self._to_units(name, high)
@@ -685,12 +684,12 @@ class FeetechArm(RobotBackend):
         if not self._connected:
             raise RuntimeError("Ramie nie jest polaczone")
         if self._link_silent:
-            # Ostatni odczyt nie dostal ANI JEDNEJ odpowiedzi - lacze stoi. Przez
-            # most `socket://` zapis i tak by sie "udal" (laduje w buforze TCP),
-            # a po powrocie sieci cala kolejka celow dochodzi do serw naraz i
-            # ramie skacze do ostatniego z nich z pelna predkoscia - takze po
-            # STOP-ie wcisnietym w trakcie przestoju. Nic nie wysylamy, dopoki
-            # odczyt nie potwierdzi, ze serwa znow slysza.
+            # The last read got NOT ONE reply: the link is down. Over the `socket://`
+            # bridge a write would "succeed" anyway (it lands in the TCP buffer), and
+            # when the network comes back the whole queue of goals reaches the servos at
+            # once and the arm jumps to the last one at full speed, even after a STOP
+            # pressed during the outage. Nothing is sent until a read confirms that the
+            # servos hear again.
             return {}
         sent: dict[str, float] = {}
         ticks: dict[int, int] = {}
@@ -701,10 +700,10 @@ class FeetechArm(RobotBackend):
             value = min(max(float(targets[name]), lo), hi)
             tick = self._to_ticks(name, value)
 
-            # Serwo i tak przytnie rozkaz do swojego zakresu. Robiac to tutaj,
-            # zwracamy wyzej wartosc, ktora NAPRAWDE pojechala - inaczej reszta
-            # aplikacji (limity predkosci, HUD, podglad 3D) liczylaby na pozycji,
-            # ktorej ramie nigdy nie osiagnelo.
+            # The servo clamps the command to its range anyway. Doing it here lets
+            # the caller see the value that ACTUALLY went out; otherwise the rest of
+            # the application (speed limits, HUD, 3D view) would work from a position
+            # the arm never reached.
             limits = self.servo_limits.get(name)
             if limits is not None:
                 tick = min(max(tick, limits[0]), limits[1])

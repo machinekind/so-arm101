@@ -1,4 +1,4 @@
-"""Most COM <-> TCP: lista dostepu odcina obce adresy od magistrali serw."""
+"""COM <-> TCP bridge: the access list cuts foreign addresses off from the servo bus."""
 
 from __future__ import annotations
 
@@ -12,10 +12,10 @@ TIMEOUT = 5.0
 
 
 class LoopbackLink:
-    """Udaje port szeregowy: oddaje przy odczycie to, co dostal przy zapisie.
+    """Stands in for a serial port: a read returns what a write put in.
 
-    Wystarczy do sprawdzenia, ze most przepuszcza bajty w obie strony - a przy
-    okazji odwzorowuje ksztalt wymiany z serwem (pytanie -> odpowiedz).
+    Enough to check that the bridge passes bytes both ways, and it also mirrors
+    the shape of an exchange with a servo (request -> reply).
     """
 
     def __init__(self) -> None:
@@ -30,8 +30,8 @@ class LoopbackLink:
 
     def read(self, size: int = 1) -> bytes:
         with self._cv:
-            # Skonczone czekanie, jak w prawdziwym porcie z `timeout=` - inaczej
-            # watek mostu nie mialby jak zauwazyc, ze ma sie zatrzymac.
+            # A bounded wait, as in a real port with `timeout=`; otherwise the
+            # bridge thread would have no way to notice that it has to stop.
             self._cv.wait_for(lambda: self._buf or self.closed, timeout=0.05)
             out = bytes(self._buf.popleft() for _ in range(min(size, len(self._buf))))
         return out
@@ -49,7 +49,7 @@ class LoopbackLink:
 
 
 class RunningBridge:
-    """Most wystartowany na wolnym porcie, gotowy do polaczenia w tescie."""
+    """A bridge started on a free port, ready for a test to connect to."""
 
     def __init__(self, **kwargs: object) -> None:
         self.links: list[LoopbackLink] = []
@@ -89,12 +89,12 @@ class RunningBridge:
 
 
 def read_until_closed(conn: socket.socket) -> bytes:
-    """Odczyt konczacy sie zamknieciem polaczenia, niezaleznie od systemu.
+    """A read that ends with the connection closed, whatever the OS.
 
-    Zamkniecie gniazda z nieodczytanymi danymi w buforze Windows kwituje
-    RST-em, a nie czystym FIN - i to raz jako 10054 (reset), raz jako 10053
-    (abort), zaleznie od tego, co zdazylo sie wyslac. Dla testu to ten sam
-    wynik: rozmowy nie ma.
+    Windows answers closing a socket with unread data in its buffer with an
+    RST, not a clean FIN, sometimes as 10054 (reset), sometimes as 10053
+    (abort), depending on what got sent. For the test it is the same result:
+    there is no conversation.
     """
     try:
         return conn.recv(16)
@@ -103,7 +103,7 @@ def read_until_closed(conn: socket.socket) -> bytes:
 
 
 def test_bridge_rejects_addresses_outside_allow():
-    """Most rusza fizycznym ramieniem, wiec lista dostepu ma faktycznie odcinac."""
+    """The bridge moves a physical arm, so the access list must really cut off."""
     with RunningBridge(allow=("10.11.12.13",)) as bridge:
         with bridge.connect() as conn:
             conn.sendall(b"x")

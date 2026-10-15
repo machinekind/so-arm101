@@ -1,9 +1,10 @@
-"""Backend `feetech`: protokol STS3215, przeliczenia jednostek i kolejnosc startu.
+"""The `feetech` backend: the STS3215 protocol, unit conversions and the start-up order.
 
-Testy chodza po *symulowanej magistrali* (`fake_bus.FakeBusLink`) - odpowiada na pakiety tak, jak
-prawdziwe serwo, i zapisuje kolejnosc operacji. Dzieki temu da sie sprawdzic
-rzeczy, ktorych na sprzecie sprawdzic nie sposob bez ryzyka: na przyklad ze
-moment zalacza sie DOPIERO po nadpisaniu rejestru celu.
+The tests run on a *simulated bus* (`fake_bus.FakeBusLink`): it answers packets as a real
+servo does and records the order of operations. That makes it possible to check things
+that cannot be checked on hardware without risk, for example that torque is enabled ONLY
+after the goal register has been overwritten. The late-reply test runs through the real
+`serial_bridge` to a port whose replies can come late (`DelayedServoPort`).
 """
 
 from __future__ import annotations
@@ -44,8 +45,8 @@ def connected(ctx, link: FakeBusLink | None = None) -> tuple[FeetechArm, FakeBus
 
 
 def test_connect_writes_the_goal_before_enabling_torque(arm_ctx):
-    """Rejestr celu pamieta poprzednia sesje - moment zalaczony przed jego
-    nadpisaniem szarpnalby ramieniem do tamtej pozy."""
+    """The goal register remembers the previous session: torque enabled before it
+    is overwritten would jerk the arm to that pose."""
     _, link = connected(arm_ctx)
     first_torque = next(
         i for i, entry in enumerate(link.log)
@@ -60,7 +61,7 @@ def test_connect_writes_the_goal_before_enabling_torque(arm_ctx):
 
 
 def test_connect_refuses_when_a_servo_is_silent(arm_ctx):
-    link = FakeBusLink(ids=(1, 2, 3, 4, 5))  # brakuje chwytaka
+    link = FakeBusLink(ids=(1, 2, 3, 4, 5))  # no gripper
     bus = FeetechBus("COM_TEST")
     bus.open(link=link)
     with pytest.raises(RuntimeError, match="gripper"):
@@ -87,7 +88,7 @@ def test_send_joints_clamps_to_the_configured_limits(arm_ctx):
 
 
 def test_targets_never_leave_the_servo_tick_range(arm_ctx):
-    """Nawet absurdalny cel nie moze przepelnic dwubajtowego rejestru."""
+    """Even an absurd target must not overflow the two-byte register."""
     arm, link = connected(arm_ctx)
     arm.send_joints({name: 1e6 for name in arm_ctx.joints})
     for registers in link.registers.values():
@@ -95,7 +96,7 @@ def test_targets_never_leave_the_servo_tick_range(arm_ctx):
 
 
 def test_a_reply_with_a_bad_checksum_is_rejected(arm_ctx):
-    """Jeden przeklamany bit na linii TTL dawal -180 stopni zamiast 0 - i to szlo jako rozkaz."""
+    """One flipped bit on the TTL line turns 0 degrees into -180, and that would go out as a command."""
     arm, link = connected(arm_ctx)
     before = arm.read_joints()
     link.corrupt_next = {1}
@@ -105,14 +106,14 @@ def test_a_reply_with_a_bad_checksum_is_rejected(arm_ctx):
 
 
 def test_connect_takes_the_start_position_only_from_two_matching_reads(arm_ctx):
-    """Pozycja startowa staje sie celem przed zalaczeniem momentu - jeden zly odczyt to skok ramienia."""
+    """The start position becomes the goal before torque is enabled: one bad read means the arm jumps."""
     link = FakeBusLink()
     real_write = link.write
     glitches = {"left": 1}
 
     def glitchy(data: bytes) -> int:
         n = real_write(data)
-        # Pierwszy odczyt pozycji barku wraca z inna wartoscia (z poprawna suma) - raz.
+        # The first position read of servo 1 (shoulder_pan) returns another value (valid checksum), once.
         if data[4] == INST_READ and data[2] == 1 and data[5] == ADDR_PRESENT_POSITION and glitches["left"]:
             glitches["left"] -= 1
             link._out.clear()
@@ -125,7 +126,7 @@ def test_connect_takes_the_start_position_only_from_two_matching_reads(arm_ctx):
 
 
 def test_servo_protection_bits_are_reported_as_faults(arm_ctx):
-    """Serwo w ochronie zwalnia moment, ale dalej odpowiada - bez tego wygladalo na zdrowe."""
+    """A servo in protection releases torque but keeps answering; without the error bits it looks healthy."""
     arm, link = connected(arm_ctx)
     arm.read_joints()
     assert arm.faults() == []
@@ -145,7 +146,7 @@ def test_a_dead_link_is_reported_after_consecutive_failed_reads(arm_ctx):
     link.silent = True
     for _ in range(4):
         arm.read_joints()
-    assert arm.faults() == []                       # kilka zgubionych ramek to jeszcze nie awaria
+    assert arm.faults() == []                       # a few lost frames are not a failure yet
     arm.read_joints()
     assert any("brak odpowiedzi serw od" in fault for fault in arm.faults())
     link.silent = False
@@ -154,8 +155,8 @@ def test_a_dead_link_is_reported_after_consecutive_failed_reads(arm_ctx):
 
 
 def test_no_goals_are_queued_while_the_link_is_silent(arm_ctx):
-    """Zapis przez `socket://` "udaje sie" do bufora TCP, a po powrocie sieci cala
-    kolejka celow dochodzila naraz - ramie skakalo do rozkazu sprzed STOP-u."""
+    """A write over `socket://` "succeeds" into the TCP buffer, and when the network comes back
+    the whole queue of goals arrives at once: the arm jumps to a command from before the STOP."""
     arm, link = connected(arm_ctx)
     arm.read_joints()
     link.silent = True
@@ -170,16 +171,16 @@ def test_no_goals_are_queued_while_the_link_is_silent(arm_ctx):
 
 
 class DelayedServoPort:
-    """Szesc serw za mostem `serial_bridge`, z odpowiedziami, ktore moga przyjsc za pozno.
+    """Six servos behind the `serial_bridge`, with replies that can come too late.
 
-    Odpowiedzi ida w kolejnosci (jak TCP): spozniona wstrzymuje wszystkie za nia.
-    `delay_next` - dodatkowe opoznienie odpowiedzi na NASTEPNY SYNC READ (retransmisja TCP).
+    Replies go out in order (as over TCP): a late one holds back all behind it.
+    `delay_next`: extra delay of the reply to the NEXT SYNC READ (a TCP retransmission).
     """
 
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.pos = {dev_id: REST_TICKS for dev_id in range(1, 7)}
-        #: (kiedy gotowe, id, wartosc albo None = pozycja w chwili, gdy zapytanie dotrze).
+        #: (when ready, id, value or None = the position at the moment the request gets through).
         self.queue: list[tuple[float, int, int | None]] = []
         self.delay_next = 0.0
         self.hold_until = 0.0
@@ -225,7 +226,7 @@ class DelayedServoPort:
 
     @property
     def in_waiting(self) -> int:
-        return 0                                     # `_ready` oddaje cale ramki od razu
+        return 0                                     # `_ready` hands out whole frames at once
 
     def close(self) -> None:
         self.closed = True
@@ -233,7 +234,7 @@ class DelayedServoPort:
 
 @pytest.fixture
 def bridged():
-    """FeetechBus po `socket://` przez prawdziwy most do `DelayedServoPort`."""
+    """FeetechBus over `socket://` through the real bridge to a `DelayedServoPort`."""
     pytest.importorskip("serial")
     port, ready, stop = DelayedServoPort(), threading.Event(), threading.Event()
     bound: list[int] = []
@@ -264,18 +265,18 @@ def first_answer(bus: FeetechBus, tries: int = 8) -> dict[int, int]:
 
 
 def test_a_late_reply_is_never_taken_for_the_next_read(bridged):
-    """Odpowiedz spozniona o 0,4 s (limit 0,25 s) przychodzila w trakcie NASTEPNEGO odczytu
-    i byla brana za jego odpowiedz: blizniak dostawal poze sprzed 0,4 s jako swieza."""
+    """A reply 0.4 s late (timeout 0.25 s) arrives during the NEXT read and must not be taken
+    as its reply: the twin would get a 0.4 s old pose as fresh."""
     bus, port = bridged
     assert first_answer(bus)[1] == REST_TICKS
     port.delay_next = 0.4
-    assert bus.sync_read(ADDR_PRESENT_POSITION, 2, IDS) == {}          # limit minal - nic
-    port.pos[1] = REST_TICKS + 500                                      # serwo pojechalo dalej
+    assert bus.sync_read(ADDR_PRESENT_POSITION, 2, IDS) == {}          # timeout passed: nothing
+    port.pos[1] = REST_TICKS + 500                                      # the servo moved on
     assert first_answer(bus)[1] == REST_TICKS + 500
 
 
 def test_disconnect_leaves_the_arm_holding_by_default(arm_ctx):
-    """Wylaczony moment znaczy wiotkie ramie, ktore opada pod wlasnym ciezarem."""
+    """Torque off means a limp arm that drops under its own weight."""
     arm, link = connected(arm_ctx)
     arm.disconnect()
     assert all(regs[ADDR_TORQUE_ENABLE] == 1 for regs in link.registers.values())
