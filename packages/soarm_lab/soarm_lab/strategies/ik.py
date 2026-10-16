@@ -1,11 +1,8 @@
 """Inverse kinematics as a strategy for the twin: `ik` under the `lerobot_mp.strategies` entry points.
 
-The twin finds `IKStrategy` through the entry point in this package's `pyproject.toml`, builds
-`IKSettings` from its config file's `ik:` section or the panel's form, creates the strategy as
-`IKStrategy(settings)` and runs it through its `StrategyRunner`, as it runs `policy`. Nothing here
-imports the twin. `Strategy`, `RunInfo`, `Observation` and `Action` come from its plugin contracts,
-`lerobot_mp_api.strategy`. The strategy reads `obs.joints`, `obs.command` and `obs.goal`, and
-`run.folder` and `run.limits`. It answers with an `Action`.
+The twin finds `IKStrategy` through the entry point, builds `IKSettings` from its config file's `ik:`
+section or the panel's form, and runs the strategy through its `StrategyRunner`, as it runs `policy`.
+Nothing here imports the twin: the contract types come from `lerobot_mp_api.strategy`.
 
     # configs/local.yaml of the twin: prefills the panel's form
     ik:
@@ -14,30 +11,26 @@ imports the twin. `Strategy`, `RunInfo`, `Observation` and `Action` come from it
       goal_z: 0.12
       speed_mps: 0.10              # highest TCP speed along the path
 
-There is no policy and no training: `kinematics.RobotKinematics` alone drives the TCP to the goal.
-Every tick the strategy takes the TCP of its last target, moves that point straight toward the goal
-by at most `speed_mps / hz` (the carrot), and asks `RobotKinematics.ik_step` for joints that put the
-TCP on the carrot, starting from the last target. The TCP thus follows a straight line at no more
-than `speed_mps`, and consecutive targets stay near each other: no jump to the other elbow branch. A
-carrot the arm cannot reach (a goal dragged out of reach or past the limits) stays within one step of
-where the TCP was commanded, so the arm stops at the edge and follows again when the goal comes back.
+No policy, no training: `kinematics.RobotKinematics` alone drives the TCP to the goal. Every tick a
+point (the carrot) moves from the TCP of the last target straight toward the goal by at most
+`speed_mps / hz`, and `RobotKinematics.ik_step`, started from the last target, turns it into joints.
+The TCP follows a straight line and consecutive targets stay near each other. A carrot the arm cannot
+reach keeps the target at the edge of the reach, and the arm follows again when the goal comes back.
 
 Guards:
 
-* **reach check**: `start` refuses a goal the full multi-start `RobotKinematics.ik` cannot reach
-  within the limits that apply on the arm. A goal the panel drags during the run is not checked again
-  (the full IK takes tens of ms); the note says when the arm cannot follow it;
-* **stop on lag**: as in `policy`, when an arm joint falls behind its target by more than
-  `max_tracking_deg` (a blocked joint, a collision) the run ends, its last target the measured pose;
-* **end on reach**: with `end_on_reach` the run ends as a success once the last target puts the TCP
-  on the goal and the measured TCP is within `tol_m` of it. The twin's runner lets go of the arm at
-  its current command, so the arm stays at that last target. Without `end_on_reach` the run goes on
-  and follows the goal until the twin stops it;
-* **the gripper never moves**: its target stays where the run found it, the command of a gripper that
-  squeezes something (as `policy` keeps it), the measured angle otherwise.
+* **reach check**: `start` refuses a goal the full multi-start `RobotKinematics.ik` cannot reach within
+  the limits on the arm. A goal dragged during the run is not checked again (the full IK takes tens of
+  ms); the note says when the arm cannot follow it;
+* **stop on lag**: as in `policy`, the run ends on the measured pose when an arm joint falls behind its
+  target by more than `max_tracking_deg`;
+* **end on reach**: with `end_on_reach` the run ends as a success once the last target puts the TCP on
+  the goal and the measured TCP is within `tol_m` of it. Without it the run follows the goal until the
+  twin stops it;
+* **the gripper never moves**: it keeps its start angle, or the command it squeezes something with (as
+  `policy` keeps it).
 
-The goal is `obs.goal` (the panel's goal), read every tick; without one the settings' `goal_x`,
-`goal_y`, `goal_z` hold it.
+The goal is `obs.goal`, read every tick; without one the settings' `goal_x`, `goal_y`, `goal_z` hold it.
 """
 
 from __future__ import annotations
@@ -77,14 +70,14 @@ class IKSettings:
 class IKStatus:
     """What the strategy knows about its run, for logs and tests (the twin keeps its own runner status)."""
 
-    #: Ticks done (the tick that ends the run on lag does not count).
+    #: Ticks done; the tick that stops the run on lag does not count.
     step: int = 0
     #: The measured TCP's distance from the goal [m].
     distance: float = float("nan")
     #: The last target puts the TCP on the goal and the measured TCP is within `tol_m` of it.
     success: bool = False
     stopped_because: str = ""
-    #: The last target's TCP misses its carrot by more than the IK tolerance: the arm cannot follow the goal.
+    #: The last target misses its carrot: the arm cannot follow the goal.
     out_of_reach: bool = False
 
 
@@ -106,9 +99,8 @@ class IKStrategy(Strategy[IKSettings]):
         self.max_tracking = np.radians(self.config.max_tracking_deg)
         #: The longest carrot step [m]: `speed_mps` over one tick.
         self.step_m = self.config.speed_mps / self.hz
-        #: How close IK puts the TCP to the carrot [m]: `ik_step`'s 1 mm, finer for a short step or a tight
-        #: `tol_m`. `ik_step` leaves a seed nearer its point than half its tolerance as it is: with 1 mm, a
-        #: step under 0.5 mm would never move the arm.
+        #: How close IK puts the TCP to the carrot [m]: at most 1 mm, and a quarter of the step or of
+        #: `tol_m` when those are smaller, so a short step still moves the arm.
         self.ik_tol = min(1e-3, self.step_m / 4, self.config.tol_m / 4)
         self._default_goal = np.array([self.config.goal_x, self.config.goal_y, self.config.goal_z], float)
         self.goal = self._default_goal.copy()
@@ -226,9 +218,8 @@ class IKStrategy(Strategy[IKSettings]):
             return self._halt(f"ramie nie nadaza za celem ({np.degrees(lag):.0f} st.) - kolizja albo blokada",
                               target=self._hold_pose(measured))
 
-        # The arm drives to the last target now. When the run ends, the twin's runner lets go of the arm
-        # at its current command, before the arm drives to the final target: success needs the last
-        # target on the goal, not only the measured TCP near it.
+        # The twin's runner drops the target sent with `done`, so success needs the last target on the
+        # goal, not only the measured TCP near it.
         to_goal = self.goal - self.tcp_cmd
         d = float(np.linalg.norm(to_goal))
         on_goal = d <= self.ik_tol

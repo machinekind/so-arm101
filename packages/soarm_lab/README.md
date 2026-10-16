@@ -1,8 +1,7 @@
 # soarm-lab
 
 Training for the SO-101: RL tasks, a CPU and a GPU environment, PPO, evaluation, the base policies,
-and two strategies for the digital twin (`lerobot_mp`): `policy` runs a policy, `ik` drives the TCP
-to a goal by inverse kinematics.
+and two strategies for the digital twin (`lerobot_mp`): `policy` runs a policy, `ik` drives the TCP by inverse kinematics.
 It imports the twin's plugin contracts, `lerobot_mp_api`, and never the twin.
 The twin hands it the measured station as data and runs its strategies as plugins.
 It imports `soarm` for the robot folder.
@@ -36,7 +35,7 @@ A command that needs torch without it fails with "install soarm-lab[torch]".
 | `soarm_lab/sim.py` | `Scene`: the compiled station scene with the task's objects; renders |
 | `soarm_lab/rl/` | tasks (`reach`, `lift`, `pickplace`), `ArmEnv` (Gymnasium, CPU), `Policy` (numpy), evaluation, domain randomization; the legacy torch trainer: `BatchEnv` (MuJoCo Warp, GPU), PPO, `torch_policy` |
 | `soarm_lab/policies/` | base policies `reach-v3` and `lift-v3` (`policy.npz` + `meta.json`) |
-| `soarm_lab/strategies/` | strategies for the twin, one module per approach; `policy.py`: `PolicyStrategy`, a policy as a strategy; `ik.py`: `IKStrategy`, the TCP to a goal by inverse kinematics |
+| `soarm_lab/strategies/` | strategies for the twin, one module per approach; `policy.py`: `PolicyStrategy`, a policy as a strategy; `ik.py`: `IKStrategy`, the TCP to a goal by IK |
 | `soarm_lab/cli.py` | the `soarm-lab` command |
 | `soarm_lab/paths.py` | where trained policies go |
 
@@ -132,7 +131,7 @@ policy = "soarm_lab.strategies.policy:PolicyStrategy"
 ik = "soarm_lab.strategies.ik:IKStrategy"
 ```
 
-With `soarm-lab` installed next to the twin, the panel's Strategies tab lists `policy`.
+With `soarm-lab` installed next to the twin, the panel's Strategies tab lists `policy` and `ik`.
 Its form comes from `PolicySettings`, prefilled from the `policy:` section of the twin's config file:
 
 ```yaml
@@ -169,7 +168,6 @@ They need a runner that passes `objects`, e.g. the twin's cube tracker as an `Ob
 ## Inverse kinematics in the twin
 
 The strategy `ik` drives the TCP to a goal point with `RobotKinematics` alone: no policy, no training.
-The panel's Strategies tab lists it next to `policy`.
 Its form comes from `IKSettings`, prefilled from the `ik:` section of the twin's config file:
 
 ```yaml
@@ -185,14 +183,9 @@ ik:
 ```
 
 Every tick a point moves from the TCP of the last target straight toward the goal, by at most `speed_mps / hz`.
-`RobotKinematics.ik_step`, started from the last target, turns it into joint targets.
-The TCP follows a straight line, and consecutive targets stay near each other.
-Every target is clipped to `run.limits`.
-The gripper never moves: it keeps the angle it had at the start, or the command it squeezes a cube with.
+`RobotKinematics.ik_step`, started from the last target, turns it into joint targets, clipped to `run.limits`.
+The gripper never moves.
 
-`start` refuses a goal the full multi-start IK cannot reach within the limits.
-A goal the panel drags during the run is not checked again.
-When the arm cannot follow it, the target stops at the edge of the reach and the note says so.
-With `end_on_reach` the run ends as a success once the last target puts the TCP on the goal
-and the measured TCP is within `tol_m` of it.
-Like `policy`, it reads `obs.goal` and falls back to the settings' goal without one.
+`start` refuses a goal the IK cannot reach within the limits.
+A goal dragged during the run is not checked again; when the arm cannot follow it, the note says so.
+The run ends as a success once the last target puts the TCP on the goal and the measured TCP is within `tol_m`.

@@ -8,8 +8,7 @@ This repository is one uv workspace with two Python packages:
 
 - `soarm` is the robot: its robot folder and the hardware backends.
 - `soarm-lab` (package `soarm_lab`) is the training: RL tasks, the CPU and GPU environments, PPO,
-  evaluation, the base policies, and two strategies for the twin: one runs a policy, one drives the
-  TCP to a goal by inverse kinematics.
+  evaluation, the base policies, and two strategies for the twin: `policy` and `ik`.
   The training stack is JAX and MuJoCo Warp. Until the JAX trainer is written, training runs a legacy
   torch trainer. Running a policy needs numpy only.
 
@@ -42,8 +41,7 @@ so-arm101/
         sim.py              the compiled scene with the task's objects
         rl/                 tasks, Gymnasium env (CPU), MuJoCo Warp batch (GPU), PPO, policies, evaluation
         policies/           base policies reach-v3 and lift-v3 (policy.npz + meta.json)
-        strategies/         strategies for the twin; policy.py runs a policy (entry point `policy`),
-                            ik.py drives the TCP to a goal by inverse kinematics (entry point `ik`)
+        strategies/         strategies for the twin: policy.py runs a policy, ik.py drives the TCP by IK
         cli.py              the `soarm-lab` command: train, eval, policies, convert
       tests/                pytest, mirroring soarm_lab/
   docs/                     first contact, conventions, safety
@@ -64,8 +62,7 @@ The twin finds both packages through entry points.
 | `lerobot_mp.strategies` | `ik` | `soarm_lab.strategies.ik:IKStrategy` |
 
 The panel offers the robot `so101` with the `feetech` and `lerobot` connections.
-A trained policy runs as the strategy `policy` in the panel's Strategies tab.
-The strategy `ik` drives the TCP to a goal point by inverse kinematics, without a policy.
+The panel's Strategies tab lists `policy`, a trained policy, and `ik`, the TCP to a goal by inverse kinematics.
 See [packages/soarm/README.md](packages/soarm/README.md) and [packages/soarm_lab/README.md](packages/soarm_lab/README.md).
 
 ## Get a station
