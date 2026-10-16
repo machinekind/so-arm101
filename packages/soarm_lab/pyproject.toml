@@ -30,6 +30,7 @@ torch = ["torch>=2.7,<2.12"]
 
 [project.entry-points."lerobot_mp.strategies"]
 policy = "soarm_lab.strategies.policy:PolicyStrategy"
+ik = "soarm_lab.strategies.ik:IKStrategy"
 
 [project.scripts]
 soarm-lab = "soarm_lab.cli:main"

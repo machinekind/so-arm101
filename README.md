@@ -8,7 +8,7 @@ This repository is one uv workspace with two Python packages:
 
 - `soarm` is the robot: its robot folder and the hardware backends.
 - `soarm-lab` (package `soarm_lab`) is the training: RL tasks, the CPU and GPU environments, PPO,
-  evaluation, the base policies, and a strategy that runs a policy in the twin.
+  evaluation, the base policies, and two strategies for the twin: `policy` and `ik`.
   The training stack is JAX and MuJoCo Warp. Until the JAX trainer is written, training runs a legacy
   torch trainer. Running a policy needs numpy only.
 
@@ -32,7 +32,7 @@ so-arm101/
         serial_bridge.py    COM <-> TCP bridge, the `soarm-bridge` command
         settings.py         strict builder for the backends' config sections
       tests/                pytest, mirroring soarm/
-    soarm_lab/              the training; no twin import; the twin runs its strategy as a plugin
+    soarm_lab/              the training; no twin import; the twin runs its strategies as plugins
       soarm_lab/            Python package
         station.py          an exported station (scene.xml + station.json), read with plain MuJoCo
         stations/sim/       the bundled simulated station
@@ -41,7 +41,7 @@ so-arm101/
         sim.py              the compiled scene with the task's objects
         rl/                 tasks, Gymnasium env (CPU), MuJoCo Warp batch (GPU), PPO, policies, evaluation
         policies/           base policies reach-v3 and lift-v3 (policy.npz + meta.json)
-        strategies/         strategies for the twin; policy.py runs a policy (entry point `policy`)
+        strategies/         strategies for the twin: policy.py runs a policy, ik.py drives the TCP by IK
         cli.py              the `soarm-lab` command: train, eval, policies, convert
       tests/                pytest, mirroring soarm_lab/
   docs/                     first contact, conventions, safety
@@ -59,9 +59,10 @@ The twin finds both packages through entry points.
 | `lerobot_mp.backends` | `feetech` | `soarm.feetech:create` |
 | `lerobot_mp.backends` | `lerobot` | `soarm.lerobot_backend:create` |
 | `lerobot_mp.strategies` | `policy` | `soarm_lab.strategies.policy:PolicyStrategy` |
+| `lerobot_mp.strategies` | `ik` | `soarm_lab.strategies.ik:IKStrategy` |
 
 The panel offers the robot `so101` with the `feetech` and `lerobot` connections.
-A trained policy runs as the strategy `policy` in the panel's Strategies tab.
+The panel's Strategies tab lists `policy`, a trained policy, and `ik`, the TCP to a goal by inverse kinematics.
 See [packages/soarm/README.md](packages/soarm/README.md) and [packages/soarm_lab/README.md](packages/soarm_lab/README.md).
 
 ## Get a station
@@ -132,7 +133,7 @@ pip install "soarm-lab[train]" # mujoco-warp and jax: GPU training (the JAX trai
 pip install "soarm-lab[torch]" # torch: the legacy PPO trainer and soarm-lab convert
 ```
 
-Without extras, `soarm-lab` runs policies, evaluates them and runs the strategy in the twin.
+Without extras, `soarm-lab` runs policies, evaluates them and runs its strategies in the twin.
 
 ## Test
 
@@ -158,7 +159,7 @@ GPU tests skip without `mujoco-warp` or CUDA.
 - [docs/first-contact.md](docs/first-contact.md): plug in an arm for the first time, safely.
 - [docs/safety.md](docs/safety.md): safety rules.
 - [docs/conventions.md](docs/conventions.md): units, joint names, the dependency rule and where the contracts live.
-- [packages/soarm_lab/README.md](packages/soarm_lab/README.md): stations, training, evaluation and the policy strategy.
+- [packages/soarm_lab/README.md](packages/soarm_lab/README.md): stations, training, evaluation and the strategies.
 
 ## License
 

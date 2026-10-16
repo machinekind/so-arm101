@@ -1,9 +1,9 @@
 # soarm-lab
 
 Training for the SO-101: RL tasks, a CPU and a GPU environment, PPO, evaluation, the base policies,
-and a strategy that runs a policy in the digital twin (`lerobot_mp`).
+and two strategies for the digital twin (`lerobot_mp`): `policy` runs a policy, `ik` drives the TCP by inverse kinematics.
 It imports the twin's plugin contracts, `lerobot_mp_api`, and never the twin.
-The twin hands it the measured station as data and runs its strategy as a plugin.
+The twin hands it the measured station as data and runs its strategies as plugins.
 It imports `soarm` for the robot folder.
 
 ## Stack
@@ -11,12 +11,12 @@ It imports `soarm` for the robot folder.
 The training stack is JAX and MuJoCo Warp. The JAX trainer is not written yet.
 Until it is, `soarm-lab train` runs the legacy PPO trainer in torch.
 
-Running a policy needs numpy only. The strategy, `soarm-lab eval` and `soarm-lab policies` never import torch.
+Running a policy needs numpy only. The strategies, `soarm-lab eval` and `soarm-lab policies` never import torch.
 Policies are `policy.npz` files.
 
 | Install | Brings | For |
 |---|---|---|
-| `pip install soarm-lab` | numpy, PyYAML, MuJoCo, Gymnasium, `soarm`, `lerobot-mp-api` | the strategy, evaluation, the CPU environments |
+| `pip install soarm-lab` | numpy, PyYAML, MuJoCo, Gymnasium, `soarm`, `lerobot-mp-api` | the strategies, evaluation, the CPU environments |
 | `pip install "soarm-lab[train]"` | MuJoCo Warp, JAX | GPU training; the JAX trainer will use it |
 | `pip install "soarm-lab[torch]"` | torch | the legacy torch trainer and `soarm-lab convert` |
 
@@ -35,7 +35,7 @@ A command that needs torch without it fails with "install soarm-lab[torch]".
 | `soarm_lab/sim.py` | `Scene`: the compiled station scene with the task's objects; renders |
 | `soarm_lab/rl/` | tasks (`reach`, `lift`, `pickplace`), `ArmEnv` (Gymnasium, CPU), `Policy` (numpy), evaluation, domain randomization; the legacy torch trainer: `BatchEnv` (MuJoCo Warp, GPU), PPO, `torch_policy` |
 | `soarm_lab/policies/` | base policies `reach-v3` and `lift-v3` (`policy.npz` + `meta.json`) |
-| `soarm_lab/strategies/` | strategies for the twin, one module per approach; `policy.py`: `PolicyStrategy`, a policy as a strategy |
+| `soarm_lab/strategies/` | strategies for the twin, one module per approach; `policy.py`: `PolicyStrategy`, a policy as a strategy; `ik.py`: `IKStrategy`, the TCP to a goal by IK |
 | `soarm_lab/cli.py` | the `soarm-lab` command |
 | `soarm_lab/paths.py` | where trained policies go |
 
@@ -123,14 +123,15 @@ env = gym.make("SoArmLab/Lift-v0")
 
 ## The policy in the twin
 
-`pyproject.toml` registers the strategy:
+`pyproject.toml` registers the strategies:
 
 ```toml
 [project.entry-points."lerobot_mp.strategies"]
 policy = "soarm_lab.strategies.policy:PolicyStrategy"
+ik = "soarm_lab.strategies.ik:IKStrategy"
 ```
 
-With `soarm-lab` installed next to the twin, the panel's Strategies tab lists `policy`.
+With `soarm-lab` installed next to the twin, the panel's Strategies tab lists `policy` and `ik`.
 Its form comes from `PolicySettings`, prefilled from the `policy:` section of the twin's config file:
 
 ```yaml
@@ -163,3 +164,28 @@ Reach then drives to the goal in the settings.
 Lift and pickplace wait `wait_for_cube_s` for a cube and then end the run.
 They need a runner that passes `objects`, e.g. the twin's cube tracker as an `ObjectPose` with its source.
 `tests/strategies/test_lift_from_cameras.py` builds one.
+
+## Inverse kinematics in the twin
+
+The strategy `ik` drives the TCP to a goal point with `RobotKinematics` alone: no policy, no training.
+Its form comes from `IKSettings`, prefilled from the `ik:` section of the twin's config file:
+
+```yaml
+ik:
+  goal_x: 0.22               # the goal [m, base frame] when the twin gives none
+  goal_y: 0.0
+  goal_z: 0.12
+  hz: 20.0                   # ticks per second
+  speed_mps: 0.10            # highest TCP speed along the path
+  tol_m: 0.005               # the measured TCP is at the goal within this
+  end_on_reach: true         # end the run once at the goal; false: keep following a goal the panel drags
+  max_tracking_deg: 25.0     # end the run, on the measured pose, when a joint lags this much
+```
+
+Every tick a point moves from the TCP of the last target straight toward the goal, by at most `speed_mps / hz`.
+`RobotKinematics.ik_step`, started from the last target, turns it into joint targets, clipped to `run.limits`.
+The gripper never moves.
+
+`start` refuses a goal the IK cannot reach within the limits.
+A goal dragged during the run is not checked again; when the arm cannot follow it, the note says so.
+The run ends as a success once the last target puts the TCP on the goal and the measured TCP is within `tol_m`.

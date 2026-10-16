@@ -9,7 +9,7 @@
 The twin and `soarm_lab` meet only through data and entry points:
 
 - the twin exports the measured station as a folder (`lerobot-twin export`): `scene.xml`, `assets/`, `station.json`;
-- the twin finds the lab's strategy under the `lerobot_mp.strategies` entry point and runs it through its `StrategyRunner`.
+- the twin finds the lab's strategies under the `lerobot_mp.strategies` entry point and runs them through its `StrategyRunner`.
 
 The contracts are a base dependency of both packages, `lerobot-mp-api>=0.1,<0.2`. They need only numpy.
 The twin is a dev dependency. Tests that run a package through the twin's loaders, factory and runner are
@@ -22,7 +22,7 @@ The lab's test also imports every lab module in a fresh interpreter. It checks t
 loaded and no `lerobot_mp` module did.
 
 Running a policy needs no torch.
-The strategy, the policy file, evaluation and the `soarm-lab` commands other than `train` and `convert`
+The strategies, the policy file, evaluation and the `soarm-lab` commands other than `train` and `convert`
 import numpy, never torch.
 torch is the optional extra `soarm-lab[torch]` for the legacy torch trainer and `soarm-lab convert`.
 `packages/soarm_lab/tests/test_dependency_rule.py` runs the bundled policies in a fresh interpreter and
@@ -102,6 +102,8 @@ The plugin contracts are the package `lerobot-mp-api` (see the root README for h
   The twin builds a strategy's settings dataclass strictly (`lerobot_mp.twin.strategies`).
   Every strategy here subclasses `Strategy[ItsSettings]`, and `uv run pyright` checks it against the contract.
   `soarm_lab.strategies.policy.PolicyStrategy` takes `RunInfo` and `Observation` and returns an `Action`.
-- `packages/soarm_lab/pyproject.toml` registers that strategy under `lerobot_mp.strategies` (`STRATEGIES`) as `policy`.
+  `soarm_lab.strategies.ik.IKStrategy` does the same.
+- `packages/soarm_lab/pyproject.toml` registers these strategies under `lerobot_mp.strategies` (`STRATEGIES`)
+  as `policy` and `ik`.
 - The station export is `Workspace.export` in the twin (`lerobot-twin export`). `soarm_lab.station.Station` reads it.
   `soarm_lab.robot.RobotSpec` reads only the `robot.yaml` fields the lab uses and skips the others.
