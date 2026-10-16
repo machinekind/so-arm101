@@ -13,7 +13,6 @@ tcp_approach: [1.0, 0.0, 0.0]
 tcp_closing: [0.0, 0.0, 1.0]
 fingertips: [fixed_jaw_sph_tip1, moving_jaw_sph_tip1]
 roll_joint: wrist_roll
-onboard_cameras: [wrist_cam]
 jaw_bodies: [gripper, moving_jaw_so101_v1]
 
 # A ready pose from inverse kinematics: the tip in the middle of the workspace, the gripper
