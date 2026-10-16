@@ -71,6 +71,7 @@ def test_the_lab_imports_nothing_from_the_twin_at_runtime() -> None:
     script = (
         "import importlib.util, sys\n"
         "import soarm_lab.cli, soarm_lab.sim, soarm_lab.strategies, soarm_lab.strategies.policy\n"
+        "import soarm_lab.strategies.ik\n"
         "import soarm_lab.rl, soarm_lab.rl.env, soarm_lab.rl.evaluate\n"
         "if importlib.util.find_spec('torch'):\n"
         "    import soarm_lab.rl.ppo, soarm_lab.rl.torch_policy\n"
@@ -82,9 +83,9 @@ def test_the_lab_imports_nothing_from_the_twin_at_runtime() -> None:
 
 
 #: What a twin user, `soarm-lab eval` and `soarm-lab policies` load.
-RUNTIME = ("soarm_lab", "soarm_lab.strategies", "soarm_lab.strategies.policy", "soarm_lab.rl.policy",
-           "soarm_lab.station", "soarm_lab.sim", "soarm_lab.cli", "soarm_lab.rl", "soarm_lab.rl.env",
-           "soarm_lab.rl.evaluate")
+RUNTIME = ("soarm_lab", "soarm_lab.strategies", "soarm_lab.strategies.policy", "soarm_lab.strategies.ik",
+           "soarm_lab.rl.policy", "soarm_lab.station", "soarm_lab.sim", "soarm_lab.cli", "soarm_lab.rl",
+           "soarm_lab.rl.env", "soarm_lab.rl.evaluate")
 #: Imports the runtime, loads both bundled policies, runs a strategy tick, `policies` and `eval`.
 RUN_POLICIES = f"""
 import sys

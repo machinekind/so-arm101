@@ -14,10 +14,13 @@ from soarm_lab.robot import load_robot
 EXPECTED = {
     "soarm-lab": {
         (STRATEGIES, "policy"): "soarm_lab.strategies.policy:PolicyStrategy",
+        (STRATEGIES, "ik"): "soarm_lab.strategies.ik:IKStrategy",
         ("console_scripts", "soarm-lab"): "soarm_lab.cli:main",
     },
 }
 CALLABLE = [(dist, key) for dist, eps in EXPECTED.items() for key in eps]
+#: The lab's strategies, by entry point name.
+STRATEGY_NAMES = [name for group, name in EXPECTED["soarm-lab"] if group == STRATEGIES]
 
 
 def own_entry_points(dist: str) -> dict[tuple[str, str], metadata.EntryPoint]:
@@ -39,18 +42,20 @@ def test_callable_entry_points(dist: str, key: tuple[str, str]) -> None:
     assert callable(own_entry_points(dist)[key].load())
 
 
-def test_the_strategy_entry_point_is_a_class_with_settings() -> None:
+@pytest.mark.parametrize("name", STRATEGY_NAMES)
+def test_the_strategy_entry_point_is_a_class_with_settings(name: str) -> None:
     """What the twin's loader checks (`lerobot_mp.twin.strategies.load_strategy`), without the twin."""
-    cls = own_entry_points("soarm-lab")[(STRATEGIES, "policy")].load()
+    cls = own_entry_points("soarm-lab")[(STRATEGIES, name)].load()
     assert isinstance(cls, type) and callable(getattr(cls, "act", None))
     assert dataclasses.is_dataclass(cls.settings)
     kinds = {f.name: f.type for f in dataclasses.fields(cls.settings)}
     assert set(kinds.values()) <= {"str", "int", "float", "bool"}
 
 
-def test_the_strategy_follows_the_strategy_protocol() -> None:
+@pytest.mark.parametrize("name", STRATEGY_NAMES)
+def test_the_strategy_follows_the_strategy_protocol(name: str) -> None:
     """`lerobot_mp_api.Strategy`: built as `cls(settings)`, a positive `hz`, an `Action` from `act`."""
-    cls = own_entry_points("soarm-lab")[(STRATEGIES, "policy")].load()
+    cls = own_entry_points("soarm-lab")[(STRATEGIES, name)].load()
     strategy = cls(cls.settings())
     assert isinstance(strategy.hz, float) and strategy.hz > 0
     spec = load_robot()
