@@ -64,9 +64,6 @@ The panel offers the robot `so101` with the `feetech` and `lerobot` connections.
 A trained policy runs as the strategy `policy` in the panel's Strategies tab.
 See [packages/soarm/README.md](packages/soarm/README.md) and [packages/soarm_lab/README.md](packages/soarm_lab/README.md).
 
-The twin also registers an SO-101 of its own under the names `so101`, `feetech` and `lerobot`.
-With both installed, its robot and backend discovery fails on the duplicate names.
-
 ## Get a station
 
 The lab trains and evaluates on a station the twin measured: the table and where the arm stands on it,
@@ -111,7 +108,7 @@ It lives in the twin's repository under `packages/lerobot_mp_api`.
 pip ignores that table. Outside the workspace, install the contracts from git first:
 
 ```
-pip install "lerobot-mp-api @ git+https://github.com/machinekind/digital_twin_training.git@40ee4527f9b19a43a5a139c091ecf854b5c6db1f#subdirectory=packages/lerobot_mp_api"
+pip install "lerobot-mp-api @ git+https://github.com/machinekind/digital_twin_training.git@22471fe5547c0e53bf12dab0d3f96c444154ac2a#subdirectory=packages/lerobot_mp_api"
 ```
 
 GPU training needs MuJoCo Warp.

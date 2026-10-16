@@ -6,16 +6,15 @@ import soarm
 
 
 @pytest.fixture
-def twin_robots(monkeypatch: pytest.MonkeyPatch):
-    """The twin's robot discovery with `so101` taken from `soarm` only.
+def twin_robots():
+    """The twin's robot discovery, checked to resolve `so101` to this repository's robot folder.
 
-    The twin registers an SO-101 of its own under the same name, so with both installed its discovery
-    raises on the duplicate (see soarm's tests/test_twin_contract.py). Tests that build a twin (`Workspace`,
-    `Twin`) pin discovery to this repository's robot folder instead.
+    Tests that build a twin (`Workspace`, `Twin`) take it, so a twin that found another `so101` fails here
+    and not deep inside a run.
     """
     from lerobot_mp.twin import robots
 
-    monkeypatch.setattr(robots, "robot_folders", lambda: {"so101": soarm.ROBOT_DIR.resolve()})
+    assert robots.robot_folders()["so101"] == soarm.ROBOT_DIR.resolve()
     robots.get_spec.cache_clear()
     yield robots
     robots.get_spec.cache_clear()

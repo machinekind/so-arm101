@@ -6,8 +6,8 @@ soarm = { workspace = true }
 soarm-lab = { workspace = true }
 # The plugin contracts (`lerobot_mp_api`) are not on PyPI: packages/lerobot_mp_api in the twin's repository.
 # The twin comes from the same commit, because it depends on that package too.
-lerobot-mp-api = { git = "https://github.com/machinekind/digital_twin_training.git", subdirectory = "packages/lerobot_mp_api", rev = "40ee4527f9b19a43a5a139c091ecf854b5c6db1f" }
-lerobot-mp = { git = "https://github.com/machinekind/digital_twin_training.git", rev = "40ee4527f9b19a43a5a139c091ecf854b5c6db1f" }
+lerobot-mp-api = { git = "https://github.com/machinekind/digital_twin_training.git", subdirectory = "packages/lerobot_mp_api", rev = "22471fe5547c0e53bf12dab0d3f96c444154ac2a" }
+lerobot-mp = { git = "https://github.com/machinekind/digital_twin_training.git", rev = "22471fe5547c0e53bf12dab0d3f96c444154ac2a" }
 
 [dependency-groups]
 dev = [

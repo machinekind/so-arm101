@@ -1,9 +1,6 @@
-"""The twin's own code accepts `soarm`: its strict robot loader, its backend context and its backend factory.
-
-The twin registers an SO-101 of its own under the same names (robot `so101`, backends `feetech` and
-`lerobot`), so with both installed its discovery raises on the duplicates. Robot discovery is not tested
-here; these tests call the twin's loader directly. Backend discovery is pinned to `soarm`'s entry points
-(fixture `soarm_backends`), so `create_backend` runs as in the twin.
+"""The twin's own code accepts `soarm`: its discovery, its strict robot loader, its backend context and
+its backend factory. The twin holds no robot of its own, so `so101`, `feetech` and `lerobot` resolve to
+this package through the entry points.
 """
 
 from __future__ import annotations
@@ -31,10 +28,11 @@ def spec():
 
 
 @pytest.fixture
-def soarm_backends(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The twin's backend discovery with `feetech` and `lerobot` taken from `soarm` only."""
-    found = metadata.distribution("soarm").entry_points.select(group=BACKENDS)
-    monkeypatch.setattr(factory, "backends", lambda: {ep.name: ep for ep in found})
+def soarm_backends() -> None:
+    """The twin's backend discovery finds `feetech` and `lerobot` in `soarm` and nowhere else."""
+    ours = {ep.name: ep.value for ep in metadata.distribution("soarm").entry_points.select(group=BACKENDS)}
+    found = factory.backends()
+    assert {name: found[name].value for name in ours} == ours
 
 
 def config(spec, backend: str, **sections):
