@@ -6,8 +6,8 @@ soarm = { workspace = true }
 soarm-lab = { workspace = true }
 # The plugin contracts (`machinekind_twin_api`) are not on PyPI: packages/machinekind_twin_api in the twin's repository.
 # The twin comes from the same commit, because it depends on that package too.
-machinekind-twin-api = { git = "https://github.com/machinekind/digital_twin_training.git", subdirectory = "packages/machinekind_twin_api", rev = "941fc6b170aaa24b110c1ca31e1b7ddbca2515c0" }
-machinekind-twin = { git = "https://github.com/machinekind/digital_twin_training.git", rev = "941fc6b170aaa24b110c1ca31e1b7ddbca2515c0" }
+machinekind-twin-api = { git = "https://github.com/machinekind/twin.git", subdirectory = "packages/machinekind_twin_api", rev = "941fc6b170aaa24b110c1ca31e1b7ddbca2515c0" }
+machinekind-twin = { git = "https://github.com/machinekind/twin.git", rev = "941fc6b170aaa24b110c1ca31e1b7ddbca2515c0" }
 
 [dependency-groups]
 # `uv sync`: the arm and the lab, with pytest, ruff and pyright. No torch, no twin.
