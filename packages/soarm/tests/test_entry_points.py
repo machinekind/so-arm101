@@ -15,6 +15,7 @@ EXPECTED = {
         (BACKENDS, "feetech"): "soarm.feetech:create",
         (BACKENDS, "lerobot"): "soarm.lerobot_backend:create",
         ("console_scripts", "soarm-bridge"): "soarm.serial_bridge:main",
+        ("console_scripts", "soarm-panel"): "soarm.panel:main",
     },
 }
 CALLABLE = [(dist, key) for dist, eps in EXPECTED.items() for key in eps if key[0] != ROBOTS]

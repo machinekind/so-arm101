@@ -12,6 +12,7 @@ lerobot-mp = { git = "https://github.com/machinekind/digital_twin_training.git",
 [dependency-groups]
 dev = [
     "soarm[feetech]",
+    "soarm[panel]",
     # torch for the tests of the legacy torch trainer and the converter; the runtime needs none
     # (packages/soarm_lab/tests/test_dependency_rule.py).
     "soarm-lab[torch]",
@@ -22,9 +23,9 @@ dev = [
     "pyright>=1.1",
 ]
 
-# The type checker runs on what implements the twin's contracts; the rest is not typed yet.
+# The type checker runs on what implements the twin's contracts and on the test panel; the rest is not typed yet.
 [tool.pyright]
-include = ["packages/soarm_lab/soarm_lab/strategies"]
+include = ["packages/soarm_lab/soarm_lab/strategies", "packages/soarm/soarm/panel.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["packages/soarm/tests", "packages/soarm_lab/tests"]

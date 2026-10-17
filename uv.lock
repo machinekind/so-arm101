@@ -22,6 +22,7 @@ dev = [
     { name = "pytest", specifier = ">=8" },
     { name = "ruff", specifier = ">=0.6" },
     { name = "soarm", extras = ["feetech"], editable = "packages/soarm" },
+    { name = "soarm", extras = ["panel"], editable = "packages/soarm" },
     { name = "soarm-lab", extras = ["torch"], editable = "packages/soarm_lab" },
 ]
 
@@ -2048,14 +2049,20 @@ feetech = [
 lerobot = [
     { name = "lerobot", extra = ["feetech"], marker = "python_full_version >= '3.12'" },
 ]
+panel = [
+    { name = "pyserial" },
+    { name = "pyyaml" },
+]
 
 [package.metadata]
 requires-dist = [
     { name = "lerobot", extras = ["feetech"], marker = "python_full_version >= '3.12' and extra == 'lerobot'", specifier = ">=0.6,<0.7" },
     { name = "lerobot-mp-api", git = "https://github.com/machinekind/digital_twin_training.git?subdirectory=packages%2Flerobot_mp_api&rev=f5331e9d93f633df1b1309d7ff8a0bfeca4d90a0" },
     { name = "pyserial", marker = "extra == 'feetech'", specifier = ">=3.5" },
+    { name = "pyserial", marker = "extra == 'panel'", specifier = ">=3.5" },
+    { name = "pyyaml", marker = "extra == 'panel'", specifier = ">=6" },
 ]
-provides-extras = ["feetech", "lerobot"]
+provides-extras = ["feetech", "panel", "lerobot"]
 
 [[package]]
 name = "soarm-lab"
