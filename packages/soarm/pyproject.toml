@@ -15,6 +15,8 @@ dependencies = ["lerobot-mp-api>=0.1,<0.2"]
 [project.optional-dependencies]
 # Servos driven directly, without LeRobot and torch; also the COM <-> TCP bridge.
 feetech = ["pyserial>=3.5"]
+# The browser test panel `soarm-panel`: the feetech backend plus robot.yaml.
+panel = ["pyserial>=3.5", "pyyaml>=6"]
 # Backend `lerobot` (LeRobot 0.6 needs Python 3.12).
 lerobot = ["lerobot[feetech]>=0.6,<0.7; python_version>='3.12'"]
 
@@ -27,6 +29,7 @@ lerobot = "soarm.lerobot_backend:create"
 
 [project.scripts]
 soarm-bridge = "soarm.serial_bridge:main"
+soarm-panel = "soarm.panel:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["soarm"]

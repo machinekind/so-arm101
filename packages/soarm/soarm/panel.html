@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Panel SO-101</title>
+<style>
+  :root {
+    --bg: #f3f3f0; --card: #ffffff; --fg: #1c1c1a; --muted: #6a6a64; --line: #d8d8d2;
+    --accent: #2b64c8; --warn: #a65400; --bad: #c62828; --ok: #237a3b; --stop: #d32020;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #151515; --card: #202020; --fg: #ececea; --muted: #9b9b95; --line: #363636;
+      --accent: #6d9cf5; --warn: #f0a24a; --bad: #ff6b6b; --ok: #58c07a; --stop: #e53935;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.4 system-ui, sans-serif; }
+  header, .bar { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem 1.25rem; padding: .6rem 1rem; }
+  header { background: var(--card); border-bottom: 1px solid var(--line); }
+  header .ok { color: var(--ok); } header .bad { color: var(--bad); font-weight: 600; }
+  #clip, #error { color: var(--warn); }
+  #faults { margin: 0; padding: .4rem 1rem .4rem 2.2rem; color: var(--bad); background: var(--card); }
+  #faults:empty { display: none; }
+  .bar label { color: var(--muted); }
+  select, button { font: inherit; }
+  button { padding: .45rem .9rem; border: 1px solid var(--line); border-radius: 6px;
+           background: var(--card); color: var(--fg); cursor: pointer; }
+  button:disabled, input:disabled { opacity: .4; cursor: not-allowed; }
+  button.off { border-color: var(--warn); color: var(--warn); }
+  #stop { margin-left: auto; min-width: 9rem; padding: .8rem 1.6rem; border: 0; background: var(--stop);
+          color: #fff; font-size: 1.3rem; font-weight: 700; letter-spacing: .05em; }
+  #joints { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: .75rem; padding: 0 1rem 1rem; }
+  .joint { display: flex; flex-direction: column; gap: .4rem; padding: .75rem; background: var(--card);
+           border: 1px solid var(--line); border-radius: 8px; }
+  .joint h2 { margin: 0; font-size: .95rem; font-weight: 600; }
+  .measured { font-size: 1.7rem; font-variant-numeric: tabular-nums; }
+  .small { color: var(--muted); font-size: .85rem; font-variant-numeric: tabular-nums; }
+  .row { display: flex; gap: .4rem; } .row button { flex: 1; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <span id="link">łączenie…</span>
+  <span id="hz" class="small"></span>
+  <span id="torque-state"></span>
+  <span id="clip"></span>
+  <span id="error"></span>
+</header>
+<ul id="faults"></ul>
+<div class="bar">
+  <label>Krok <select id="step"><option>1</option><option selected>5</option><option>15</option></select> °</label>
+  <label>Prędkość <select id="speed"><option>10</option><option selected>30</option><option>60</option></select> °/s</label>
+  <button id="home" class="move" disabled>Dom</button>
+  <button id="torque" disabled>Moment wył.</button>
+  <button id="stop" title="STOP (Esc)">STOP</button>
+</div>
+<main id="joints"></main>
+<script>
+const $ = (id) => document.getElementById(id);
+const GRIPPER_STEP = 10;
+let state = null;
+let online = false;
+
+const fmt = (value) => (typeof value === 'number' ? value.toFixed(1) : '–');
+
+async function post(command, body = {}) {
+  try {
+    const reply = await fetch('/api/' + command, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body),
+    });
+    const data = await reply.json();
+    $('error').textContent = reply.ok ? '' : data.error;
+    return data;
+  } catch (err) {
+    $('error').textContent = 'brak połączenia z serwerem';
+  }
+}
+
+function button(text, onClick) {
+  const el = document.createElement('button');
+  el.textContent = text;
+  el.className = 'move';
+  el.addEventListener('click', onClick);
+  return el;
+}
+
+function buildJoint(s, name) {
+  const gripper = name === s.gripper;
+  const col = document.createElement('section');
+  col.className = 'joint';
+  col.dataset.name = name;
+  col.innerHTML = '<h2></h2><div class="measured"></div><input type="range" class="move" step="0.5">'
+    + '<div class="row"></div><div class="small target"></div><div class="small range"></div>';
+  col.querySelector('h2').textContent = s.labels[name];
+  const slider = col.querySelector('input');
+  slider.min = s.limits[name].low;
+  slider.max = s.limits[name].high;
+  slider.addEventListener('change', () => post('target', {joint: name, value: Number(slider.value)}));
+  const jog = (sign) => post('jog', {joint: name, delta: sign * (gripper ? GRIPPER_STEP : Number($('step').value))});
+  col.querySelector('.row').append(button('−', () => jog(-1)), button('+', () => jog(1)));
+  col.querySelector('.range').textContent = `zakres ${fmt(s.limits[name].low)} … ${fmt(s.limits[name].high)}`;
+  if (gripper) {
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.append(button('Zamknij', () => post('close')), button('Otwórz', () => post('open')));
+    col.append(row);
+  }
+  return col;
+}
+
+function render(s) {
+  if (!$('joints').children.length) {
+    $('joints').append(...s.joints.map((name) => buildJoint(s, name)));
+  }
+  $('link').textContent = `${s.robot} na ${s.port}: ${s.connected ? 'połączono' : 'rozłączono'}`;
+  $('link').className = s.connected ? 'ok' : 'bad';
+  $('hz').textContent = `pętla ${s.loop_hz.toFixed(0)} Hz`;
+  $('torque-state').textContent = s.torque ? 'moment włączony' : 'moment wyłączony';
+  $('torque-state').className = s.torque ? 'ok' : 'bad';
+  $('torque').textContent = s.torque ? 'Moment wył.' : 'Moment wł.';
+  $('torque').classList.toggle('off', s.torque);
+  $('clip').textContent = s.clip
+    ? `przycięto do limitu: ${s.labels[s.clip.joint]} ${fmt(s.clip.requested)} → ${fmt(s.clip.target)}` : '';
+  $('faults').replaceChildren(...s.faults.map((text) => {
+    const item = document.createElement('li');
+    item.textContent = text;
+    return item;
+  }));
+  if (document.activeElement !== $('speed')) $('speed').value = String(s.speed);
+  for (const col of $('joints').children) {
+    const name = col.dataset.name;
+    col.querySelector('.measured').textContent = fmt(s.measured[name]);
+    col.querySelector('.target').textContent = `cel ${fmt(s.target[name])} · rozkaz ${fmt(s.command[name])}`;
+    const slider = col.querySelector('input');
+    if (!slider.matches(':active')) slider.value = s.target[name];
+  }
+}
+
+function enable() {
+  const movable = online && state !== null && state.torque;
+  for (const el of document.querySelectorAll('.move')) el.disabled = !movable;
+  $('torque').disabled = !online;
+  if (!online) {
+    $('link').textContent = 'brak połączenia z serwerem';
+    $('link').className = 'bad';
+  }
+}
+
+async function poll() {
+  try {
+    const reply = await fetch('/api/state', {cache: 'no-store', signal: AbortSignal.timeout(1000)});
+    if (!reply.ok) throw new Error(String(reply.status));
+    state = await reply.json();
+    online = true;
+    render(state);
+  } catch (err) {
+    online = false;
+  }
+  enable();
+  setTimeout(poll, 200);
+}
+
+$('stop').addEventListener('click', () => post('stop'));
+$('home').addEventListener('click', () => post('home'));
+$('speed').addEventListener('change', () => post('speed', {value: Number($('speed').value)}));
+$('torque').addEventListener('click', () => {
+  if (!state) return;
+  if (state.torque && !confirm('Wyłączyć moment? Ramię opadnie pod własnym ciężarem - podtrzymaj je.')) return;
+  post('torque', {on: !state.torque});
+});
+document.addEventListener('keydown', (event) => { if (event.key === 'Escape') post('stop'); });
+// The server also stops a ramp once the polls stop; this makes closing the page stop at once.
+window.addEventListener('pagehide', () => fetch('/api/stop', {
+  method: 'POST', keepalive: true, headers: {'Content-Type': 'application/json'}, body: '{}',
+}));
+poll();
+</script>
+</body>
+</html>
