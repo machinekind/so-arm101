@@ -38,7 +38,8 @@ The twin's `lerobot-twin ui` drives the arm through this package's `feetech` bac
   The twin's safety supervisor checks every command.
 - Start from the twin's simulation of the same task. Then switch the backend to the real arm.
 - Keep one hand on the motor power plug.
-- `soarm-panel --port <port>` moves the arm from a browser page with a slider per joint (see `packages/soarm/README.md`).
+- `soarm-panel` moves the arm from a browser page with a slider per joint (see `packages/soarm/README.md`).
+  It finds the port itself when the arm is the only USB-serial device.
 
 ## 6. Done
 

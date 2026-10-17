@@ -19,6 +19,18 @@ Both packages import the twin's plugin contracts, `lerobot-mp-api` (package `ler
 The contracts need only numpy.
 [docs/conventions.md](docs/conventions.md) has the full dependency rule.
 
+## Quick start
+
+Read [docs/safety.md](docs/safety.md). Plug in USB, then motor power. Then:
+
+```
+uv sync
+uv run soarm-panel
+```
+
+The panel finds the arm's USB-serial port and opens a browser page with a slider per joint, the gripper, Home, STOP and torque.
+[docs/first-contact.md](docs/first-contact.md) walks through the first session.
+
 ## Layout
 
 ```
@@ -99,11 +111,14 @@ In Python, `soarm_lab.station.Station.load(folder)` reads the folder with plain 
 uv sync
 ```
 
-This installs `soarm` and `soarm-lab` in editable mode with `lerobot-mp-api`, pyserial, MuJoCo, Gymnasium,
-pytest, ruff and the twin from GitHub.
-It also installs torch, so the tests cover the legacy torch trainer and `soarm-lab convert`.
-`soarm-lab` itself does not depend on torch.
-The twin repository is private, so `uv sync` needs GitHub access to it.
+This installs `soarm` and `soarm-lab` in editable mode with `lerobot-mp-api`, pyserial, PyYAML, MuJoCo, Gymnasium,
+pytest, ruff and pyright. It installs neither torch nor the twin.
+
+```
+uv sync --group torch    # torch: the legacy PPO trainer, soarm-lab convert and their tests
+uv sync --group twin     # the twin, for the tests marked `twin`; needs GitHub access to its private repository
+uv sync --all-groups     # everything, as CI runs it
+```
 
 Both packages depend on `lerobot-mp-api>=0.1,<0.2`. The package is not published yet.
 It lives in the twin's repository under `packages/lerobot_mp_api`.
@@ -114,12 +129,8 @@ pip ignores that table. Outside the workspace, install the contracts from git fi
 pip install "lerobot-mp-api @ git+https://github.com/machinekind/digital_twin_training.git@f5331e9d93f633df1b1309d7ff8a0bfeca4d90a0#subdirectory=packages/lerobot_mp_api"
 ```
 
-GPU training needs MuJoCo Warp.
-Until the JAX trainer exists, it runs the legacy torch trainer and needs a CUDA build of torch:
-
-```
-uv sync --extra train
-```
+GPU training needs MuJoCo Warp and, until the JAX trainer exists, a CUDA build of torch.
+Install the `train` extra of `soarm-lab` next to the `torch` group.
 
 Extras of `soarm`:
 
@@ -141,8 +152,7 @@ Without extras, `soarm-lab` runs policies, evaluates them and runs its strategie
 ## Test
 
 ```
-uv run pytest -q                       # both packages
-uv run pytest -q -m "not twin"         # without the twin
+uv run pytest -q                       # both packages; the torch and twin tests skip unless their group is installed
 uv run pytest -q packages/soarm_lab    # one package
 uv run ruff check .
 uv run pyright                         # the strategies, against the twin's contracts

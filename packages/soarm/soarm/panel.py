@@ -1,6 +1,6 @@
 """A browser panel for the SO-101: move the joints and the gripper from a web page.
 
-`soarm-panel --port <port>` connects the arm through the `feetech` backend, runs a 20 Hz control loop
+`soarm-panel` connects the arm through the `feetech` backend, runs a 20 Hz control loop
 and serves one page: `GET /` the page, `GET /api/state` the state, `POST /api/<command>` a command.
 """
 
@@ -13,6 +13,7 @@ import math
 import threading
 import time
 import webbrowser
+from collections.abc import Iterable
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -354,11 +355,25 @@ def _arg(body: dict[str, Any], key: str, kind: type) -> Any:
     raise PanelError(f"Bad field `{key}`: {value!r} (expected {kind.__name__}).")
 
 
+def detect_port(ports: Iterable[Any]) -> str:
+    """The one USB-serial device among `ports` (from `serial.tools.list_ports.comports()`).
+
+    Raises ValueError when there is none or more than one; the message says to pass `--port`.
+    """
+    devices = sorted(str(port.device) for port in ports if getattr(port, "vid", None) is not None)
+    if not devices:
+        raise ValueError("No USB-serial device found. Plug the arm in, or pass --port.")
+    if len(devices) > 1:
+        raise ValueError(f"Several USB-serial devices: {', '.join(devices)}. Pass --port.")
+    return devices[0]
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="soarm-panel", description="A browser test panel for the arm: "
                                      "joints and gripper, Home, STOP and torque.")
-    parser.add_argument("--port", required=True,
-                        help="the arm's serial port, e.g. COM5, /dev/ttyACM0 or socket://host:5555")
+    parser.add_argument("--port", default=None,
+                        help="the arm's serial port, e.g. COM5, /dev/ttyACM0 or socket://host:5555 "
+                             "(default: the one USB-serial device)")
     parser.add_argument("--baudrate", type=int, default=1_000_000, help="baud rate (default 1 Mbaud)")
     parser.add_argument("--listen", default="127.0.0.1:8765",
                         help="where to listen; default `127.0.0.1:8765`, this machine only")
@@ -380,7 +395,13 @@ def main(argv: list[str] | None = None) -> int:
     # On a failed start the process exit closes the port; torque stays on, as disconnect leaves it.
     try:
         description = RobotDescription.load(args.robot)
-        arm = FeetechArm(description.context(args.port, {"baudrate": args.baudrate}))
+        port = args.port
+        if port is None:
+            from serial.tools.list_ports import comports
+
+            port = detect_port(comports())
+            logger.info("Port: %s", port)
+        arm = FeetechArm(description.context(port, {"baudrate": args.baudrate}))
         arm.connect()
         controller = PanelController(arm, description)
         server = PanelServer((host, tcp_port), controller)
