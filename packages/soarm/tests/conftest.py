@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 import yaml
-from lerobot_mp_api.backend import BackendContext
+from machinekind_twin_api.backend import BackendContext
 
 import soarm
 

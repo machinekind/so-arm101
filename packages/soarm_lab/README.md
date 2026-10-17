@@ -1,8 +1,8 @@
 # soarm-lab
 
 Training for the SO-101: RL tasks, a CPU and a GPU environment, PPO, evaluation, the base policies,
-and two strategies for the digital twin (`lerobot_mp`): `policy` runs a policy, `ik` drives the TCP by inverse kinematics.
-It imports the twin's plugin contracts, `lerobot_mp_api`, and never the twin.
+and two strategies for the digital twin (`machinekind_twin`): `policy` runs a policy, `ik` drives the TCP by inverse kinematics.
+It imports the twin's plugin contracts, `machinekind_twin_api`, and never the twin.
 The twin hands it the measured station as data and runs its strategies as plugins.
 It imports `soarm` for the robot folder.
 
@@ -16,7 +16,7 @@ Policies are `policy.npz` files.
 
 | Install | Brings | For |
 |---|---|---|
-| `pip install soarm-lab` | numpy, PyYAML, MuJoCo, Gymnasium, `soarm`, `lerobot-mp-api` | the strategies, evaluation, the CPU environments |
+| `pip install soarm-lab` | numpy, PyYAML, MuJoCo, Gymnasium, `soarm`, `machinekind-twin-api` | the strategies, evaluation, the CPU environments |
 | `pip install "soarm-lab[train]"` | MuJoCo Warp, JAX | GPU training; the JAX trainer will use it |
 | `pip install "soarm-lab[torch]"` | torch | the legacy torch trainer and `soarm-lab convert` |
 
@@ -45,7 +45,7 @@ The twin measures the station: the table and where the arm stands on it, the cam
 Export it from the twin's environment:
 
 ```bash
-lerobot-twin export ~/stations/desk1
+twin export ~/stations/desk1
 ```
 
 The folder holds `scene.xml` (the MuJoCo scene: table, lights, the arm under the prefix `robot/`, cameras
@@ -126,7 +126,7 @@ env = gym.make("SoArmLab/Lift-v0")
 `pyproject.toml` registers the strategies:
 
 ```toml
-[project.entry-points."lerobot_mp.strategies"]
+[project.entry-points."machinekind_twin.strategies"]
 policy = "soarm_lab.strategies.policy:PolicyStrategy"
 ik = "soarm_lab.strategies.ik:IKStrategy"
 ```
@@ -147,7 +147,7 @@ policy:
 
 The twin's `StrategyRunner` claims the arm and calls the strategy at the policy's rate (20 Hz).
 Every target goes through the twin's safety supervisor, in simulation and on hardware.
-The strategy subclasses `lerobot_mp_api.Strategy`. It takes a `RunInfo` and an `Observation` and returns an `Action`.
+The strategy subclasses `machinekind_twin_api.Strategy`. It takes a `RunInfo` and an `Observation` and returns an `Action`.
 It reads these fields of the observation:
 
 - `obs.joints`: measured joints;

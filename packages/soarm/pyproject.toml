@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 # The twin's plugin contracts (numpy only); never the twin itself.
-dependencies = ["lerobot-mp-api>=0.1,<0.2"]
+dependencies = ["machinekind-twin-api>=0.1,<0.2"]
 
 [project.optional-dependencies]
 # Servos driven directly, without LeRobot and torch; also the COM <-> TCP bridge.
@@ -20,10 +20,10 @@ panel = ["pyserial>=3.5", "pyyaml>=6"]
 # Backend `lerobot` (LeRobot 0.6 needs Python 3.12).
 lerobot = ["lerobot[feetech]>=0.6,<0.7; python_version>='3.12'"]
 
-[project.entry-points."lerobot_mp.robots"]
+[project.entry-points."machinekind_twin.robots"]
 so101 = "soarm:ROBOT_DIR"
 
-[project.entry-points."lerobot_mp.backends"]
+[project.entry-points."machinekind_twin.backends"]
 feetech = "soarm.feetech:create"
 lerobot = "soarm.lerobot_backend:create"
 

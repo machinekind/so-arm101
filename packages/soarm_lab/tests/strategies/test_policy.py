@@ -2,7 +2,7 @@
 
 Claiming the arm, STOP and Home belong to the twin's `StrategyRunner`. The strategy's guards are tested
 here without the twin, on the contracts' own `RunInfo`, `Observation` and `ObjectPose`
-(`lerobot_mp_api`). test_policy_in_twin.py runs the same strategy through the twin's runner, including
+(`machinekind_twin_api`). test_policy_in_twin.py runs the same strategy through the twin's runner, including
 the race between a claim and the clutch.
 """
 
@@ -12,7 +12,7 @@ from dataclasses import asdict
 
 import numpy as np
 import pytest
-from lerobot_mp_api.strategy import ObjectPose, Observation, RunInfo
+from machinekind_twin_api.strategy import ObjectPose, Observation, RunInfo
 
 import soarm
 

@@ -31,7 +31,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from lerobot_mp_api.backend import BackendContext, RobotBackend, RobotInfo
+from machinekind_twin_api.backend import BackendContext, RobotBackend, RobotInfo
 
 from .settings import from_mapping
 

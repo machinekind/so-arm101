@@ -4,8 +4,8 @@ import dataclasses
 from importlib import metadata
 
 import pytest
-from lerobot_mp_api.entry_points import STRATEGIES
-from lerobot_mp_api.strategy import Action, Observation, RunInfo
+from machinekind_twin_api.entry_points import STRATEGIES
+from machinekind_twin_api.strategy import Action, Observation, RunInfo
 
 import soarm
 from soarm_lab.robot import load_robot
@@ -44,7 +44,7 @@ def test_callable_entry_points(dist: str, key: tuple[str, str]) -> None:
 
 @pytest.mark.parametrize("name", STRATEGY_NAMES)
 def test_the_strategy_entry_point_is_a_class_with_settings(name: str) -> None:
-    """What the twin's loader checks (`lerobot_mp.twin.strategies.load_strategy`), without the twin."""
+    """What the twin's loader checks (`machinekind_twin.strategies.load_strategy`), without the twin."""
     cls = own_entry_points("soarm-lab")[(STRATEGIES, name)].load()
     assert isinstance(cls, type) and callable(getattr(cls, "act", None))
     assert dataclasses.is_dataclass(cls.settings)
@@ -54,7 +54,7 @@ def test_the_strategy_entry_point_is_a_class_with_settings(name: str) -> None:
 
 @pytest.mark.parametrize("name", STRATEGY_NAMES)
 def test_the_strategy_follows_the_strategy_protocol(name: str) -> None:
-    """`lerobot_mp_api.Strategy`: built as `cls(settings)`, a positive `hz`, an `Action` from `act`."""
+    """`machinekind_twin_api.Strategy`: built as `cls(settings)`, a positive `hz`, an `Action` from `act`."""
     cls = own_entry_points("soarm-lab")[(STRATEGIES, name)].load()
     strategy = cls(cls.settings())
     assert isinstance(strategy.hz, float) and strategy.hz > 0

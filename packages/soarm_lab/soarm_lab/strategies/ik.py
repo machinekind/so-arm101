@@ -1,8 +1,8 @@
-"""Inverse kinematics as a strategy for the twin: `ik` under the `lerobot_mp.strategies` entry points.
+"""Inverse kinematics as a strategy for the twin: `ik` under the `machinekind_twin.strategies` entry points.
 
 The twin finds `IKStrategy` through the entry point, builds `IKSettings` from its config file's `ik:`
 section or the panel's form, and runs the strategy through its `StrategyRunner`, as it runs `policy`.
-Nothing here imports the twin: the contract types come from `lerobot_mp_api.strategy`.
+Nothing here imports the twin: the contract types come from `machinekind_twin_api.strategy`.
 
     # configs/local.yaml of the twin: prefills the panel's form
     ik:
@@ -40,7 +40,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 import numpy as np
-from lerobot_mp_api.strategy import Action, Observation, RunInfo, Strategy
+from machinekind_twin_api.strategy import Action, Observation, RunInfo, Strategy
 
 from ..kinematics import RobotKinematics
 from ..robot import load_robot

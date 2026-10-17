@@ -5,8 +5,8 @@ from importlib import metadata
 from pathlib import Path
 
 import pytest
-from lerobot_mp_api.backend import BackendPlugin, RobotBackend, RobotInfo
-from lerobot_mp_api.entry_points import BACKENDS, ROBOTS
+from machinekind_twin_api.backend import BackendPlugin, RobotBackend, RobotInfo
+from machinekind_twin_api.entry_points import BACKENDS, ROBOTS
 
 #: The distribution's entry points: (group, name) -> value.
 EXPECTED = {

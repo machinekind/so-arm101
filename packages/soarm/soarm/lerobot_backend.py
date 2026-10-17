@@ -17,7 +17,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from lerobot_mp_api.backend import BackendContext, RobotBackend, RobotInfo
+from machinekind_twin_api.backend import BackendContext, RobotBackend, RobotInfo
 
 from .feetech import LINK_LOSS_CYCLES, describe_servo_error
 from .settings import from_mapping

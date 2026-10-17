@@ -10,7 +10,7 @@ on MuJoCo Warp; both compute the observation and the reward with the same functi
 
 The scene is built ONCE (293 ms on a laptop, 111 ms on an RTX A4500); a reset changes only the state
 and fields of the compiled model. The station (table, cameras, base pose) comes from the twin's export
-(`station.Station`, `lerobot-twin export`); by default it is the `sim` station bundled with the package.
+(`station.Station`, `twin export`); by default it is the `sim` station bundled with the package.
 """
 
 from __future__ import annotations

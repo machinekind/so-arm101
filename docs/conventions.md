@@ -2,24 +2,24 @@
 
 ## Dependency rule
 
-- Both packages import the twin's plugin contracts, `lerobot_mp_api`. Neither imports the twin, `lerobot_mp`.
+- Both packages import the twin's plugin contracts, `machinekind_twin_api`. Neither imports the twin, `machinekind_twin`.
 - `soarm_lab` may import `soarm`. `soarm` never imports `soarm_lab`.
 - The twin imports `soarm`. It never imports `soarm_lab`.
 
 The twin and `soarm_lab` meet only through data and entry points:
 
-- the twin exports the measured station as a folder (`lerobot-twin export`): `scene.xml`, `assets/`, `station.json`;
-- the twin finds the lab's strategies under the `lerobot_mp.strategies` entry point and runs them through its `StrategyRunner`.
+- the twin exports the measured station as a folder (`twin export`): `scene.xml`, `assets/`, `station.json`;
+- the twin finds the lab's strategies under the `machinekind_twin.strategies` entry point and runs them through its `StrategyRunner`.
 
-The contracts are a base dependency of both packages, `lerobot-mp-api>=0.1,<0.2`. They need only numpy.
+The contracts are a base dependency of both packages, `machinekind-twin-api>=0.1,<0.2`. They need only numpy.
 The twin is a dev dependency. Tests that run a package through the twin's loaders, factory and runner are
-marked `twin` and skip when it is not installed. A test that imports only `lerobot_mp_api` needs no marker.
+marked `twin` and skip when it is not installed. A test that imports only `machinekind_twin_api` needs no marker.
 Each package's `tests/test_dependency_rule.py` checks every import in the package's source, also one under
-`TYPE_CHECKING`. It checks that every test module that imports `lerobot_mp` is marked `twin`.
-The checks compare whole package names, so `lerobot_mp_api` never counts as `lerobot_mp`.
-The test also collects the package's tests with `-m "not twin"` where `lerobot_mp` cannot be imported.
-The lab's test also imports every lab module in a fresh interpreter. It checks that `lerobot_mp_api` got
-loaded and no `lerobot_mp` module did.
+`TYPE_CHECKING`. It checks that every test module that imports `machinekind_twin` is marked `twin`.
+The checks compare whole package names, so `machinekind_twin_api` never counts as `machinekind_twin`.
+The test also collects the package's tests with `-m "not twin"` where `machinekind_twin` cannot be imported.
+The lab's test also imports every lab module in a fresh interpreter. It checks that `machinekind_twin_api` got
+loaded and no `machinekind_twin` module did.
 
 Running a policy needs no torch.
 The strategies, the policy file, evaluation and the `soarm-lab` commands other than `train` and `convert`
@@ -39,7 +39,7 @@ A test that runs a module through the twin's own code may get a file of its own 
 `tests/strategies/test_policy_in_twin.py` sits next to `tests/strategies/test_policy.py`.
 
 A test module that imports the twin declares `pytestmark = pytest.mark.twin`.
-It calls `pytest.importorskip("lerobot_mp")` before its twin imports, so it skips without the twin.
+It calls `pytest.importorskip("machinekind_twin")` before its twin imports, so it skips without the twin.
 The root `conftest.py` skips every test marked `twin` when the twin is not installed.
 It also skips tests marked `render` where MuJoCo cannot open an OpenGL context.
 
@@ -67,7 +67,7 @@ A helper that several test modules use is a module of its own on pytest's `pytho
 | Servo positions | ticks, 0..4095 per turn |
 
 These are LeRobot's units. Conversion to MJCF units happens in `RobotKinematics` and nowhere else:
-the twin's `lerobot_mp.twin.kinematics` and `soarm_lab.kinematics`.
+the twin's `machinekind_twin.kinematics` and `soarm_lab.kinematics`.
 Joint zero sits at mid-range, tick 2048 (`center_ticks`). The MJCF uses the same zero
 (LeRobot's new calibration convention).
 
@@ -89,21 +89,21 @@ Names are identical in `robot.yaml`, the MJCF, LeRobot and the twin.
 ## Contracts
 
 The twin owns the contracts these packages follow.
-The plugin contracts are the package `lerobot-mp-api` (see the root README for how it installs).
+The plugin contracts are the package `machinekind-twin-api` (see the root README for how it installs).
 
-- The `robot.yaml` schema is `RobotSpec` in `lerobot_mp.twin.robots`. `load_robot(folder)` checks a folder strictly.
-- The backend contract is `lerobot_mp_api.backend`: `BackendContext`, `BackendPlugin`, `RobotBackend` and `RobotInfo`.
+- The `robot.yaml` schema is `RobotSpec` in `machinekind_twin.robots`. `load_robot(folder)` checks a folder strictly.
+- The backend contract is `machinekind_twin_api.backend`: `BackendContext`, `BackendPlugin`, `RobotBackend` and `RobotInfo`.
   A backend factory `create(ctx)` takes a `BackendContext` and returns the backend.
   `FeetechArm` and `LeRobotArm` subclass `RobotBackend`, so the twin uses them without its `PluginBackend` wrapper.
-- `lerobot_mp_api.entry_points` names the entry point groups: `ROBOTS`, `BACKENDS` and `STRATEGIES`.
-  `packages/soarm/pyproject.toml` registers the robot folder under `lerobot_mp.robots` (`ROBOTS`)
-  and the backend factories under `lerobot_mp.backends` (`BACKENDS`).
-- The strategy contract is `lerobot_mp_api.strategy`: `Strategy`, `RunInfo`, `Observation`, `ObjectPose` and `Action`.
-  The twin builds a strategy's settings dataclass strictly (`lerobot_mp.twin.strategies`).
+- `machinekind_twin_api.entry_points` names the entry point groups: `ROBOTS`, `BACKENDS` and `STRATEGIES`.
+  `packages/soarm/pyproject.toml` registers the robot folder under `machinekind_twin.robots` (`ROBOTS`)
+  and the backend factories under `machinekind_twin.backends` (`BACKENDS`).
+- The strategy contract is `machinekind_twin_api.strategy`: `Strategy`, `RunInfo`, `Observation`, `ObjectPose` and `Action`.
+  The twin builds a strategy's settings dataclass strictly (`machinekind_twin.strategies`).
   Every strategy here subclasses `Strategy[ItsSettings]`, and `uv run pyright` checks it against the contract.
   `soarm_lab.strategies.policy.PolicyStrategy` takes `RunInfo` and `Observation` and returns an `Action`.
   `soarm_lab.strategies.ik.IKStrategy` does the same.
-- `packages/soarm_lab/pyproject.toml` registers these strategies under `lerobot_mp.strategies` (`STRATEGIES`)
+- `packages/soarm_lab/pyproject.toml` registers these strategies under `machinekind_twin.strategies` (`STRATEGIES`)
   as `policy` and `ik`.
-- The station export is `Workspace.export` in the twin (`lerobot-twin export`). `soarm_lab.station.Station` reads it.
+- The station export is `Workspace.export` in the twin (`twin export`). `soarm_lab.station.Station` reads it.
   `soarm_lab.robot.RobotSpec` reads only the `robot.yaml` fields the lab uses and skips the others.

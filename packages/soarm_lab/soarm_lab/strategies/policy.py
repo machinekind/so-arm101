@@ -1,11 +1,11 @@
-"""A lab RL policy as a strategy for the twin: `policy` under the `lerobot_mp.strategies` entry points.
+"""A lab RL policy as a strategy for the twin: `policy` under the `machinekind_twin.strategies` entry points.
 
 The twin finds `PolicyStrategy` through the entry point in this package's `pyproject.toml`, builds
 `PolicySettings` from its config file's `policy:` section or the panel's form, creates the strategy as
 `PolicyStrategy(settings)` and runs it through its `StrategyRunner`: the runner claims the arm, builds
 an observation every tick and sends the strategy's joint targets through the safety supervisor, in
 simulation and on hardware alike. Nothing here imports the twin. `Strategy`, `RunInfo`, `Observation`,
-`ObjectPose` and `Action` come from its plugin contracts, `lerobot_mp_api.strategy`. The strategy reads
+`ObjectPose` and `Action` come from its plugin contracts, `machinekind_twin_api.strategy`. The strategy reads
 `obs.joints`, `obs.command`, `obs.goal`, `obs.objects` and `obs.t`, and `run.robot`, `run.folder`,
 `run.limits` and `run.simulated`. It answers with an `Action`.
 
@@ -48,7 +48,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 import numpy as np
-from lerobot_mp_api.strategy import Action, ObjectPose, Observation, RunInfo, Strategy
+from machinekind_twin_api.strategy import Action, ObjectPose, Observation, RunInfo, Strategy
 
 from ..kinematics import RobotKinematics
 from ..rl import task as tk

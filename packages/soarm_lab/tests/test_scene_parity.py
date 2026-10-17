@@ -6,10 +6,10 @@ import pytest
 
 pytestmark = pytest.mark.twin
 pytest.importorskip("mujoco")
-pytest.importorskip("lerobot_mp")
+pytest.importorskip("machinekind_twin")
 
-from lerobot_mp.twin import scene as twin_scene  # noqa: E402
-from lerobot_mp.twin.workspace import Workspace  # noqa: E402
+from machinekind_twin import scene as twin_scene  # noqa: E402
+from machinekind_twin.workspace import Workspace  # noqa: E402
 
 from soarm_lab.station import Box, Station  # noqa: E402
 

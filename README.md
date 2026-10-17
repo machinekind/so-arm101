@@ -12,10 +12,10 @@ This repository is one uv workspace with two Python packages:
   The training stack is JAX and MuJoCo Warp. Until the JAX trainer is written, training runs a legacy
   torch trainer. Running a policy needs numpy only.
 
-The digital twin ([digital_twin_training](https://github.com/machinekind/digital_twin_training), package `lerobot_mp`)
+The digital twin ([digital_twin_training](https://github.com/machinekind/digital_twin_training), package `machinekind_twin`)
 measures the rig and runs strategies through its safety supervisor.
 The twin loads both packages through entry points.
-Both packages import the twin's plugin contracts, `lerobot-mp-api` (package `lerobot_mp_api`), and never the twin.
+Both packages import the twin's plugin contracts, `machinekind-twin-api` (package `machinekind_twin_api`), and never the twin.
 The contracts need only numpy.
 [docs/conventions.md](docs/conventions.md) has the full dependency rule.
 
@@ -65,15 +65,15 @@ so-arm101/
 ## How the twin uses the packages
 
 The twin finds both packages through entry points.
-`lerobot_mp_api.entry_points` names the groups: `ROBOTS`, `BACKENDS` and `STRATEGIES`.
+`machinekind_twin_api.entry_points` names the groups: `ROBOTS`, `BACKENDS` and `STRATEGIES`.
 
 | Group | Name | Target |
 |---|---|---|
-| `lerobot_mp.robots` | `so101` | `soarm:ROBOT_DIR`, the robot folder |
-| `lerobot_mp.backends` | `feetech` | `soarm.feetech:create` |
-| `lerobot_mp.backends` | `lerobot` | `soarm.lerobot_backend:create` |
-| `lerobot_mp.strategies` | `policy` | `soarm_lab.strategies.policy:PolicyStrategy` |
-| `lerobot_mp.strategies` | `ik` | `soarm_lab.strategies.ik:IKStrategy` |
+| `machinekind_twin.robots` | `so101` | `soarm:ROBOT_DIR`, the robot folder |
+| `machinekind_twin.backends` | `feetech` | `soarm.feetech:create` |
+| `machinekind_twin.backends` | `lerobot` | `soarm.lerobot_backend:create` |
+| `machinekind_twin.strategies` | `policy` | `soarm_lab.strategies.policy:PolicyStrategy` |
+| `machinekind_twin.strategies` | `ik` | `soarm_lab.strategies.ik:IKStrategy` |
 
 The panel offers the robot `so101` with the `feetech` and `lerobot` connections.
 The panel's Strategies tab lists `policy`, a trained policy, and `ik`, the TCP to a goal by inverse kinematics.
@@ -85,7 +85,7 @@ The lab trains and evaluates on a station the twin measured: the table and where
 the cameras and the arm's dynamics. Export it from the twin's environment:
 
 ```
-lerobot-twin export ~/stations/desk1
+twin export ~/stations/desk1
 ```
 
 The folder holds:
@@ -111,7 +111,7 @@ In Python, `soarm_lab.station.Station.load(folder)` reads the folder with plain 
 uv sync
 ```
 
-This installs `soarm` and `soarm-lab` in editable mode with `lerobot-mp-api`, pyserial, PyYAML, MuJoCo, Gymnasium,
+This installs `soarm` and `soarm-lab` in editable mode with `machinekind-twin-api`, pyserial, PyYAML, MuJoCo, Gymnasium,
 pytest, ruff and pyright. It installs neither torch nor the twin.
 
 ```
@@ -120,13 +120,13 @@ uv sync --group twin     # the twin, for the tests marked `twin`; needs GitHub a
 uv sync --all-groups     # everything, as CI runs it
 ```
 
-Both packages depend on `lerobot-mp-api>=0.1,<0.2`. The package is not published yet.
-It lives in the twin's repository under `packages/lerobot_mp_api`.
+Both packages depend on `machinekind-twin-api>=0.1,<0.2`. The package is not published yet.
+It lives in the twin's repository under `packages/machinekind_twin_api`.
 `[tool.uv.sources]` in `pyproject.toml` installs it from there at a pinned commit, and the twin from the same commit.
 pip ignores that table. Outside the workspace, install the contracts from git first:
 
 ```
-pip install "lerobot-mp-api @ git+https://github.com/machinekind/digital_twin_training.git@f5331e9d93f633df1b1309d7ff8a0bfeca4d90a0#subdirectory=packages/lerobot_mp_api"
+pip install "machinekind-twin-api @ git+https://github.com/machinekind/digital_twin_training.git@941fc6b170aaa24b110c1ca31e1b7ddbca2515c0#subdirectory=packages/machinekind_twin_api"
 ```
 
 GPU training needs MuJoCo Warp and, until the JAX trainer exists, a CUDA build of torch.

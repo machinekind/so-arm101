@@ -13,7 +13,7 @@ import threading
 import time
 
 import pytest
-from lerobot_mp_api.backend import BackendContext
+from machinekind_twin_api.backend import BackendContext
 
 from fake_bus import REST_TICKS, FakeBusLink
 from soarm import serial_bridge

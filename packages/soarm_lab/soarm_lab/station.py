@@ -1,6 +1,6 @@
 """A measured station, handed over by the twin as data: `scene.xml`, `assets/` and `station.json`.
 
-The twin writes such a folder with `lerobot-twin export <folder>`:
+The twin writes such a folder with `twin export <folder>`:
 
 * `scene.xml`: the station's MuJoCo scene (floor, table, lights, the arm under the prefix `robot/`,
   every enabled camera with a pose and its full K, the arm's physics options), `meshdir="assets/"`;
@@ -113,7 +113,7 @@ class Station:
 
     @classmethod
     def load(cls, where: str | Path = "sim") -> Station:
-        """A station folder (`lerobot-twin export <folder>`), or the name of a bundled station."""
+        """A station folder (`twin export <folder>`), or the name of a bundled station."""
         folder = resolve(where)
         data = json.loads((folder / STATION_FILE).read_text(encoding="utf-8"))
         if not isinstance(data, dict):
@@ -263,14 +263,14 @@ def resolve(where: str | Path) -> Path:
     if (folder / STATION_FILE).is_file():
         if not (folder / SCENE_FILE).is_file():
             raise FileNotFoundError(f"{folder}: no {SCENE_FILE}; export the station again "
-                                    "(`lerobot-twin export`)")
+                                    "(`twin export`)")
         return folder
     bundled = STATIONS_DIR / str(where)
     if folder.name == str(where) and (bundled / STATION_FILE).is_file():
         return bundled
     raise FileNotFoundError(f"No station {str(where)!r}: neither a folder with {STATION_FILE} nor a "
                             f"bundled station ({', '.join(stations())}). "
-                            "Export one with `lerobot-twin export <folder>`.")
+                            "Export one with `twin export <folder>`.")
 
 
 def _nominal_K(width: int, height: int, hfov_deg: float = NOMINAL_HFOV_DEG) -> np.ndarray:

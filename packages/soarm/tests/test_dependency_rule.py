@@ -1,6 +1,6 @@
-"""`soarm` imports neither the twin (`lerobot_mp`) nor `soarm_lab`; it imports the twin's contracts,
-`lerobot_mp_api`. A test that imports the twin is marked `twin`; the others run without it, also one that
-imports the contracts."""
+"""`soarm` imports neither the twin (`machinekind_twin`) nor `soarm_lab`; it imports the twin's contracts,
+`machinekind_twin_api`. A test that imports the twin is marked `twin`; the others run without it, also one
+that imports the contracts."""
 
 from __future__ import annotations
 
@@ -14,9 +14,9 @@ import pytest
 import soarm
 
 #: Top-level modules soarm's source may not import.
-FORBIDDEN = ("lerobot_mp", "soarm_lab")
+FORBIDDEN = ("machinekind_twin", "soarm_lab")
 #: The twin's plugin contracts: allowed, and no twin.
-CONTRACTS = "lerobot_mp_api"
+CONTRACTS = "machinekind_twin_api"
 ROOT = Path(soarm.__file__).parent
 TESTS = Path(__file__).parent
 
@@ -39,7 +39,8 @@ def imports(path: Path) -> tuple[set[str], list[int]]:
 
 
 def top(module: str) -> str:
-    """The top-level package of a dotted module name: `lerobot_mp_api.backend` -> `lerobot_mp_api`."""
+    """The top-level package of a dotted module name:
+    `machinekind_twin_api.backend` -> `machinekind_twin_api`."""
     return module.split(".")[0]
 
 
@@ -48,9 +49,10 @@ def forbidden(modules: set[str]) -> set[str]:
 
 
 def test_the_contracts_are_not_the_twin() -> None:
-    """The check compares whole package names: `lerobot_mp_api` starts with `lerobot_mp` and is allowed."""
-    assert forbidden({"lerobot_mp", "lerobot_mp.robot.base", "soarm_lab.cli"}) == {
-        "lerobot_mp", "lerobot_mp.robot.base", "soarm_lab.cli"}
+    """The check compares whole package names: `machinekind_twin_api` starts with `machinekind_twin`
+    and is allowed."""
+    assert forbidden({"machinekind_twin", "machinekind_twin.backends.base", "soarm_lab.cli"}) == {
+        "machinekind_twin", "machinekind_twin.backends.base", "soarm_lab.cli"}
     assert forbidden({CONTRACTS, f"{CONTRACTS}.backend", "soarm.feetech"}) == set()
     assert f"{CONTRACTS}.backend" in imports(ROOT / "feetech.py")[0]
 
@@ -64,13 +66,13 @@ def test_no_forbidden_imports(path: Path) -> None:
 
 
 def twin_imports(path: Path) -> list[str]:
-    """The `lerobot_mp` modules `path` imports, by an import statement or `pytest.importorskip`."""
+    """The `machinekind_twin` modules `path` imports, by an import statement or `pytest.importorskip`."""
     modules = imports(path)[0]
     for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
         if (isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "importorskip"
                 and node.args and isinstance(node.args[0], ast.Constant)):
             modules.add(str(node.args[0].value))
-    return sorted(m for m in modules if top(m) == "lerobot_mp")
+    return sorted(m for m in modules if top(m) == "machinekind_twin")
 
 
 def marked_twin(path: Path) -> bool:
@@ -93,9 +95,9 @@ def test_a_test_that_imports_the_twin_is_marked_twin() -> None:
     assert unmarked == []
 
 
-#: pytest in a fresh interpreter where `import lerobot_mp` fails as if the twin were not installed;
-#: `import lerobot_mp_api` works.
-WITHOUT_TWIN = ("import sys; sys.modules['lerobot_mp'] = None\n"
+#: pytest in a fresh interpreter where `import machinekind_twin` fails as if the twin were not installed;
+#: `import machinekind_twin_api` works.
+WITHOUT_TWIN = ("import sys; sys.modules['machinekind_twin'] = None\n"
                 "import pytest; sys.exit(pytest.main(sys.argv[1:]))")
 
 
