@@ -56,17 +56,15 @@ class RobotDescription:
     limits: dict[str, tuple[float, float]]
     max_vel: dict[str, float]
     home: dict[str, float]
-    labels: dict[str, str]
 
     @classmethod
     def load(cls, folder: Path) -> RobotDescription:
         try:
             import yaml
         except ImportError as exc:  # pragma: no cover - depends on the environment
-            raise RuntimeError('soarm-panel wymaga pyyaml:  pip install "soarm[panel]"') from exc
+            raise RuntimeError('soarm-panel needs pyyaml:  pip install "soarm[panel]"') from exc
 
         data = yaml.safe_load((Path(folder) / "robot.yaml").read_text(encoding="utf-8"))
-        labels = data.get("joint_labels") or {}
         return cls(
             name=data["name"],
             joints=tuple(data["joints"]),
@@ -74,7 +72,6 @@ class RobotDescription:
             limits={name: tuple(pair) for name, pair in data["limits"].items()},
             max_vel=dict(data["max_vel"]),
             home=dict(data.get("home") or {}),
-            labels={name: labels[name][1] if name in labels else name for name in data["joints"]},
         )
 
     def context(self, port: str, settings: dict[str, Any]) -> BackendContext:
@@ -96,7 +93,7 @@ class PanelController:
         self.description = description
         self._lock = threading.Lock()
         self._halt = threading.Event()
-        self._thread = threading.Thread(target=self._run, name="panel-petla", daemon=True)
+        self._thread = threading.Thread(target=self._run, name="panel-loop", daemon=True)
 
         eeprom = arm.joint_limits()
         self.limits: dict[str, tuple[float, float]] = {}
@@ -121,13 +118,13 @@ class PanelController:
     def jog(self, joint: str, delta: float) -> None:
         with self._lock:
             if joint not in self.limits:
-                raise PanelError(f"Nieznany staw: {joint}")
+                raise PanelError(f"Unknown joint: {joint}")
             self._aim({joint: self.target[joint] + delta})
 
     def set_target(self, joint: str, value: float) -> None:
         with self._lock:
             if joint not in self.limits:
-                raise PanelError(f"Nieznany staw: {joint}")
+                raise PanelError(f"Unknown joint: {joint}")
             self._aim({joint: value})
 
     def home(self) -> None:
@@ -148,14 +145,14 @@ class PanelController:
                 self.measured = self.arm.read_joints()
                 self._hold()
                 if not self._send(self.measured):
-                    raise PanelError("Cel nie doszedl do serw - moment zostaje wylaczony.")
+                    raise PanelError("The goal did not reach the servos; torque stays off.")
             for dev_id in self.arm.ids.values():
                 self.arm.bus.write(dev_id, ADDR_TORQUE_ENABLE, 1 if on else 0, 1)
             self.torque = on
 
     def set_speed(self, value: float) -> None:
         if value <= 0.0:
-            raise PanelError("Predkosc musi byc dodatnia.")
+            raise PanelError("The speed must be positive.")
         with self._lock:
             self.speed = value
 
@@ -168,7 +165,6 @@ class PanelController:
                 "port": self.arm.port,
                 "joints": list(self.description.joints),
                 "gripper": self.description.gripper,
-                "labels": self.description.labels,
                 "limits": self.limits,
                 "measured": dict(self.measured),
                 "command": dict(self.command),
@@ -189,7 +185,7 @@ class PanelController:
             self.measured = self.arm.read_joints()
 
             if now - self.last_heartbeat > HEARTBEAT_TIMEOUT_S and self.command != self.target:
-                logger.warning("Strona panelu nie odpowiada - zatrzymuje ruch.")
+                logger.warning("The panel page stopped polling; holding the arm.")
                 self._hold()
 
             if self.torque:
@@ -217,24 +213,24 @@ class PanelController:
             try:
                 self.tick(now - last)
             except Exception as exc:
-                logger.exception("Blad petli sterowania panelu")
+                logger.exception("The panel control loop failed")
                 with self._lock:
-                    self.faults = [f"blad petli sterowania: {exc}"]
+                    self.faults = [f"control loop error: {exc}"]
             last = now
             self._halt.wait(max(0.0, 1.0 / TICK_HZ - (time.monotonic() - now)))
 
     # The methods below run under the lock.
     def _aim(self, goals: dict[str, float]) -> None:
         if not self.torque:
-            raise PanelError("Moment jest wylaczony - wlacz go, zeby ruszac ramieniem.")
+            raise PanelError("Torque is off; turn it on to move the arm.")
 
         self.clip = None
         for joint, wanted in goals.items():
             low, high = self.limits[joint]
             self.target[joint] = min(max(wanted, low), high)
             if self.target[joint] != wanted:
-                label = self.description.labels[joint]
-                self.clip = f"przycieto do limitu: {label} {wanted:.1f} -> {self.target[joint]:.1f}"
+                name = joint.replace("_", " ")
+                self.clip = f"clipped to the limit: {name} {wanted:.1f} -> {self.target[joint]:.1f}"
 
     def _hold(self) -> None:
         self.command = dict(self.measured)
@@ -287,21 +283,21 @@ class PanelHandler(BaseHTTPRequestHandler):
         elif path == "/api/state":
             self._answer(HTTPStatus.OK, self.server.controller.state())
         else:
-            self._answer(HTTPStatus.NOT_FOUND, {"error": f"nie ma {path}"})
+            self._answer(HTTPStatus.NOT_FOUND, {"error": f"not found: {path}"})
 
     def do_POST(self) -> None:
         assert isinstance(self.server, PanelServer)
         # A cross-site page may send a form or text/plain POST without asking; a JSON one needs a CORS
         # preflight this server never grants. So no other website in the browser can move the arm.
         if self.headers.get_content_type() != "application/json":
-            self._answer(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "oczekiwano application/json"})
+            self._answer(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "expected application/json"})
             return
 
         try:
             length = int(self.headers.get("Content-Length") or 0)
             body = json.loads(self.rfile.read(length)) if length > 0 else {}
         except ValueError as exc:
-            self._answer(HTTPStatus.BAD_REQUEST, {"error": f"Zly JSON: {exc}"})
+            self._answer(HTTPStatus.BAD_REQUEST, {"error": f"Bad JSON: {exc}"})
             return
 
         try:
@@ -328,7 +324,7 @@ class PanelHandler(BaseHTTPRequestHandler):
 def run_command(controller: PanelController, command: str, body: Any) -> None:
     """Runs `POST /api/<command>` with its JSON body. Raises PanelError for a refused or unknown one."""
     if not isinstance(body, dict):
-        raise PanelError("Oczekiwano obiektu JSON.")
+        raise PanelError("Expected a JSON object.")
 
     if command == "jog":
         controller.jog(_arg(body, "joint", str), _arg(body, "delta", float))
@@ -343,7 +339,7 @@ def run_command(controller: PanelController, command: str, body: Any) -> None:
     elif command == "speed":
         controller.set_speed(_arg(body, "value", float))
     else:
-        raise PanelError(f"Nieznane polecenie: {command}", HTTPStatus.NOT_FOUND)
+        raise PanelError(f"Unknown command: {command}", HTTPStatus.NOT_FOUND)
 
 
 def _arg(body: dict[str, Any], key: str, kind: type) -> Any:
@@ -355,20 +351,20 @@ def _arg(body: dict[str, Any], key: str, kind: type) -> Any:
             return float(value)
     elif isinstance(value, kind):
         return value
-    raise PanelError(f"Zle pole `{key}`: {value!r} (oczekiwano {kind.__name__}).")
+    raise PanelError(f"Bad field `{key}`: {value!r} (expected {kind.__name__}).")
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="soarm-panel", description="Panel testowy ramienia w przegladarce: "
-                                     "ruch stawow i chwytaka, Dom, STOP i moment.")
+    parser = argparse.ArgumentParser(prog="soarm-panel", description="A browser test panel for the arm: "
+                                     "joints and gripper, Home, STOP and torque.")
     parser.add_argument("--port", required=True,
-                        help="port szeregowy ramienia, np. COM5, /dev/ttyACM0 albo socket://host:5555")
-    parser.add_argument("--baudrate", type=int, default=1_000_000, help="predkosc portu (domyslnie 1 Mbaud)")
+                        help="the arm's serial port, e.g. COM5, /dev/ttyACM0 or socket://host:5555")
+    parser.add_argument("--baudrate", type=int, default=1_000_000, help="baud rate (default 1 Mbaud)")
     parser.add_argument("--listen", default="127.0.0.1:8765",
-                        help="gdzie nasluchiwac; domyslnie `127.0.0.1:8765`, czyli tylko lokalnie")
+                        help="where to listen; default `127.0.0.1:8765`, this machine only")
     parser.add_argument("--robot", type=Path, default=ROBOT_DIR,
-                        help="folder z robot.yaml (domyslnie SO-101 z pakietu)")
-    parser.add_argument("--no-browser", action="store_true", help="nie otwieraj przegladarki")
+                        help="the folder with robot.yaml (default: the SO-101 in the package)")
+    parser.add_argument("--no-browser", action="store_true", help="do not open a browser")
     return parser
 
 
@@ -379,7 +375,7 @@ def main(argv: list[str] | None = None) -> int:
 
     host, tcp_port = split_listen(args.listen)
     if host not in ("127.0.0.1", "localhost"):
-        logger.warning("Panel slucha na %s. Kazdy, kto dosiegnie tego portu, moze ruszac ramieniem.", host)
+        logger.warning("The panel listens on %s. Anyone who can reach this port can move the arm.", host)
 
     # On a failed start the process exit closes the port; torque stays on, as disconnect leaves it.
     try:
@@ -389,20 +385,20 @@ def main(argv: list[str] | None = None) -> int:
         controller = PanelController(arm, description)
         server = PanelServer((host, tcp_port), controller)
     except (RuntimeError, ValueError, OSError) as exc:
-        logger.error("Panel nie wystartowal: %s", exc)
+        logger.error("The panel did not start: %s", exc)
         return 2
 
     controller.start()
     shown_host = "127.0.0.1" if host in ("0.0.0.0", "") else host
     url = f"http://{shown_host}:{server.server_port}/"
-    logger.info("Panel: %s  (Ctrl-C konczy; ramie zostaje z wlaczonym momentem)", url)
+    logger.info("Panel: %s  (Ctrl-C ends it; the arm keeps torque on)", url)
     if not args.no_browser:
         webbrowser.open(url)
 
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        logger.info("Zatrzymano.")
+        logger.info("Stopped.")
     finally:
         server.server_close()
         controller.close()

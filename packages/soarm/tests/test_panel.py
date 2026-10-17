@@ -56,7 +56,6 @@ def panel(link: FakeBusLink, so101_context) -> PanelController:
 
 def test_description(so101_context):
     assert DESCRIPTION.context("COM_TEST", {}) == so101_context()
-    assert DESCRIPTION.labels["wrist_flex"] == "Nadgarstek - zgiecie"
 
 
 def test_eeprom_narrows_the_limit(so101_context):
@@ -70,7 +69,7 @@ def test_eeprom_narrows_the_limit(so101_context):
 def test_clip_notice(panel):
     panel.jog("shoulder_pan", 500.0)
     assert panel.target["shoulder_pan"] == 105.0
-    assert panel.clip == "przycieto do limitu: Obrot podstawy 500.0 -> 105.0"
+    assert panel.clip == "clipped to the limit: shoulder pan 500.0 -> 105.0"
 
     panel.jog("shoulder_pan", -10.0)
     assert panel.clip is None

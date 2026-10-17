@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="pl">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Panel SO-101</title>
+<title>SO-101 panel</title>
 <style>
   :root {
     --bg: #f3f3f0; --card: #ffffff; --fg: #1c1c1a; --muted: #6a6a64; --line: #d8d8d2;
@@ -43,7 +43,7 @@
 </head>
 <body>
 <header>
-  <span id="link">łączenie…</span>
+  <span id="link">connecting…</span>
   <span id="hz" class="small"></span>
   <span id="torque-state"></span>
   <span id="clip"></span>
@@ -51,10 +51,10 @@
 </header>
 <ul id="faults"></ul>
 <div class="bar">
-  <label>Krok <select id="step"><option>1</option><option selected>5</option><option>15</option></select> °</label>
-  <label>Prędkość <select id="speed"><option>10</option><option selected>30</option><option>60</option></select> °/s</label>
-  <button id="home" class="move" disabled>Dom</button>
-  <button id="torque" disabled>Moment wył.</button>
+  <label>Step <select id="step"><option>1</option><option selected>5</option><option>15</option></select> °</label>
+  <label>Speed <select id="speed"><option>10</option><option selected>30</option><option>60</option></select> °/s</label>
+  <button id="home" class="move" disabled>Home</button>
+  <button id="torque" disabled>Torque off</button>
   <button id="stop" title="STOP (Esc)">STOP</button>
 </div>
 <main id="joints"></main>
@@ -75,8 +75,13 @@ async function post(command, body = {}) {
     $('error').textContent = reply.ok ? '' : data.error;
     return data;
   } catch (err) {
-    $('error').textContent = 'brak połączenia z serwerem';
+    $('error').textContent = 'no connection to the server';
   }
+}
+
+function jointTitle(name) {
+  const words = name.replaceAll('_', ' ');
+  return words.charAt(0).toUpperCase() + words.slice(1);
 }
 
 function button(text, onClick) {
@@ -94,7 +99,7 @@ function buildJoint(s, name) {
   col.dataset.name = name;
   col.innerHTML = '<h2></h2><div class="measured"></div><input type="range" class="move" step="0.5">'
     + '<div class="row"></div><div class="small target"></div><div class="small range"></div>';
-  col.querySelector('h2').textContent = s.labels[name];
+  col.querySelector('h2').textContent = jointTitle(name);
   const [low, high] = s.limits[name];
   const slider = col.querySelector('input');
   slider.min = low;
@@ -102,12 +107,12 @@ function buildJoint(s, name) {
   slider.addEventListener('change', () => post('target', {joint: name, value: Number(slider.value)}));
   const jog = (sign) => post('jog', {joint: name, delta: sign * (gripper ? GRIPPER_STEP : Number($('step').value))});
   col.querySelector('.row').append(button('−', () => jog(-1)), button('+', () => jog(1)));
-  col.querySelector('.range').textContent = `zakres ${fmt(low)} … ${fmt(high)}`;
+  col.querySelector('.range').textContent = `range ${fmt(low)} … ${fmt(high)}`;
   if (gripper) {
     const row = document.createElement('div');
     row.className = 'row';
-    row.append(button('Zamknij', () => post('target', {joint: name, value: 0})),
-               button('Otwórz', () => post('target', {joint: name, value: 100})));
+    row.append(button('Close', () => post('target', {joint: name, value: 0})),
+               button('Open', () => post('target', {joint: name, value: 100})));
     col.append(row);
   }
   return col;
@@ -117,12 +122,12 @@ function render(s) {
   if (!$('joints').children.length) {
     $('joints').append(...s.joints.map((name) => buildJoint(s, name)));
   }
-  $('link').textContent = `${s.robot} na ${s.port}`;
+  $('link').textContent = `connected to ${s.robot} on ${s.port}`;
   $('link').className = 'ok';
-  $('hz').textContent = `pętla ${s.loop_hz.toFixed(0)} Hz`;
-  $('torque-state').textContent = s.torque ? 'moment włączony' : 'moment wyłączony';
+  $('hz').textContent = `loop ${s.loop_hz.toFixed(0)} Hz`;
+  $('torque-state').textContent = s.torque ? 'torque on' : 'torque off';
   $('torque-state').className = s.torque ? 'ok' : 'bad';
-  $('torque').textContent = s.torque ? 'Moment wył.' : 'Moment wł.';
+  $('torque').textContent = s.torque ? 'Torque off' : 'Torque on';
   $('torque').classList.toggle('off', s.torque);
   $('clip').textContent = s.clip || '';
   $('faults').replaceChildren(...s.faults.map((text) => {
@@ -134,7 +139,7 @@ function render(s) {
   for (const col of $('joints').children) {
     const name = col.dataset.name;
     col.querySelector('.measured').textContent = fmt(s.measured[name]);
-    col.querySelector('.target').textContent = `cel ${fmt(s.target[name])} · rozkaz ${fmt(s.command[name])}`;
+    col.querySelector('.target').textContent = `target ${fmt(s.target[name])} · command ${fmt(s.command[name])}`;
     const slider = col.querySelector('input');
     if (!slider.matches(':active')) slider.value = s.target[name];
   }
@@ -145,7 +150,7 @@ function enable() {
   for (const el of document.querySelectorAll('.move')) el.disabled = !movable;
   $('torque').disabled = !online;
   if (!online) {
-    $('link').textContent = 'brak połączenia z serwerem';
+    $('link').textContent = 'no connection to the server';
     $('link').className = 'bad';
   }
 }
@@ -169,7 +174,7 @@ $('home').addEventListener('click', () => post('home'));
 $('speed').addEventListener('change', () => post('speed', {value: Number($('speed').value)}));
 $('torque').addEventListener('click', () => {
   if (!state) return;
-  if (state.torque && !confirm('Wyłączyć moment? Ramię opadnie pod własnym ciężarem - podtrzymaj je.')) return;
+  if (state.torque && !confirm('Turn torque off? The arm will drop under its own weight. Support it first.')) return;
   post('torque', {on: !state.torque});
 });
 document.addEventListener('keydown', (event) => { if (event.key === 'Escape') post('stop'); });

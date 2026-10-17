@@ -60,9 +60,9 @@ soarm-panel --port COM5 --listen 127.0.0.1:8765 --no-browser
 ```
 
 Each joint has a column with its measured position, a slider for the target, and minus and plus buttons.
-The step is 1, 5 or 15 degrees. The gripper moves 10 units per press and has Zamknij and Otwórz (close, open).
+The step is 1, 5 or 15 degrees. The gripper moves 10 units per press and has Close and Open.
 The speed is 10, 30 or 60 degrees per second, never above the joint's `max_vel` in `robot.yaml`.
-Dom (home), STOP and Moment (torque) act on the whole arm.
+Home, STOP and Torque act on the whole arm.
 The header shows the port, the loop rate, the torque state, servo faults and the last target cut to a limit.
 
 Targets stay inside the joint's limit from `robot.yaml`, narrowed to the servo's own EEPROM limit.
@@ -71,7 +71,7 @@ A target outside it is cut to the limit, and the page says so.
 STOP, or Esc on the page, holds the arm where it stands, with torque on.
 Closing the page does the same, and so does losing the page for 1.5 s while a joint is moving.
 Ctrl-C ends the command and leaves torque on.
-Only the Moment button turns torque off. The arm then drops under its own weight, so support it first.
+Only the Torque button turns torque off. The arm then drops under its own weight, so support it first.
 Turning torque back on first sets each servo's goal to where the arm stands, so the arm does not jump.
 
 The panel listens on 127.0.0.1 unless `--listen` says otherwise. Anyone who can reach the port can move the arm.
