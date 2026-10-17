@@ -10,18 +10,20 @@ lerobot-mp-api = { git = "https://github.com/machinekind/digital_twin_training.g
 lerobot-mp = { git = "https://github.com/machinekind/digital_twin_training.git", rev = "f5331e9d93f633df1b1309d7ff8a0bfeca4d90a0" }
 
 [dependency-groups]
+# `uv sync`: the arm and the lab, with pytest, ruff and pyright. No torch, no twin.
 dev = [
-    "soarm[feetech]",
-    "soarm[panel]",
-    # torch for the tests of the legacy torch trainer and the converter; the runtime needs none
-    # (packages/soarm_lab/tests/test_dependency_rule.py).
-    "soarm-lab[torch]",
-    # The twin, for the tests marked `twin` that run both packages through its own code.
-    "lerobot-mp",
+    "soarm[feetech,panel]",
+    "soarm-lab",
     "pytest>=8",
     "ruff>=0.6",
     "pyright>=1.1",
 ]
+# `uv sync --group torch`: the legacy torch trainer, `soarm-lab convert` and their tests
+# (packages/soarm_lab/tests/test_dependency_rule.py).
+torch = ["soarm-lab[torch]"]
+# `uv sync --group twin`: the twin, for the tests marked `twin` that run both packages through its own code.
+# The twin's repository is private.
+twin = ["lerobot-mp"]
 
 # The type checker runs on what implements the twin's contracts and on the test panel; the rest is not typed yet.
 [tool.pyright]

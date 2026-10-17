@@ -55,9 +55,13 @@ Use it to try a freshly assembled arm, to find a servo's limits, or to check tha
 It talks to the servos through the `feetech` backend:
 
 ```
+soarm-panel                                                  # the one USB-serial device
 soarm-panel --port /dev/ttyACM0
 soarm-panel --port COM5 --listen 127.0.0.1:8765 --no-browser
 ```
+
+Without `--port`, the panel takes the one USB-serial device on the machine.
+With none, or with several, it stops and says to pass `--port`.
 
 Each joint has a column with its measured position, a slider for the target, and minus and plus buttons.
 The step is 1, 5 or 15 degrees. The gripper moves 10 units per press and has Close and Open.

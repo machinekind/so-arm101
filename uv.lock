@@ -17,14 +17,14 @@ members = [
 
 [manifest.dependency-groups]
 dev = [
-    { name = "lerobot-mp", git = "https://github.com/machinekind/digital_twin_training.git?rev=f5331e9d93f633df1b1309d7ff8a0bfeca4d90a0" },
     { name = "pyright", specifier = ">=1.1" },
     { name = "pytest", specifier = ">=8" },
     { name = "ruff", specifier = ">=0.6" },
-    { name = "soarm", extras = ["feetech"], editable = "packages/soarm" },
-    { name = "soarm", extras = ["panel"], editable = "packages/soarm" },
-    { name = "soarm-lab", extras = ["torch"], editable = "packages/soarm_lab" },
+    { name = "soarm", extras = ["feetech", "panel"], editable = "packages/soarm" },
+    { name = "soarm-lab", editable = "packages/soarm_lab" },
 ]
+torch = [{ name = "soarm-lab", extras = ["torch"], editable = "packages/soarm_lab" }]
+twin = [{ name = "lerobot-mp", git = "https://github.com/machinekind/digital_twin_training.git?rev=f5331e9d93f633df1b1309d7ff8a0bfeca4d90a0" }]
 
 [[package]]
 name = "absl-py"

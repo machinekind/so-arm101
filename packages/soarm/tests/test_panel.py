@@ -22,6 +22,7 @@ from soarm.panel import (
     PanelServer,
     RobotDescription,
     build_parser,
+    detect_port,
 )
 
 DT = 0.05
@@ -212,8 +213,24 @@ def test_close_leaves_torque_on(panel, link):
 
 
 def test_cli_defaults():
-    args = build_parser().parse_args(["--port", "COM5"])
+    args = build_parser().parse_args([])
+    assert args.port is None
     assert args.listen == "127.0.0.1:8765"
     assert args.baudrate == 1_000_000
     assert args.robot == soarm.ROBOT_DIR
     assert not args.no_browser
+
+
+class _Port:
+    def __init__(self, device: str, vid: int | None):
+        self.device = device
+        self.vid = vid
+
+
+def test_detect_port_picks_the_one_usb_serial_device():
+    ports = [_Port("/dev/cu.Bluetooth", None), _Port("/dev/cu.usbmodem1", 0x1A86)]
+    assert detect_port(ports) == "/dev/cu.usbmodem1"
+    with pytest.raises(ValueError, match="No USB-serial device.*--port"):
+        detect_port([_Port("/dev/cu.Bluetooth", None)])
+    with pytest.raises(ValueError, match="Several USB-serial devices: COM5, COM7.*--port"):
+        detect_port([_Port("COM7", 1), _Port("COM5", 1)])
