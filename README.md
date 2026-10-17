@@ -12,7 +12,7 @@ This repository is one uv workspace with two Python packages:
   The training stack is JAX and MuJoCo Warp. Until the JAX trainer is written, training runs a legacy
   torch trainer. Running a policy needs numpy only.
 
-The digital twin ([digital_twin_training](https://github.com/machinekind/digital_twin_training), package `machinekind_twin`)
+The digital twin ([twin](https://github.com/machinekind/twin), package `machinekind_twin`)
 measures the rig and runs strategies through its safety supervisor.
 The twin loads both packages through entry points.
 Both packages import the twin's plugin contracts, `machinekind-twin-api` (package `machinekind_twin_api`), and never the twin.
@@ -126,7 +126,7 @@ It lives in the twin's repository under `packages/machinekind_twin_api`.
 pip ignores that table. Outside the workspace, install the contracts from git first:
 
 ```
-pip install "machinekind-twin-api @ git+https://github.com/machinekind/digital_twin_training.git@941fc6b170aaa24b110c1ca31e1b7ddbca2515c0#subdirectory=packages/machinekind_twin_api"
+pip install "machinekind-twin-api @ git+https://github.com/machinekind/twin.git@941fc6b170aaa24b110c1ca31e1b7ddbca2515c0#subdirectory=packages/machinekind_twin_api"
 ```
 
 GPU training needs MuJoCo Warp and, until the JAX trainer exists, a CUDA build of torch.
