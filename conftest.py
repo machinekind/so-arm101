@@ -32,14 +32,14 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         for item in render:
             item.add_marker(skip)
     twin = [item for item in items if item.get_closest_marker("twin")]
-    if twin and importlib.util.find_spec("lerobot_mp") is None:
-        skip = pytest.mark.skip(reason="the twin (lerobot_mp) is not installed")
+    if twin and importlib.util.find_spec("machinekind_twin") is None:
+        skip = pytest.mark.skip(reason="the twin (machinekind_twin) is not installed")
         for item in twin:
             item.add_marker(skip)
 
 
 @pytest.fixture(autouse=True)
 def _twin_defaults(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Twin tests count on the twin's defaults; a file named by LEROBOT_MP_CONFIG would change them."""
+    """Twin tests count on the twin's defaults; a file named by MACHINEKIND_TWIN_CONFIG would change them."""
     if request.node.get_closest_marker("twin"):
-        monkeypatch.delenv("LEROBOT_MP_CONFIG", raising=False)
+        monkeypatch.delenv("MACHINEKIND_TWIN_CONFIG", raising=False)

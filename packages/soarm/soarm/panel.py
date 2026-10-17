@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from lerobot_mp_api.backend import BackendContext
+from machinekind_twin_api.backend import BackendContext
 
 from . import ROBOT_DIR
 from .feetech import ADDR_TORQUE_ENABLE, FeetechArm

@@ -3,7 +3,7 @@
 How to plug in an SO-101 for the first time, safely. Read [safety.md](safety.md) first.
 
 The read-only leader reader in galaxeo-manipulators (`so101_feetech.py`) reads the servos without torque.
-The twin's `lerobot-twin ui` drives the arm through this package's `feetech` backend.
+The twin's `twin ui` drives the arm through this package's `feetech` backend.
 
 ## 1. Before power
 
@@ -33,7 +33,7 @@ The twin's `lerobot-twin ui` drives the arm through this package's `feetech` bac
 
 ## 5. First motion
 
-- Connect through the twin: run `lerobot-twin ui`, pick the robot `so101`, then the `feetech` connection, and type the port.
+- Connect through the twin: run `twin ui`, pick the robot `so101`, then the `feetech` connection, and type the port.
   The backend sets each servo's goal to where the arm stands, then enables torque.
   The twin's safety supervisor checks every command.
 - Start from the twin's simulation of the same task. Then switch the backend to the real arm.

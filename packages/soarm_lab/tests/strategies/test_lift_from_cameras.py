@@ -20,16 +20,16 @@ import pytest
 
 pytestmark = [pytest.mark.twin, pytest.mark.render]
 mujoco = pytest.importorskip("mujoco")
-pytest.importorskip("lerobot_mp")
+pytest.importorskip("machinekind_twin")
 
-from lerobot_mp.twin import scene as sc  # noqa: E402
-from lerobot_mp.twin.clock import VirtualClock  # noqa: E402
-from lerobot_mp.twin.kinematics import RobotKinematics, inverse, pose  # noqa: E402
-from lerobot_mp.twin.perception import CubeDetector, CubeTracker, TableMapper  # noqa: E402
-from lerobot_mp.twin.runtime import Twin  # noqa: E402
-from lerobot_mp.twin.strategy import ObjectPose, StrategyRunner  # noqa: E402
-from lerobot_mp.twin.ui.watch import arm_mask  # noqa: E402
-from lerobot_mp.twin.workspace import CameraRecord, Workspace  # noqa: E402
+from machinekind_twin import scene as sc  # noqa: E402
+from machinekind_twin.clock import VirtualClock  # noqa: E402
+from machinekind_twin.kinematics import RobotKinematics, inverse, pose  # noqa: E402
+from machinekind_twin.perception import CubeDetector, CubeTracker, TableMapper  # noqa: E402
+from machinekind_twin.runtime import Twin  # noqa: E402
+from machinekind_twin.strategy import ObjectPose, StrategyRunner  # noqa: E402
+from machinekind_twin.ui.watch import arm_mask  # noqa: E402
+from machinekind_twin.workspace import CameraRecord, Workspace  # noqa: E402
 
 from soarm_lab.rl import task as tk  # noqa: E402
 from soarm_lab.strategies.policy import PolicySettings, PolicyStrategy  # noqa: E402

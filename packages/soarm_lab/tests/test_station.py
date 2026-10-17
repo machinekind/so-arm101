@@ -88,7 +88,7 @@ def test_an_extra_camera_is_added_and_a_duplicate_refused(station):
 
 
 def test_an_export_with_its_own_assets(tmp_path, station):
-    """What `lerobot-twin export` writes: scene.xml, station.json and assets/ next to them."""
+    """What `twin export` writes: scene.xml, station.json and assets/ next to them."""
     folder = tmp_path / "desk"
     shutil.copytree(station.folder, folder)
     shutil.copytree(soarm.ROBOT_DIR / "assets", folder / "assets")

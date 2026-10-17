@@ -13,7 +13,7 @@ license = "Apache-2.0"
 dependencies = [
     "soarm",
     # The twin's plugin contracts (numpy only); never the twin itself.
-    "lerobot-mp-api>=0.1,<0.2",
+    "machinekind-twin-api>=0.1,<0.2",
     "numpy>=1.24",
     "PyYAML>=6.0",
     "mujoco>=3.14,<3.15",
@@ -28,7 +28,7 @@ train = ["mujoco-warp>=3.14,<3.15", "jax>=0.4"]
 # `soarm-lab convert`, which turns a torch checkpoint (policy.pt) into policy.npz.
 torch = ["torch>=2.7,<2.12"]
 
-[project.entry-points."lerobot_mp.strategies"]
+[project.entry-points."machinekind_twin.strategies"]
 policy = "soarm_lab.strategies.policy:PolicyStrategy"
 ik = "soarm_lab.strategies.ik:IKStrategy"
 

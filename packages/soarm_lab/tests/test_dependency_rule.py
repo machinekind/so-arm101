@@ -1,6 +1,7 @@
-"""`soarm_lab` imports no twin (`lerobot_mp`), also not at runtime; it imports the twin's contracts,
-`lerobot_mp_api`. Running a policy needs no torch (`soarm-lab[torch]` is the legacy trainer's extra). A test
-that imports the twin is marked `twin`; the others run without it, also one that imports the contracts."""
+"""`soarm_lab` imports no twin (`machinekind_twin`), also not at runtime; it imports the twin's contracts,
+`machinekind_twin_api`. Running a policy needs no torch (`soarm-lab[torch]` is the legacy trainer's extra).
+A test that imports the twin is marked `twin`; the others run without it, also one that imports the
+contracts."""
 
 from __future__ import annotations
 
@@ -15,9 +16,9 @@ import pytest
 import soarm_lab
 
 #: Top-level modules the lab's source may not import.
-FORBIDDEN = ("lerobot_mp",)
+FORBIDDEN = ("machinekind_twin",)
 #: The twin's plugin contracts: allowed, and no twin.
-CONTRACTS = "lerobot_mp_api"
+CONTRACTS = "machinekind_twin_api"
 ROOT = Path(soarm_lab.__file__).parent
 TESTS = Path(__file__).parent
 
@@ -40,7 +41,8 @@ def imports(path: Path) -> tuple[set[str], list[int]]:
 
 
 def top(module: str) -> str:
-    """The top-level package of a dotted module name: `lerobot_mp_api.strategy` -> `lerobot_mp_api`."""
+    """The top-level package of a dotted module name:
+    `machinekind_twin_api.strategy` -> `machinekind_twin_api`."""
     return module.split(".")[0]
 
 
@@ -49,8 +51,10 @@ def forbidden(modules: set[str]) -> set[str]:
 
 
 def test_the_contracts_are_not_the_twin() -> None:
-    """The check compares whole package names: `lerobot_mp_api` starts with `lerobot_mp` and is allowed."""
-    assert forbidden({"lerobot_mp", "lerobot_mp.twin.strategy"}) == {"lerobot_mp", "lerobot_mp.twin.strategy"}
+    """The check compares whole package names: `machinekind_twin_api` starts with `machinekind_twin`
+    and is allowed."""
+    assert forbidden({"machinekind_twin", "machinekind_twin.strategy"}) == {
+        "machinekind_twin", "machinekind_twin.strategy"}
     assert forbidden({CONTRACTS, f"{CONTRACTS}.strategy", "soarm"}) == set()
     assert f"{CONTRACTS}.strategy" in imports(ROOT / "strategies" / "policy.py")[0]
 
@@ -64,9 +68,9 @@ def test_no_forbidden_imports(path: Path) -> None:
 
 
 def test_the_lab_imports_nothing_from_the_twin_at_runtime() -> None:
-    """Importing every lab module (strategy, environments, CLI) loads no `lerobot_mp` module.
+    """Importing every lab module (strategy, environments, CLI) loads no `machinekind_twin` module.
 
-    It loads the contracts, `lerobot_mp_api`: modules count by their exact top-level name.
+    It loads the contracts, `machinekind_twin_api`: modules count by their exact top-level name.
     """
     script = (
         "import importlib.util, sys\n"
@@ -75,8 +79,8 @@ def test_the_lab_imports_nothing_from_the_twin_at_runtime() -> None:
         "import soarm_lab.rl, soarm_lab.rl.env, soarm_lab.rl.evaluate\n"
         "if importlib.util.find_spec('torch'):\n"
         "    import soarm_lab.rl.ppo, soarm_lab.rl.torch_policy\n"
-        "print(sorted(m for m in sys.modules if m.split('.')[0] == 'lerobot_mp'))\n"
-        "print('lerobot_mp_api.strategy' in sys.modules)\n"
+        "print(sorted(m for m in sys.modules if m.split('.')[0] == 'machinekind_twin'))\n"
+        "print('machinekind_twin_api.strategy' in sys.modules)\n"
     )
     out = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, check=True)
     assert out.stdout.split() == ["[]", "True"]
@@ -89,7 +93,7 @@ RUNTIME = ("soarm_lab", "soarm_lab.strategies", "soarm_lab.strategies.policy", "
 #: Imports the runtime, loads both bundled policies, runs a strategy tick, `policies` and `eval`.
 RUN_POLICIES = f"""
 import sys
-from lerobot_mp_api.strategy import Observation, RunInfo
+from machinekind_twin_api.strategy import Observation, RunInfo
 import {", ".join(RUNTIME)}
 import soarm
 from soarm_lab.cli import main
@@ -140,13 +144,13 @@ def test_running_a_policy_needs_no_torch(tmp_path: Path, torch_missing: bool) ->
 
 
 def twin_imports(path: Path) -> list[str]:
-    """The `lerobot_mp` modules `path` imports, by an import statement or `pytest.importorskip`."""
+    """The `machinekind_twin` modules `path` imports, by an import statement or `pytest.importorskip`."""
     modules = imports(path)[0]
     for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
         if (isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "importorskip"
                 and node.args and isinstance(node.args[0], ast.Constant)):
             modules.add(str(node.args[0].value))
-    return sorted(m for m in modules if top(m) == "lerobot_mp")
+    return sorted(m for m in modules if top(m) == "machinekind_twin")
 
 
 def marked_twin(path: Path) -> bool:
@@ -169,9 +173,9 @@ def test_a_test_that_imports_the_twin_is_marked_twin() -> None:
     assert unmarked == []
 
 
-#: pytest in a fresh interpreter where `import lerobot_mp` fails as if the twin were not installed;
-#: `import lerobot_mp_api` works.
-WITHOUT_TWIN = ("import sys; sys.modules['lerobot_mp'] = None\n"
+#: pytest in a fresh interpreter where `import machinekind_twin` fails as if the twin were not installed;
+#: `import machinekind_twin_api` works.
+WITHOUT_TWIN = ("import sys; sys.modules['machinekind_twin'] = None\n"
                 "import pytest; sys.exit(pytest.main(sys.argv[1:]))")
 
 

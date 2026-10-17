@@ -1,6 +1,6 @@
 """The IK strategy without the twin: the path, its speed, the reach check, the lag guard, the gripper.
 
-The tests build the contracts' own `RunInfo` and `Observation` (`lerobot_mp_api`) and play the arm
+The tests build the contracts' own `RunInfo` and `Observation` (`machinekind_twin_api`) and play the arm
 themselves: in most of them the measured joints are the previous tick's target (perfect tracking).
 test_ik_in_twin.py runs the same strategy through the twin's runner and physics.
 """
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from lerobot_mp_api.strategy import Action, Observation, RunInfo
+from machinekind_twin_api.strategy import Action, Observation, RunInfo
 
 import soarm
 

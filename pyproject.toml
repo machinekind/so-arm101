@@ -4,10 +4,10 @@ members = ["packages/soarm", "packages/soarm_lab"]
 [tool.uv.sources]
 soarm = { workspace = true }
 soarm-lab = { workspace = true }
-# The plugin contracts (`lerobot_mp_api`) are not on PyPI: packages/lerobot_mp_api in the twin's repository.
+# The plugin contracts (`machinekind_twin_api`) are not on PyPI: packages/machinekind_twin_api in the twin's repository.
 # The twin comes from the same commit, because it depends on that package too.
-lerobot-mp-api = { git = "https://github.com/machinekind/digital_twin_training.git", subdirectory = "packages/lerobot_mp_api", rev = "f5331e9d93f633df1b1309d7ff8a0bfeca4d90a0" }
-lerobot-mp = { git = "https://github.com/machinekind/digital_twin_training.git", rev = "f5331e9d93f633df1b1309d7ff8a0bfeca4d90a0" }
+machinekind-twin-api = { git = "https://github.com/machinekind/digital_twin_training.git", subdirectory = "packages/machinekind_twin_api", rev = "941fc6b170aaa24b110c1ca31e1b7ddbca2515c0" }
+machinekind-twin = { git = "https://github.com/machinekind/digital_twin_training.git", rev = "941fc6b170aaa24b110c1ca31e1b7ddbca2515c0" }
 
 [dependency-groups]
 # `uv sync`: the arm and the lab, with pytest, ruff and pyright. No torch, no twin.
@@ -23,7 +23,7 @@ dev = [
 torch = ["soarm-lab[torch]"]
 # `uv sync --group twin`: the twin, for the tests marked `twin` that run both packages through its own code.
 # The twin's repository is private.
-twin = ["lerobot-mp"]
+twin = ["machinekind-twin"]
 
 # The type checker runs on what implements the twin's contracts and on the test panel; the rest is not typed yet.
 [tool.pyright]
@@ -36,7 +36,7 @@ addopts = ["--import-mode=importlib"]
 # For the test helper fake_bus.py.
 pythonpath = ["packages/soarm/tests"]
 markers = [
-    "twin: needs the digital twin (lerobot_mp) installed; skipped otherwise",
+    "twin: needs the digital twin (machinekind_twin) installed; skipped otherwise",
     "render: renders frames through MuJoCo/OpenGL; skipped where no OpenGL context can be made",
 ]
 

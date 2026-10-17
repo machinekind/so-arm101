@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from http.client import HTTPConnection, HTTPResponse
 
 import pytest
-from lerobot_mp_api.backend import BackendContext
+from machinekind_twin_api.backend import BackendContext
 
 import soarm
 from fake_bus import REST_TICKS, FakeBusLink

@@ -12,7 +12,7 @@ def twin_robots():
     Tests that build a twin (`Workspace`, `Twin`) take it, so a twin that found another `so101` fails here
     and not deep inside a run.
     """
-    from lerobot_mp.twin import robots
+    from machinekind_twin import robots
 
     assert robots.robot_folders()["so101"] == soarm.ROBOT_DIR.resolve()
     robots.get_spec.cache_clear()

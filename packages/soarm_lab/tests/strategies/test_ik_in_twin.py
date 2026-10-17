@@ -1,6 +1,6 @@
 """The twin finds the lab's IK strategy, builds it from its settings and runs it in the simulated twin.
 
-Everything goes through the twin's own code: discovery and strict settings (`lerobot_mp.twin.strategies`),
+Everything goes through the twin's own code: discovery and strict settings (`machinekind_twin.strategies`),
 the run (`StrategyRunner`), the safety supervisor and the twin's physics (`Twin`, simulated, its loop
 without a thread on a virtual clock). The strategy package itself imports nothing from the twin.
 
@@ -15,13 +15,13 @@ import pytest
 
 pytestmark = pytest.mark.twin
 pytest.importorskip("mujoco")
-pytest.importorskip("lerobot_mp")
+pytest.importorskip("machinekind_twin")
 
-from lerobot_mp.twin.clock import VirtualClock  # noqa: E402
-from lerobot_mp.twin.runtime import Twin  # noqa: E402
-from lerobot_mp.twin.strategies import load_strategy, strategies  # noqa: E402
-from lerobot_mp.twin.strategy import StrategyRunner  # noqa: E402
-from lerobot_mp.twin.workspace import Workspace  # noqa: E402
+from machinekind_twin.clock import VirtualClock  # noqa: E402
+from machinekind_twin.runtime import Twin  # noqa: E402
+from machinekind_twin.strategies import load_strategy, strategies  # noqa: E402
+from machinekind_twin.strategy import StrategyRunner  # noqa: E402
+from machinekind_twin.workspace import Workspace  # noqa: E402
 
 from soarm_lab.strategies.ik import IKSettings, IKStrategy  # noqa: E402
 

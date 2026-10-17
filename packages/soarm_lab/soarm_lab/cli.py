@@ -1,7 +1,7 @@
 """The lab's command line: `soarm-lab <command>` (training, evaluation and policies, on twin stations).
 
     soarm-lab train --task reach                     # a PPO policy on the GPU (MuJoCo Warp) + CPU evaluation
-    soarm-lab train --task lift --station ~/desk1    # ... on the station from `lerobot-twin export ~/desk1`
+    soarm-lab train --task lift --station ~/desk1    # ... on the station from `twin export ~/desk1`
     soarm-lab train --task pickplace                 # ... the cube carried onto a target on the table
     soarm-lab eval lift-v3 --rand                    # evaluate a policy in plain MuJoCo
     soarm-lab policies                               # bundled policies and those trained here, with results
@@ -163,7 +163,7 @@ def main(argv: list[str] | None = None) -> int:
 def parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="soarm-lab", description="Trening i ewaluacja polityk SO-101.")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    station_help = ("stanowisko: folder z `lerobot-twin export` albo nazwa dostarczonego z pakietem "
+    station_help = ("stanowisko: folder z `twin export` albo nazwa dostarczonego z pakietem "
                     "(domyslnie sim)")
 
     p = sub.add_parser("train", help="naucz polityke PPO na GPU (MuJoCo Warp)")

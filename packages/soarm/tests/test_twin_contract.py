@@ -10,11 +10,11 @@ from importlib import metadata
 import pytest
 
 pytestmark = pytest.mark.twin
-pytest.importorskip("lerobot_mp")
+pytest.importorskip("machinekind_twin")
 
-from lerobot_mp.robot import BackendPlugin, RobotBackend, backend_context, create_backend, factory  # noqa: E402
-from lerobot_mp.twin.robots import load_robot, robot_config  # noqa: E402
-from lerobot_mp_api.entry_points import BACKENDS  # noqa: E402
+from machinekind_twin.backends import BackendPlugin, RobotBackend, backend_context, create_backend, factory  # noqa: E402
+from machinekind_twin.robots import load_robot, robot_config  # noqa: E402
+from machinekind_twin_api.entry_points import BACKENDS  # noqa: E402
 
 import soarm  # noqa: E402
 from fake_bus import FakeBusLink  # noqa: E402
