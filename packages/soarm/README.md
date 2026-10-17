@@ -50,7 +50,7 @@ soarm-panel = "soarm.panel:main"
 
 ## Test panel
 
-`soarm-panel` moves the arm from a browser page, without the twin.
+`soarm-panel` moves the arm from a browser page.
 Use it to try a freshly assembled arm, to find a servo's limits, or to check that a port and a baud rate work.
 It talks to the servos through the `feetech` backend:
 

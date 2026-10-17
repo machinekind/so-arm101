@@ -29,7 +29,7 @@ so-arm101/
         robot/              robot.yaml, MJCF and meshes of the SO-101
         feetech.py          backend `feetech`: Feetech STS3215 servos over a serial port or socket://
         lerobot_backend.py  backend `lerobot`: the arm through LeRobot
-        panel.py            the `soarm-panel` command: moves the arm from a browser page, without the twin
+        panel.py            the `soarm-panel` command: moves the arm from a browser page
         panel.html          the panel's page, plain HTML and JavaScript, no external assets
         serial_bridge.py    COM <-> TCP bridge, the `soarm-bridge` command
         settings.py         strict builder for the backends' config sections

@@ -1,4 +1,4 @@
-"""A browser test panel for the SO-101: move the joints and the gripper without the twin.
+"""A browser panel for the SO-101: move the joints and the gripper from a web page.
 
 `soarm-panel --port <port>` connects the arm through the `feetech` backend, runs a 20 Hz control loop
 and serves one page: `GET /` the page, `GET /api/state` the state, `POST /api/<command>` a command.
@@ -78,7 +78,7 @@ class RobotDescription:
         )
 
     def context(self, port: str, settings: dict[str, Any]) -> BackendContext:
-        """What the twin would hand the `feetech` backend; `settings` is the backend's `feetech:` section."""
+        """The `BackendContext` for the `feetech` backend; `settings` is its `feetech:` section."""
         return BackendContext(robot=self.name, joints=self.joints, gripper=self.gripper, limits=self.limits,
                               max_vel=self.max_vel, port=port, settings=settings)
 
@@ -360,7 +360,7 @@ def _arg(body: dict[str, Any], key: str, kind: type) -> Any:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="soarm-panel", description="Panel testowy ramienia w przegladarce: "
-                                     "ruch stawow i chwytaka, Dom, STOP i moment, bez cyfrowego blizniaka.")
+                                     "ruch stawow i chwytaka, Dom, STOP i moment.")
     parser.add_argument("--port", required=True,
                         help="port szeregowy ramienia, np. COM5, /dev/ttyACM0 albo socket://host:5555")
     parser.add_argument("--baudrate", type=int, default=1_000_000, help="predkosc portu (domyslnie 1 Mbaud)")
