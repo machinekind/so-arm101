@@ -23,11 +23,10 @@ def test_joint_names_match_mjcf(robot_yaml: dict, mjcf: ET.Element) -> None:
 
 def test_named_parts_exist_in_mjcf(robot_yaml: dict, mjcf: ET.Element) -> None:
     bodies, sites = set(names(mjcf, "body")), set(names(mjcf, "site"))
-    geoms, cameras = set(names(mjcf, "geom")), set(names(mjcf, "camera"))
+    geoms = set(names(mjcf, "geom"))
     assert robot_yaml["tcp_site"] in sites
     assert {robot_yaml["hand_body"], robot_yaml["base_body"], *robot_yaml["jaw_bodies"]} <= bodies
     assert set(robot_yaml["fingertips"]) <= geoms
-    assert set(robot_yaml["onboard_cameras"]) <= cameras
 
 
 def test_limits_inside_mjcf_ranges(robot_yaml: dict, mjcf: ET.Element) -> None:

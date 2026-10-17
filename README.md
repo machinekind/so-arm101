@@ -109,7 +109,7 @@ It lives in the twin's repository under `packages/lerobot_mp_api`.
 pip ignores that table. Outside the workspace, install the contracts from git first:
 
 ```
-pip install "lerobot-mp-api @ git+https://github.com/machinekind/digital_twin_training.git@22471fe5547c0e53bf12dab0d3f96c444154ac2a#subdirectory=packages/lerobot_mp_api"
+pip install "lerobot-mp-api @ git+https://github.com/machinekind/digital_twin_training.git@f5331e9d93f633df1b1309d7ff8a0bfeca4d90a0#subdirectory=packages/lerobot_mp_api"
 ```
 
 GPU training needs MuJoCo Warp.
