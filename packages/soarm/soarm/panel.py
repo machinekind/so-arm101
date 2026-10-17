@@ -1,14 +1,7 @@
 """A browser test panel for the SO-101: move the joints and the gripper without the twin.
 
 `soarm-panel --port <port>` connects the arm through the `feetech` backend, runs a 20 Hz control loop
-and serves one page on a local HTTP server. The page jogs each joint, opens and closes the gripper,
-goes home, stops and switches torque.
-
-Three layers, so the logic is testable without HTTP and without hardware:
-
-* `RobotDescription`: the part of `robot.yaml` the panel uses;
-* `PanelController`: the control loop and the operator's commands, on a connected `FeetechArm`;
-* `PanelServer` and `main`: the HTTP API (`GET /`, `GET /api/state`, `POST /api/<command>`) and the CLI.
+and serves one page: `GET /` the page, `GET /api/state` the state, `POST /api/<command>` a command.
 """
 
 from __future__ import annotations
@@ -20,8 +13,7 @@ import math
 import threading
 import time
 import webbrowser
-from collections.abc import Callable, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
@@ -37,9 +29,6 @@ from .serial_bridge import split_listen
 
 logger = logging.getLogger(__name__)
 
-ROBOT_FILE = "robot.yaml"
-PAGE = "panel.html"
-
 TICK_HZ = 20.0
 #: Default panel speed [deg/s for the arm joints, units/s for the gripper].
 DEFAULT_SPEED = 30.0
@@ -47,487 +36,287 @@ DEFAULT_SPEED = 30.0
 MAX_DT_S = 0.1
 #: No `GET /api/state` for this long means the page is gone: a running ramp stops.
 HEARTBEAT_TIMEOUT_S = 1.5
-GRIPPER_OPEN = 100.0
-GRIPPER_CLOSED = 0.0
 
 
-class PanelError(ValueError):
-    """A command the panel refuses: an unknown joint, a value that is not a number, torque off."""
+class PanelError(Exception):
+    """A command the panel refuses, with the HTTP status it answers."""
 
-
-class UnknownCommand(PanelError):
-    """`POST /api/<command>` with a command the panel does not have."""
-
-
-@dataclass(frozen=True)
-class Limit:
-    """A joint range [app units]."""
-
-    low: float
-    high: float
-
-    def clip(self, value: float) -> float:
-        return min(max(value, self.low), self.high)
-
-    def narrowed(self, low: float, high: float) -> Limit:
-        return Limit(low=max(self.low, low), high=min(self.high, high))
-
-    def widened_to(self, value: float) -> Limit:
-        return Limit(low=min(self.low, value), high=max(self.high, value))
+    def __init__(self, message: str, status: HTTPStatus = HTTPStatus.BAD_REQUEST) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 @dataclass(frozen=True)
 class RobotDescription:
-    """The part of `robot.yaml` the panel uses. Other keys are skipped."""
+    """The part of `robot.yaml` the panel uses."""
 
     name: str
     joints: tuple[str, ...]
     gripper: str | None
-    limits: dict[str, Limit]
+    limits: dict[str, tuple[float, float]]
     max_vel: dict[str, float]
     home: dict[str, float]
-    #: The long label of each joint, for the page.
-    joint_labels: dict[str, str]
+    labels: dict[str, str]
 
     @classmethod
     def load(cls, folder: Path) -> RobotDescription:
         try:
             import yaml
         except ImportError as exc:  # pragma: no cover - depends on the environment
-            raise RuntimeError(
-                "soarm-panel wymaga biblioteki pyyaml. "
-                'Zainstaluj:  pip install "soarm[panel]"'
-            ) from exc
+            raise RuntimeError('soarm-panel wymaga pyyaml:  pip install "soarm[panel]"') from exc
 
-        path = Path(folder) / ROBOT_FILE
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
-        joints = tuple(str(name) for name in data["joints"])
-
-        limits: dict[str, Limit] = {}
-        for name, pair in data["limits"].items():
-            limits[str(name)] = Limit(low=float(pair[0]), high=float(pair[1]))
-        max_vel = {str(name): float(value) for name, value in data["max_vel"].items()}
-
-        missing = [name for name in joints if name not in limits or name not in max_vel]
-        if missing:
-            raise ValueError(f"{path}: brak `limits` albo `max_vel` dla: {', '.join(missing)}")
-
-        home = {str(name): float(value) for name, value in (data.get("home") or {}).items()}
-        labels = {str(name): str(pair[1]) for name, pair in (data.get("joint_labels") or {}).items()}
-
+        data = yaml.safe_load((Path(folder) / "robot.yaml").read_text(encoding="utf-8"))
+        labels = data.get("joint_labels") or {}
         return cls(
-            name=str(data["name"]),
-            joints=joints,
+            name=data["name"],
+            joints=tuple(data["joints"]),
             gripper=data.get("gripper"),
-            limits=limits,
-            max_vel=max_vel,
-            home=home,
-            joint_labels={name: labels.get(name, name) for name in joints},
+            limits={name: tuple(pair) for name, pair in data["limits"].items()},
+            max_vel=dict(data["max_vel"]),
+            home=dict(data.get("home") or {}),
+            labels={name: labels[name][1] if name in labels else name for name in data["joints"]},
         )
 
-    def context(self, port: str, settings: Mapping[str, Any] | None = None) -> BackendContext:
-        """What the twin would hand the `feetech` backend for this robot.
-
-        `settings` is the backend's `feetech:` section.
-        """
-        return BackendContext(
-            robot=self.name,
-            joints=self.joints,
-            gripper=self.gripper,
-            limits={name: (limit.low, limit.high) for name, limit in self.limits.items()},
-            max_vel=dict(self.max_vel),
-            port=port,
-            settings=dict(settings or {}),
-        )
-
-
-@dataclass(frozen=True)
-class TargetResult:
-    """Where a command put a joint's target, and whether a limit cut it."""
-
-    joint: str
-    requested: float
-    target: float
-    clipped: bool
+    def context(self, port: str, settings: dict[str, Any]) -> BackendContext:
+        """What the twin would hand the `feetech` backend; `settings` is the backend's `feetech:` section."""
+        return BackendContext(robot=self.name, joints=self.joints, gripper=self.gripper, limits=self.limits,
+                              max_vel=self.max_vel, port=port, settings=settings)
 
 
 class PanelController:
-    """The panel's control loop on a connected `FeetechArm`.
+    """The control loop and the operator's commands on a connected `FeetechArm`.
 
-    `target` is where the operator wants each joint, `command` what went to the servos last. Every tick
+    `target` is where the operator wants each joint, `command` what went to the servos last. Each tick
     reads the joints, moves `command` towards `target` by at most `speed * dt` per joint and sends it.
-    Only the control thread talks to the bus; the HTTP threads change `target` and leave requests.
+    One lock guards the state and the bus, held for a whole tick and for each command.
     """
 
-    def __init__(
-        self,
-        arm: FeetechArm,
-        description: RobotDescription,
-        clock: Callable[[], float] = time.monotonic,
-    ) -> None:
+    def __init__(self, arm: FeetechArm, description: RobotDescription) -> None:
         self.arm = arm
         self.description = description
-        self._clock = clock
         self._lock = threading.Lock()
-
-        hardware = arm.joint_limits()
-        self.limits: dict[str, Limit] = {}
-        for name in description.joints:
-            limit = description.limits[name]
-            if name in hardware:
-                limit = limit.narrowed(hardware[name][0], hardware[name][1])
-            self.limits[name] = limit
-
-        measured = arm.read_joints()
-        self._measured = dict(measured)
-        self._command = dict(measured)
-        self._target = dict(measured)
-        self._faults: list[str] = arm.faults()
-        # FeetechArm.connect enables torque.
-        self._torque = True
-        self._speed = DEFAULT_SPEED
-        self._clip: TargetResult | None = None
-
-        self._torque_request: bool | None = None
-        self._hold_requested = False
-        self._last_heartbeat = clock()
-        self._last_tick_at: float | None = None
-        self._period_s = 0.0
-        self._loop_error: str | None = None
-
         self._halt = threading.Event()
-        self._thread: threading.Thread | None = None
+        self._thread = threading.Thread(target=self._run, name="panel-petla", daemon=True)
 
-    # ------------------------------------------------------------ operator
-    def jog(self, joint: str, delta: float) -> TargetResult:
+        eeprom = arm.joint_limits()
+        self.limits: dict[str, tuple[float, float]] = {}
+        for joint in description.joints:
+            low, high = description.limits[joint]
+            if joint in eeprom:
+                low = max(low, eeprom[joint][0])
+                high = min(high, eeprom[joint][1])
+            self.limits[joint] = (low, high)
+
+        self.measured = arm.read_joints()
+        self.command = dict(self.measured)
+        self.target = dict(self.measured)
+        self.torque = True  # FeetechArm.connect enables it
+        self.speed = DEFAULT_SPEED
+        #: The last target cut to its limit, as a sentence for the page; None when it fitted.
+        self.clip: str | None = None
+        self.faults = arm.faults()
+        self.last_heartbeat = time.monotonic()
+        self._tick_times: list[float] = []
+
+    def jog(self, joint: str, delta: float) -> None:
         with self._lock:
-            self._require_torque()
-            self._require_joint(joint)
-            result = self._set_target(joint, self._target[joint] + _finite(delta))
-            self._note_clips([result])
-            return result
+            if joint not in self.limits:
+                raise PanelError(f"Nieznany staw: {joint}")
+            self._aim({joint: self.target[joint] + delta})
 
-    def set_target(self, joint: str, value: float) -> TargetResult:
+    def set_target(self, joint: str, value: float) -> None:
         with self._lock:
-            self._require_torque()
-            self._require_joint(joint)
-            result = self._set_target(joint, _finite(value))
-            self._note_clips([result])
-            return result
+            if joint not in self.limits:
+                raise PanelError(f"Nieznany staw: {joint}")
+            self._aim({joint: value})
 
-    def open_gripper(self) -> TargetResult:
-        return self.set_target(self._gripper(), GRIPPER_OPEN)
-
-    def close_gripper(self) -> TargetResult:
-        return self.set_target(self._gripper(), GRIPPER_CLOSED)
-
-    def home(self) -> list[TargetResult]:
+    def home(self) -> None:
         """Targets the `home` pose of `robot.yaml`; the loop ramps there at the panel speed."""
         with self._lock:
-            self._require_torque()
-            results: list[TargetResult] = []
-            for joint in self.description.joints:
-                if joint in self.description.home:
-                    results.append(self._set_target(joint, self.description.home[joint]))
-            self._note_clips(results)
-            return results
+            self._aim(self.description.home)
 
     def stop(self) -> None:
-        """Holds the arm where it stands. Torque stays on, so the arm does not drop."""
+        """Holds the arm where it was measured last. Torque stays on, so the arm does not drop."""
         with self._lock:
-            self._hold_at(self._measured)
-            # The next tick holds at its own, fresher reading: the arm moved on since the last one.
-            self._hold_requested = True
+            self._hold()
 
     def set_torque(self, on: bool) -> None:
-        """Asks the control thread to switch torque on every servo at its next tick."""
         with self._lock:
-            self._torque_request = bool(on)
+            if on:
+                # The goal register keeps where the servo was sent last: torque enabled before the goal
+                # is overwritten would jerk the arm there. Same order as FeetechArm.connect.
+                self.measured = self.arm.read_joints()
+                self._hold()
+                if not self._send(self.measured):
+                    raise PanelError("Cel nie doszedl do serw - moment zostaje wylaczony.")
+            for dev_id in self.arm.ids.values():
+                self.arm.bus.write(dev_id, ADDR_TORQUE_ENABLE, 1 if on else 0, 1)
+            self.torque = on
 
-    def set_speed(self, value: float) -> float:
-        speed = _finite(value)
-        if speed <= 0.0:
+    def set_speed(self, value: float) -> None:
+        if value <= 0.0:
             raise PanelError("Predkosc musi byc dodatnia.")
         with self._lock:
-            self._speed = min(speed, max(self.description.max_vel.values()))
-            return self._speed
-
-    def heartbeat(self) -> None:
-        """The page is open: it polls the state."""
-        with self._lock:
-            self._last_heartbeat = self._clock()
+            self.speed = value
 
     def state(self) -> dict[str, Any]:
+        """What the page shows. The page polls it, so a call is also its heartbeat."""
         with self._lock:
+            self.last_heartbeat = time.monotonic()
             return {
                 "robot": self.description.name,
                 "port": self.arm.port,
-                "connected": self.arm.is_connected,
-                "torque": self._torque,
                 "joints": list(self.description.joints),
                 "gripper": self.description.gripper,
-                "labels": dict(self.description.joint_labels),
-                "measured": dict(self._measured),
-                "command": dict(self._command),
-                "target": dict(self._target),
-                "limits": {name: asdict(limit) for name, limit in self.limits.items()},
-                "faults": self._all_faults(),
-                "loop_hz": 1.0 / self._period_s if self._period_s > 0.0 else 0.0,
-                "speed": self._speed,
-                "clip": None if self._clip is None else asdict(self._clip),
-                "home": dict(self.description.home),
+                "labels": self.description.labels,
+                "limits": self.limits,
+                "measured": dict(self.measured),
+                "command": dict(self.command),
+                "target": dict(self.target),
+                "torque": self.torque,
+                "speed": self.speed,
+                "clip": self.clip,
+                "faults": self.faults,
+                "loop_hz": len(self._tick_times),
             }
 
-    # ---------------------------------------------------------------- loop
     def tick(self, dt: float) -> None:
-        """One control cycle: read, apply requests, ramp `command` towards `target`, send, collect faults."""
-        measured = self.arm.read_joints()
-
+        """One control cycle: read the joints, ramp `command` towards `target`, send it, collect faults."""
         with self._lock:
-            self._measured = dict(measured)
-            self._note_tick()
-            torque_request = self._torque_request
-            self._torque_request = None
-            if self._hold_requested:
-                self._hold_at(measured)
-                self._hold_requested = False
-            if self._heartbeat_lost() and self._command != self._target:
+            now = time.monotonic()
+            self._tick_times = [t for t in self._tick_times if now - t < 1.0]
+            self._tick_times.append(now)
+            self.measured = self.arm.read_joints()
+
+            if now - self.last_heartbeat > HEARTBEAT_TIMEOUT_S and self.command != self.target:
                 logger.warning("Strona panelu nie odpowiada - zatrzymuje ruch.")
-                self._hold_at(measured)
+                self._hold()
 
-        if torque_request is not None:
-            self._switch_torque(torque_request, measured)
-
-        proposed: dict[str, float] | None = None
-        with self._lock:
-            if self._torque:
-                proposed = self._ramped(min(max(dt, 0.0), MAX_DT_S))
+            if self.torque:
+                self._step(min(max(dt, 0.0), MAX_DT_S))
             else:
                 # A limp arm is moved by hand: the hold point follows it.
-                self._hold_at(measured)
+                self._hold()
 
-        if proposed is not None:
-            sent = self._send(proposed)
-            # A send held back on a dead link must not advance the command: once the link is back,
-            # the servos would jump to it.
-            with self._lock:
-                for name in sent:
-                    self._command[name] = proposed[name]
-
-        faults = self.arm.faults()
-        with self._lock:
-            self._faults = faults
+            self.faults = self.arm.faults()
 
     def start(self) -> None:
-        self._halt.clear()
-        self._thread = threading.Thread(target=self._run, name="panel-petla", daemon=True)
         self._thread.start()
 
     def close(self) -> None:
         """Stops the loop and holds the arm where it stands, torque on."""
         self._halt.set()
-        if self._thread is not None:
-            self._thread.join()
-            self._thread = None
+        self._thread.join()
         self.stop()
-        try:
-            self.tick(0.0)
-        except Exception:  # pragma: no cover - shutting down must not crash the command
-            logger.exception("Nie udalo sie zatrzymac ramienia przy zamykaniu panelu")
+        self.tick(0.0)
 
     def _run(self) -> None:
-        period = 1.0 / TICK_HZ
-        last = self._clock()
-        next_at = last
-        while True:
-            next_at += period
-            if self._halt.wait(max(0.0, next_at - self._clock())):
-                return
-            now = self._clock()
-            if now - next_at > period:
-                # A whole cycle behind (a slow bridge): start over rather than catch up in a burst.
-                next_at = now
+        last = time.monotonic()
+        while not self._halt.is_set():
+            now = time.monotonic()
             try:
                 self.tick(now - last)
-                error = None
             except Exception as exc:
                 logger.exception("Blad petli sterowania panelu")
-                error = f"blad petli sterowania: {exc}"
-            with self._lock:
-                self._loop_error = error
+                with self._lock:
+                    self.faults = [f"blad petli sterowania: {exc}"]
             last = now
+            self._halt.wait(max(0.0, 1.0 / TICK_HZ - (time.monotonic() - now)))
 
-    # ------------------------------------------------------------- helpers
-    def _set_target(self, joint: str, requested: float) -> TargetResult:
-        target = self.limits[joint].clip(requested)
-        self._target[joint] = target
-        return TargetResult(joint=joint, requested=requested, target=target, clipped=target != requested)
+    # The methods below run under the lock.
+    def _aim(self, goals: dict[str, float]) -> None:
+        if not self.torque:
+            raise PanelError("Moment jest wylaczony - wlacz go, zeby ruszac ramieniem.")
 
-    def _note_clips(self, results: list[TargetResult]) -> None:
-        clipped = [result for result in results if result.clipped]
-        self._clip = clipped[-1] if clipped else None
+        self.clip = None
+        for joint, wanted in goals.items():
+            low, high = self.limits[joint]
+            self.target[joint] = min(max(wanted, low), high)
+            if self.target[joint] != wanted:
+                label = self.description.labels[joint]
+                self.clip = f"przycieto do limitu: {label} {wanted:.1f} -> {self.target[joint]:.1f}"
 
-    def _hold_at(self, positions: Mapping[str, float]) -> None:
-        for name in self.description.joints:
-            self._command[name] = positions[name]
-            self._target[name] = positions[name]
+    def _hold(self) -> None:
+        self.command = dict(self.measured)
+        self.target = dict(self.measured)
 
-    def _ramped(self, dt: float) -> dict[str, float]:
-        proposed: dict[str, float] = {}
-        for name in self.description.joints:
-            reach = min(self._speed, self.description.max_vel[name]) * dt
-            gap = self._target[name] - self._command[name]
+    def _step(self, dt: float) -> None:
+        step: dict[str, float] = {}
+        for joint in self.description.joints:
+            reach = min(self.speed, self.description.max_vel[joint]) * dt
+            gap = self.target[joint] - self.command[joint]
             if abs(gap) <= reach:
-                proposed[name] = self._target[name]
-            elif gap > 0.0:
-                proposed[name] = self._command[name] + reach
+                step[joint] = self.target[joint]
             else:
-                proposed[name] = self._command[name] - reach
-        return proposed
+                step[joint] = self.command[joint] + math.copysign(reach, gap)
 
-    def _send(self, command: Mapping[str, float]) -> dict[str, float]:
+        # A send held back on a dead link must not advance the command: once the link is back,
+        # the servos would jump to it.
+        for joint in self._send(step):
+            self.command[joint] = step[joint]
+
+    def _send(self, goals: dict[str, float]) -> dict[str, float]:
         # The backend clamps to its limits before sending. A joint that starts outside its range (an arm
         # folded at rest) would jump to the limit at servo speed; widened to where the command stands,
         # it is led back by the ramp instead.
         widened: dict[str, tuple[float, float]] = {}
-        for name, value in command.items():
-            limit = self.limits[name].widened_to(value)
-            widened[name] = (limit.low, limit.high)
+        for joint, value in goals.items():
+            low, high = self.limits[joint]
+            widened[joint] = (min(low, value), max(high, value))
         self.arm.set_joint_limits(widened)
-        return self.arm.send_joints(dict(command))
-
-    def _switch_torque(self, on: bool, measured: Mapping[str, float]) -> None:
-        if on:
-            # The goal register remembers the previous session: torque enabled before the goal is
-            # overwritten would jerk the arm there. Same order as FeetechArm.connect.
-            with self._lock:
-                self._hold_at(measured)
-            if not self._send(measured):
-                logger.warning("Cel nie doszedl do serw - moment zostaje wylaczony.")
-                return
-        value = 1 if on else 0
-        for dev_id in self.arm.ids.values():
-            self.arm.bus.write(dev_id, ADDR_TORQUE_ENABLE, value, 1)
-        with self._lock:
-            self._torque = on
-
-    def _note_tick(self) -> None:
-        now = self._clock()
-        if self._last_tick_at is not None and now > self._last_tick_at:
-            period = now - self._last_tick_at
-            self._period_s = period if self._period_s == 0.0 else 0.9 * self._period_s + 0.1 * period
-        self._last_tick_at = now
-
-    def _heartbeat_lost(self) -> bool:
-        return self._clock() - self._last_heartbeat > HEARTBEAT_TIMEOUT_S
-
-    def _all_faults(self) -> list[str]:
-        if self._loop_error is None:
-            return list(self._faults)
-        return [*self._faults, self._loop_error]
-
-    def _require_torque(self) -> None:
-        if not self._torque:
-            raise PanelError("Moment jest wylaczony - wlacz go, zeby ruszac ramieniem.")
-
-    def _require_joint(self, joint: str) -> None:
-        if joint not in self.limits:
-            raise PanelError(f"Nieznany staw: {joint}")
-
-    def _gripper(self) -> str:
-        if self.description.gripper is None:
-            raise PanelError("Ten robot nie ma chwytaka.")
-        return self.description.gripper
-
-
-def _finite(value: Any) -> float:
-    try:
-        number = float(value)
-    except (TypeError, ValueError) as exc:
-        raise PanelError(f"To nie jest liczba: {value!r}") from exc
-    if not math.isfinite(number):
-        raise PanelError(f"To nie jest liczba: {value!r}")
-    return number
-
-
-# -------------------------------------------------------------------- HTTP
-def load_page() -> bytes:
-    return resources.files("soarm").joinpath(PAGE).read_bytes()
+        return self.arm.send_joints(goals)
 
 
 class PanelServer(ThreadingHTTPServer):
-    """The panel's HTTP server: the page and the JSON API of one `PanelController`."""
+    """The page and the JSON API of one `PanelController`."""
 
     daemon_threads = True
 
     def __init__(self, address: tuple[str, int], controller: PanelController) -> None:
         self.controller = controller
-        self.page = load_page()
+        self.page = resources.files("soarm").joinpath("panel.html").read_bytes()
         super().__init__(address, PanelHandler)
 
 
 class PanelHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
+        assert isinstance(self.server, PanelServer)
         path = urlsplit(self.path).path
         if path == "/":
-            self._send(HTTPStatus.OK, "text/html; charset=utf-8", self._panel().page)
+            self._answer(HTTPStatus.OK, self.server.page, "text/html; charset=utf-8")
         elif path == "/api/state":
-            controller = self._panel().controller
-            controller.heartbeat()
-            self._send_json(HTTPStatus.OK, controller.state())
+            self._answer(HTTPStatus.OK, self.server.controller.state())
         else:
-            self._send_json(HTTPStatus.NOT_FOUND, {"error": f"nie ma {path}"})
+            self._answer(HTTPStatus.NOT_FOUND, {"error": f"nie ma {path}"})
 
     def do_POST(self) -> None:
-        path = urlsplit(self.path).path
-        if not path.startswith("/api/"):
-            self._send_json(HTTPStatus.NOT_FOUND, {"error": f"nie ma {path}"})
-            return
-
+        assert isinstance(self.server, PanelServer)
         # A cross-site page may send a form or text/plain POST without asking; a JSON one needs a CORS
         # preflight this server never grants. So no other website in the browser can move the arm.
         if self.headers.get_content_type() != "application/json":
-            self._send_json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "oczekiwano application/json"})
+            self._answer(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "oczekiwano application/json"})
             return
 
         try:
-            body = self._read_json()
-            result = run_command(self._panel().controller, path.removeprefix("/api/"), body)
-        except UnknownCommand as exc:
-            self._send_json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+            length = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(length)) if length > 0 else {}
+        except ValueError as exc:
+            self._answer(HTTPStatus.BAD_REQUEST, {"error": f"Zly JSON: {exc}"})
             return
+
+        try:
+            run_command(self.server.controller, urlsplit(self.path).path.removeprefix("/api/"), body)
         except PanelError as exc:
-            self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
-            return
-        self._send_json(HTTPStatus.OK, result)
+            self._answer(exc.status, {"error": str(exc)})
+        else:
+            self._answer(HTTPStatus.OK, {})
 
     def log_message(self, format: str, *args: Any) -> None:
         logger.debug("%s - " + format, self.address_string(), *args)
 
-    def _panel(self) -> PanelServer:
-        assert isinstance(self.server, PanelServer)
-        return self.server
-
-    def _read_json(self) -> dict[str, Any]:
-        try:
-            length = int(self.headers.get("Content-Length") or 0)
-        except ValueError as exc:
-            raise PanelError("Zly naglowek Content-Length.") from exc
-        raw = self.rfile.read(length) if length > 0 else b""
-        if not raw.strip():
-            return {}
-        try:
-            body = json.loads(raw)
-        except ValueError as exc:
-            raise PanelError(f"Zly JSON: {exc}") from exc
-        if not isinstance(body, dict):
-            raise PanelError("Oczekiwano obiektu JSON.")
-        return body
-
-    def _send_json(self, status: HTTPStatus, payload: object) -> None:
-        self._send(status, "application/json", json.dumps(payload).encode("utf-8"))
-
-    def _send(self, status: HTTPStatus, content_type: str, body: bytes) -> None:
+    def _answer(self, status: HTTPStatus, payload: object, content_type: str = "application/json") -> None:
+        """Sends `payload`: bytes as they are, anything else as JSON."""
+        body = payload if isinstance(payload, bytes) else json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
@@ -536,105 +325,71 @@ class PanelHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-def run_command(controller: PanelController, command: str, body: Mapping[str, Any]) -> object:
-    """Runs `POST /api/<command>` with its JSON body; the result as plain data for JSON.
+def run_command(controller: PanelController, command: str, body: Any) -> None:
+    """Runs `POST /api/<command>` with its JSON body. Raises PanelError for a refused or unknown one."""
+    if not isinstance(body, dict):
+        raise PanelError("Oczekiwano obiektu JSON.")
 
-    Raises UnknownCommand for a command the panel does not have and PanelError for a refused one.
-    """
     if command == "jog":
-        return asdict(controller.jog(_text(body, "joint"), _field(body, "delta")))
-    if command == "target":
-        return asdict(controller.set_target(_text(body, "joint"), _field(body, "value")))
-    if command == "open":
-        return asdict(controller.open_gripper())
-    if command == "close":
-        return asdict(controller.close_gripper())
-    if command == "home":
-        return [asdict(result) for result in controller.home()]
-    if command == "stop":
+        controller.jog(_arg(body, "joint", str), _arg(body, "delta", float))
+    elif command == "target":
+        controller.set_target(_arg(body, "joint", str), _arg(body, "value", float))
+    elif command == "home":
+        controller.home()
+    elif command == "stop":
         controller.stop()
-        return {}
-    if command == "torque":
-        controller.set_torque(_flag(body, "on"))
-        return {}
-    if command == "speed":
-        return {"speed": controller.set_speed(_field(body, "value"))}
-    raise UnknownCommand(f"Nieznane polecenie: {command}")
+    elif command == "torque":
+        controller.set_torque(_arg(body, "on", bool))
+    elif command == "speed":
+        controller.set_speed(_arg(body, "value", float))
+    else:
+        raise PanelError(f"Nieznane polecenie: {command}", HTTPStatus.NOT_FOUND)
 
 
-def _field(body: Mapping[str, Any], key: str) -> Any:
-    if key not in body:
-        raise PanelError(f"Brak pola `{key}`.")
-    return body[key]
+def _arg(body: dict[str, Any], key: str, kind: type) -> Any:
+    """The field `key` of a command's body, checked to be a `kind`: str, bool or a finite float."""
+    value = body.get(key)
+    if kind is float:
+        # A JSON number arrives as int or float; true and false are ints to Python, not numbers here.
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+            return float(value)
+    elif isinstance(value, kind):
+        return value
+    raise PanelError(f"Zle pole `{key}`: {value!r} (oczekiwano {kind.__name__}).")
 
 
-def _text(body: Mapping[str, Any], key: str) -> str:
-    value = _field(body, key)
-    if not isinstance(value, str):
-        raise PanelError(f"Pole `{key}` musi byc tekstem.")
-    return value
-
-
-def _flag(body: Mapping[str, Any], key: str) -> bool:
-    value = _field(body, key)
-    if not isinstance(value, bool):
-        raise PanelError(f"Pole `{key}` musi byc true albo false.")
-    return value
-
-
-# --------------------------------------------------------------------- CLI
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="soarm-panel",
-        description="Panel testowy ramienia w przegladarce: ruch stawow i chwytaka, Dom, STOP i moment, "
-        "bez cyfrowego blizniaka.",
-    )
-    parser.add_argument(
-        "--port", required=True, help="port szeregowy ramienia, np. COM5, /dev/ttyACM0 albo socket://host:5555"
-    )
-    parser.add_argument(
-        "--baudrate", type=int, default=1_000_000, help="predkosc portu (domyslnie 1 Mbaud)"
-    )
-    parser.add_argument(
-        "--listen",
-        default="127.0.0.1:8765",
-        help="gdzie nasluchiwac; domyslnie `127.0.0.1:8765`, czyli tylko lokalnie",
-    )
-    parser.add_argument(
-        "--robot", type=Path, default=ROBOT_DIR, help="folder z robot.yaml (domyslnie SO-101 z pakietu)"
-    )
+    parser = argparse.ArgumentParser(prog="soarm-panel", description="Panel testowy ramienia w przegladarce: "
+                                     "ruch stawow i chwytaka, Dom, STOP i moment, bez cyfrowego blizniaka.")
+    parser.add_argument("--port", required=True,
+                        help="port szeregowy ramienia, np. COM5, /dev/ttyACM0 albo socket://host:5555")
+    parser.add_argument("--baudrate", type=int, default=1_000_000, help="predkosc portu (domyslnie 1 Mbaud)")
+    parser.add_argument("--listen", default="127.0.0.1:8765",
+                        help="gdzie nasluchiwac; domyslnie `127.0.0.1:8765`, czyli tylko lokalnie")
+    parser.add_argument("--robot", type=Path, default=ROBOT_DIR,
+                        help="folder z robot.yaml (domyslnie SO-101 z pakietu)")
     parser.add_argument("--no-browser", action="store_true", help="nie otwieraj przegladarki")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)-7s %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s %(message)s",
+                        datefmt="%H:%M:%S")
 
     host, tcp_port = split_listen(args.listen)
     if host not in ("127.0.0.1", "localhost"):
-        logger.warning(
-            "Panel slucha na %s. Kazdy, kto dosiegnie tego portu, moze ruszac ramieniem.", host
-        )
+        logger.warning("Panel slucha na %s. Kazdy, kto dosiegnie tego portu, moze ruszac ramieniem.", host)
 
+    # On a failed start the process exit closes the port; torque stays on, as disconnect leaves it.
     try:
         description = RobotDescription.load(args.robot)
         arm = FeetechArm(description.context(args.port, {"baudrate": args.baudrate}))
         arm.connect()
-    except (RuntimeError, ValueError, OSError) as exc:
-        logger.error("%s", exc)
-        return 2
-
-    controller = PanelController(arm, description)
-    try:
+        controller = PanelController(arm, description)
         server = PanelServer((host, tcp_port), controller)
-    except OSError as exc:
-        logger.error("Nie moge nasluchiwac na %s:%d: %s", host, tcp_port, exc)
-        arm.disconnect()
+    except (RuntimeError, ValueError, OSError) as exc:
+        logger.error("Panel nie wystartowal: %s", exc)
         return 2
 
     controller.start()
@@ -654,7 +409,3 @@ def main(argv: list[str] | None = None) -> int:
         # FeetechArm.disconnect leaves torque on by default: a limp arm would drop.
         arm.disconnect()
     return 0
-
-
-if __name__ == "__main__":  # pragma: no cover - command-line entry
-    raise SystemExit(main())

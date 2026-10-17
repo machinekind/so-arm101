@@ -95,17 +95,19 @@ function buildJoint(s, name) {
   col.innerHTML = '<h2></h2><div class="measured"></div><input type="range" class="move" step="0.5">'
     + '<div class="row"></div><div class="small target"></div><div class="small range"></div>';
   col.querySelector('h2').textContent = s.labels[name];
+  const [low, high] = s.limits[name];
   const slider = col.querySelector('input');
-  slider.min = s.limits[name].low;
-  slider.max = s.limits[name].high;
+  slider.min = low;
+  slider.max = high;
   slider.addEventListener('change', () => post('target', {joint: name, value: Number(slider.value)}));
   const jog = (sign) => post('jog', {joint: name, delta: sign * (gripper ? GRIPPER_STEP : Number($('step').value))});
   col.querySelector('.row').append(button('−', () => jog(-1)), button('+', () => jog(1)));
-  col.querySelector('.range').textContent = `zakres ${fmt(s.limits[name].low)} … ${fmt(s.limits[name].high)}`;
+  col.querySelector('.range').textContent = `zakres ${fmt(low)} … ${fmt(high)}`;
   if (gripper) {
     const row = document.createElement('div');
     row.className = 'row';
-    row.append(button('Zamknij', () => post('close')), button('Otwórz', () => post('open')));
+    row.append(button('Zamknij', () => post('target', {joint: name, value: 0})),
+               button('Otwórz', () => post('target', {joint: name, value: 100})));
     col.append(row);
   }
   return col;
@@ -115,15 +117,14 @@ function render(s) {
   if (!$('joints').children.length) {
     $('joints').append(...s.joints.map((name) => buildJoint(s, name)));
   }
-  $('link').textContent = `${s.robot} na ${s.port}: ${s.connected ? 'połączono' : 'rozłączono'}`;
-  $('link').className = s.connected ? 'ok' : 'bad';
+  $('link').textContent = `${s.robot} na ${s.port}`;
+  $('link').className = 'ok';
   $('hz').textContent = `pętla ${s.loop_hz.toFixed(0)} Hz`;
   $('torque-state').textContent = s.torque ? 'moment włączony' : 'moment wyłączony';
   $('torque-state').className = s.torque ? 'ok' : 'bad';
   $('torque').textContent = s.torque ? 'Moment wył.' : 'Moment wł.';
   $('torque').classList.toggle('off', s.torque);
-  $('clip').textContent = s.clip
-    ? `przycięto do limitu: ${s.labels[s.clip.joint]} ${fmt(s.clip.requested)} → ${fmt(s.clip.target)}` : '';
+  $('clip').textContent = s.clip || '';
   $('faults').replaceChildren(...s.faults.map((text) => {
     const item = document.createElement('li');
     item.textContent = text;
