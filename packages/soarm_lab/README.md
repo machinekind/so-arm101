@@ -159,8 +159,9 @@ It reads these fields of the observation:
 `run.folder` gives the robot description.
 A policy trained on another robot refuses the run in `start`.
 
-The twin's Strategies tab passes neither a goal nor objects today.
-Reach then drives to the goal in the settings.
+The twin's Strategies tab passes a goal while its "Cel z uchwytu 3D" switch is on: `obs.goal` is the 3D handle's position in the base frame, every tick.
+Without the handle, reach drives to the goal in the settings.
+The tab passes no objects today.
 Lift and pickplace wait `wait_for_cube_s` for a cube and then end the run.
 They need a runner that passes `objects`, e.g. the twin's cube tracker as an `ObjectPose` with its source.
 `tests/strategies/test_lift_from_cameras.py` builds one.
@@ -189,3 +190,7 @@ The gripper never moves.
 `start` refuses a goal the IK cannot reach within the limits.
 A goal dragged during the run is not checked again; when the arm cannot follow it, the note says so.
 The run ends as a success once the last target puts the TCP on the goal and the measured TCP is within `tol_m`.
+
+To drag the goal in the twin: untick `end_on_reach` in the form, press Dom (Home) in the Ramię tab,
+then turn on the Strategies tab's "Cel z uchwytu 3D" switch. The handle starts on the tip.
+Press Uruchom (Start) and drag it in small moves; the TCP follows at up to `speed_mps`.

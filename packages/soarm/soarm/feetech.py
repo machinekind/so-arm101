@@ -15,10 +15,11 @@ the sum of everything after the header. Two-byte values go least significant byt
 
 What this backend does NOT do
 -----------------------------
-There is no LeRobot calibration here, so converting ticks to degrees assumes that a
-joint's mechanical zero is at `feetech.center_ticks` (default tick 2048, the middle
-of the servo range). That is what the standard SO-101 assembly gives, with the servos
-mounted centred. There is no per-joint zero offset or direction setting.
+There is no LeRobot calibration file here: converting ticks to degrees takes tick
+`feetech.center_ticks` (default 2048) as every joint's zero. The servo decides which pose
+that is, because it subtracts the homing offset stored in its EEPROM. LeRobot's calibration
+sets that offset at its "middle" step, so the pose held there must be the MJCF's zero
+(docs/first-contact.md). There is no per-joint zero offset or direction setting here.
 """
 
 from __future__ import annotations
@@ -374,8 +375,8 @@ class FeetechSettings:
 
     #: Port speed. The STS3215 servos in the SO-101 ship set to 1 Mbaud.
     baudrate: int = 1_000_000
-    #: Tick that corresponds to joint zero. The servo has 4096 ticks per turn, and the standard
-    #: SO-101 assembly mounts it centred, which is 2048.
+    #: Tick that corresponds to joint zero. The servo has 4096 ticks per turn and reports 2048 at
+    #: the pose its stored homing offset marks as the middle (LeRobot's calibration sets it).
     center_ticks: int = 2048
     #: Gripper jaw range in ticks: 0 in app scale is `closed`, 100 is `open`. The values come
     #: from the limits the gripper servo had stored in its own EEPROM, i.e. from the jaw travel
