@@ -21,6 +21,8 @@ uv run soarm-lab eval lift-v3 --rand
 
 Bundled policies are `reach-v3` and `lift-v3`. Evaluation runs on CPU using MuJoCo;
 policy inference uses NumPy. Neither requires PyTorch or a GPU.
+See [policy provenance](soarm_lab/policies/README.md) for their upstream
+checkpoints, training history and conversion to NumPy.
 
 ## Train a policy
 

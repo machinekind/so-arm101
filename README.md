@@ -19,10 +19,13 @@ its bundled simulated setup.
 
 ## Get started
 
-Requires Python 3.10+ and uv. Installation currently requires GitHub access to
-`machinekind/twin`, which supplies the shared plugin API.
+Requires Git, Python 3.10+ and uv. The workspace fetches the shared plugin API
+from a pinned commit of the public [twin repository](https://github.com/machinekind/twin).
+The API package is not currently published on PyPI.
 
 ```bash
+git clone https://github.com/machinekind/so-arm101.git
+cd so-arm101
 uv sync
 ```
 

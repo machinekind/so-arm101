@@ -4,7 +4,8 @@ members = ["packages/soarm", "packages/soarm_lab"]
 [tool.uv.sources]
 soarm = { workspace = true }
 soarm-lab = { workspace = true }
-# The plugin contracts (`machinekind_twin_api`) are not on PyPI: packages/machinekind_twin_api in the twin's repository.
+# The plugin contracts (`machinekind_twin_api`) come from packages/machinekind_twin_api
+# in the public twin repository; they are not on PyPI.
 # The twin comes from the same commit, because it depends on that package too.
 machinekind-twin-api = { git = "https://github.com/machinekind/twin.git", subdirectory = "packages/machinekind_twin_api", rev = "941fc6b170aaa24b110c1ca31e1b7ddbca2515c0" }
 machinekind-twin = { git = "https://github.com/machinekind/twin.git", rev = "941fc6b170aaa24b110c1ca31e1b7ddbca2515c0" }
@@ -22,7 +23,7 @@ dev = [
 # (packages/soarm_lab/tests/test_dependency_rule.py).
 torch = ["soarm-lab[torch]"]
 # `uv sync --group twin`: the twin, for the tests marked `twin` that run both packages through its own code.
-# The twin's repository is private.
+# The application stays optional; the base packages depend only on its API.
 twin = ["machinekind-twin"]
 
 # The type checker runs on what implements the twin's contracts and on the test panel; the rest is not typed yet.

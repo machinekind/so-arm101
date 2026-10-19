@@ -34,8 +34,9 @@ presence in that file does not mean a package is part of every installation.
 
 The API and twin application both declare Apache-2.0 at the
 [pinned twin revision](https://github.com/machinekind/twin/tree/941fc6b170aaa24b110c1ca31e1b7ddbca2515c0).
-The API package includes the license text. Access to that repository is currently
-private; public installation also requires an accessible source for the API.
+The API package includes the license text. The workspace fetches it from this
+public Git repository; it is not currently published on PyPI. Follow the
+[workspace installation instructions](../README.md#get-started) to use that source.
 
 Primary license references: [NumPy](https://github.com/numpy/numpy/blob/main/LICENSE.txt),
 [pyserial](https://github.com/pyserial/pyserial/blob/master/LICENSE.txt),
