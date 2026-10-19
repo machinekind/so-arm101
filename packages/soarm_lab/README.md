@@ -105,3 +105,9 @@ to an object tracker; without a cube pose, they stop after `wait_for_cube_s`.
 See [policy settings](soarm_lab/strategies/policy.py),
 [IK settings](soarm_lab/strategies/ik.py) and
 [conventions](../../docs/conventions.md) for the full interfaces.
+
+## License
+
+[Apache-2.0](LICENSE), with project attribution in [NOTICE](NOTICE).
+The bundled `reach-v3` and `lift-v3` policies are distributed under the same license.
+Their `meta.json` files record training settings and evaluation results.

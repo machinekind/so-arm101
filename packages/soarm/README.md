@@ -59,3 +59,9 @@ The base dependency is `machinekind-twin-api`. Optional extras provide:
 The workspace's default `uv sync` includes `feetech` and `panel`.
 See [conventions](../../docs/conventions.md) for units and plugin contracts,
 and [soarm-lab](../soarm_lab/README.md) for simulation and training.
+
+## License
+
+[Apache-2.0](LICENSE), with project attribution in [NOTICE](NOTICE).
+The bundled robot model and meshes retain their upstream license and
+[third-party notices](THIRD_PARTY_NOTICES).

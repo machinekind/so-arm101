@@ -73,5 +73,9 @@ and test conventions.
 
 ## License
 
-[Apache-2.0](LICENSE). The SO-101 MuJoCo model and meshes come from MuJoCo Menagerie
-under [Apache-2.0](packages/soarm/soarm/robot/LICENSE).
+[Apache-2.0](LICENSE), with project attribution in [NOTICE](NOTICE). The SO-101
+MuJoCo model and meshes are also Apache-2.0; see their
+[third-party notices](packages/soarm/THIRD_PARTY_NOTICES).
+
+See [licensing and redistribution](docs/licensing.md) for dependency licenses
+and how to preserve notices when distributing packages or bundled applications.
