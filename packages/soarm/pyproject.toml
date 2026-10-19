@@ -9,6 +9,7 @@ description = "SO-101 robot: its robot folder and the Feetech backend plugins fo
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES", "soarm/robot/LICENSE"]
 # The twin's plugin contracts (numpy only); never the twin itself.
 dependencies = ["machinekind-twin-api>=0.1,<0.2"]
 
