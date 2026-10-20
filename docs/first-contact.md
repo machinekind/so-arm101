@@ -18,10 +18,19 @@ The twin's `twin ui` drives the arm through this package's `feetech` backend.
 - With the read-only reader, check that every ID from 1 to 6 answers at 1 Mbaud.
 - Check the supply voltage. Voltage under 9 V means the motor supply is off or wrong.
 
-## 3. Check directions by hand
+## 3. Zero and directions
 
+- Joint zero is tick 2048. Each servo decides which pose that is: it subtracts the homing offset stored in its EEPROM.
+- LeRobot's calibration (`lerobot-calibrate`) stores that offset at its "middle of its range of motion" step.
+  Hold the model's zero pose there: base facing forward, upper arm vertical, forearm level and pointing forward,
+  wrist in line with the forearm, jaws one above the other.
+  Any other pose puts the twin's 3D arm off the real one by the same angles.
+- LeRobot turns torque on at connect without first setting each servo's goal to where it stands.
+  An arm moved by hand since its last session lunges toward that session's pose, and a servo can drop its reply.
+  Before `lerobot-calibrate`, support the arm and press Torque on, then off, in `soarm-panel`: torque on sets every goal to where the arm stands.
+  Quit the panel and start the calibration without moving the arm.
 - Move each joint by hand and watch the reading in the read-only reader.
-- Joint zero is mid-range, tick 2048. Compare the direction of each joint with the twin's 3D view.
+  Compare the direction of each joint with the twin's 3D view.
 
 ## 4. Measure this arm
 

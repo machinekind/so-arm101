@@ -1,82 +1,67 @@
 # soarm
 
-The SO-101 robot as a package for the digital twin (`machinekind_twin`).
-It holds the robot folder and the hardware backends.
-It imports the twin's plugin contracts, `machinekind_twin_api`, and never the twin.
-The twin finds both through entry points.
+Hardware control and the robot model for the SO-101 arm. This package provides
+Feetech STS3215 and LeRobot backends, a browser control panel, and a serial-to-TCP
+bridge. It also registers the robot and backends as plugins for the
+[Machinekind digital twin](https://github.com/machinekind/twin).
 
-## Contents
+## Get started
 
-| Path | Holds |
-|---|---|
-| `soarm/robot/` | `robot.yaml`, the MJCF `so101.xml` and its meshes, from MuJoCo Menagerie |
-| `soarm/__init__.py` | `ROBOT_DIR`, the path of the robot folder |
-| `soarm/feetech.py` | backend `feetech`: STS3215 servos over a serial port, or over `socket://` through the bridge |
-| `soarm/lerobot_backend.py` | backend `lerobot`: the arm through LeRobot's SO follower |
-| `soarm/serial_bridge.py` | the `soarm-bridge` command, which serves the arm's serial port over TCP |
-| `soarm/panel.py` | the `soarm-panel` command: a browser test panel that moves the arm through the `feetech` backend |
-| `soarm/panel.html` | the panel's page: plain HTML, CSS and JavaScript, no external assets |
-| `soarm/settings.py` | `from_mapping`, the strict builder for the `feetech:` and `lerobot:` config sections |
+From the repository root, follow the [setup instructions](../../README.md#get-started)
+and read the [safety rules](../../docs/safety.md) before powering the arm.
 
-The twin's `machinekind_twin.robots` defines the `robot.yaml` schema.
-`machinekind_twin_api.backend` defines the backend contract.
-Each backend module has a `create(ctx)` factory that takes a `BackendContext`.
-`FeetechArm` and `LeRobotArm` subclass `RobotBackend`.
-
-## Entry points
-
-```toml
-[project.entry-points."machinekind_twin.robots"]
-so101 = "soarm:ROBOT_DIR"
-
-[project.entry-points."machinekind_twin.backends"]
-feetech = "soarm.feetech:create"
-lerobot = "soarm.lerobot_backend:create"
-
-[project.scripts]
-soarm-bridge = "soarm.serial_bridge:main"
-soarm-panel = "soarm.panel:main"
+```bash
+uv sync
+uv run soarm-panel
 ```
 
-## Dependencies
+The panel opens in your browser with joint and gripper controls, measured positions,
+Home, STOP and torque controls. It automatically selects a single USB-serial device;
+otherwise, specify the port:
 
-`machinekind-twin-api>=0.1,<0.2` is the only base dependency. It needs only numpy.
-
-## Extras
-
-- `feetech`: pyserial, for the `feetech` backend and `soarm-bridge`.
-- `panel`: pyserial and pyyaml, for `soarm-panel`.
-- `lerobot`: LeRobot 0.6 with Feetech support. It needs Python 3.12 or newer.
-
-## Test panel
-
-`soarm-panel` moves the arm from a browser page.
-Use it to try a freshly assembled arm, to find a servo's limits, or to check that a port and a baud rate work.
-It talks to the servos through the `feetech` backend:
-
-```
-soarm-panel                                                  # the one USB-serial device
-soarm-panel --port /dev/ttyACM0
-soarm-panel --port COM5 --listen 127.0.0.1:8765 --no-browser
+```bash
+uv run soarm-panel --port /dev/ttyACM0
+uv run soarm-panel --port COM5 --no-browser
 ```
 
-Without `--port`, the panel takes the one USB-serial device on the machine.
-With none, or with several, it stops and says to pass `--port`.
+Targets are constrained by both the robot's configured limits and the servo's
+EEPROM limits. STOP or Esc holds the measured pose with torque on. Closing the
+page or losing its heartbeat for 1.5 seconds also stops motion; Ctrl-C exits while
+keeping torque on. Support the arm before using the Torque button to release it.
+The panel listens on localhost by default; anyone who can reach its port can move the arm.
 
-Each joint has a column with its measured position, a slider for the target, and minus and plus buttons.
-The step is 1, 5 or 15 degrees. The gripper moves 10 units per press and has Close and Open.
-The speed is 10, 30 or 60 degrees per second, never above the joint's `max_vel` in `robot.yaml`.
-Home, STOP and Torque act on the whole arm.
-The header shows the port, the loop rate, the torque state, servo faults and the last target cut to a limit.
+See the [first-contact guide](../../docs/first-contact.md) for assembly checks and calibration.
 
-Targets stay inside the joint's limit from `robot.yaml`, narrowed to the servo's own EEPROM limit.
-A target outside it is cut to the limit, and the page says so.
+## Serial bridge
 
-STOP, or Esc on the page, holds the arm where it stands, with torque on.
-Closing the page does the same, and so does losing the page for 1.5 s while a joint is moving.
-Ctrl-C ends the command and leaves torque on.
-Only the Torque button turns torque off. The arm then drops under its own weight, so support it first.
-Turning torque back on first sets each servo's goal to where the arm stands, so the arm does not jump.
+Run the bridge in one terminal, then the panel in another to use the port over TCP:
 
-The panel listens on 127.0.0.1 unless `--listen` says otherwise. Anyone who can reach the port can move the arm.
-`tests/test_panel.py` runs it on the fake bus from `tests/fake_bus.py`, without hardware.
+```bash
+uv run soarm-bridge --port COM5 --listen 127.0.0.1:5555
+uv run soarm-panel --port socket://127.0.0.1:5555
+```
+
+For remote access, bind to the host's network address and restrict clients with
+`--allow <client-ip>`. The Feetech backend accepts `socket://host:port` directly.
+
+## Integration and dependencies
+
+The twin discovers robot `so101` and backends `feetech` and `lerobot` through
+entry points. The [robot folder](soarm/robot/README.md) contains its MuJoCo model,
+meshes and `robot.yaml` configuration.
+
+The base dependency is `machinekind-twin-api`. Optional extras provide:
+
+- `feetech`: serial communication and the bridge.
+- `panel`: the browser control panel.
+- `lerobot`: the LeRobot backend, requiring Python 3.12+.
+
+The workspace's default `uv sync` includes `feetech` and `panel`.
+See [conventions](../../docs/conventions.md) for units and plugin contracts,
+and [soarm-lab](../soarm_lab/README.md) for simulation and training.
+
+## License
+
+[Apache-2.0](LICENSE), with project attribution in [NOTICE](NOTICE).
+The bundled robot model and meshes retain their upstream license and
+[third-party notices](THIRD_PARTY_NOTICES).

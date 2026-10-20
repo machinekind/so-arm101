@@ -9,6 +9,7 @@ description = "SO-101 training: RL tasks, CPU and GPU environments, PPO and the 
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 # Running a policy (the strategy, evaluation, the CPU environments) needs numpy only, no torch.
 dependencies = [
     "soarm",

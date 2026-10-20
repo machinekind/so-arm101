@@ -68,8 +68,10 @@ A helper that several test modules use is a module of its own on pytest's `pytho
 
 These are LeRobot's units. Conversion to MJCF units happens in `RobotKinematics` and nowhere else:
 the twin's `machinekind_twin.kinematics` and `soarm_lab.kinematics`.
-Joint zero sits at mid-range, tick 2048 (`center_ticks`). The MJCF uses the same zero
-(LeRobot's new calibration convention).
+Joint zero is tick 2048 (`center_ticks`): the pose held at the "middle" step of LeRobot's calibration,
+which each servo stores as its homing offset. That pose must be the MJCF's zero: upper arm vertical,
+forearm level and pointing forward, wrist straight, jaws one above the other
+([first-contact.md](first-contact.md#3-zero-and-directions)).
 
 ## Joint names
 

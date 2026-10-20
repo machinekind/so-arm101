@@ -1,0 +1,21 @@
+SO-101 robot model and meshes
+
+soarm/robot/so101.xml and all 19 STL meshes in soarm/robot/assets/ are
+copied without modification from MuJoCo Menagerie, robotstudio_so101,
+commit ac6b2b09983786f3036cab1000221017fa2193b4:
+https://github.com/google-deepmind/mujoco_menagerie/tree/ac6b2b09983786f3036cab1000221017fa2193b4/robotstudio_so101
+
+The upstream README credits The Robot Studio SO101 robot and includes
+the attribution "developed by I2RT Robotics".
+
+Menagerie derives the model from TheRobotStudio/SO-ARM100. Its README
+identifies aec17bbc256d1a7342d53aaa4950595d4c30b40d as the copied XML
+version and links to the original MJCF at 608122e9ac330a753735f2e18aee73338e9ac407:
+https://github.com/TheRobotStudio/SO-ARM100/blob/aec17bbc256d1a7342d53aaa4950595d4c30b40d/Simulation/SO101/so101_new_calib.xml
+https://github.com/TheRobotStudio/SO-ARM100/blob/608122e9ac330a753735f2e18aee73338e9ac407/Simulation/SO101/so101_new_calib.xml
+
+The Menagerie model and both cited TheRobotStudio revisions are licensed
+under Apache-2.0. The original model license is retained at soarm/robot/LICENSE.
+https://github.com/google-deepmind/mujoco_menagerie/blob/ac6b2b09983786f3036cab1000221017fa2193b4/robotstudio_so101/LICENSE
+https://github.com/TheRobotStudio/SO-ARM100/blob/aec17bbc256d1a7342d53aaa4950595d4c30b40d/LICENSE
+https://github.com/TheRobotStudio/SO-ARM100/blob/608122e9ac330a753735f2e18aee73338e9ac407/LICENSE
