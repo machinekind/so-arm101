@@ -202,6 +202,8 @@ def _dream_parser(sub) -> None:
     q.add_argument("--camera", action="append", default=[], metavar="ROLE=SOURCE",
                    help="scene=0 (required) and wrist=1 (optional): an OpenCV camera index or device path")
     q.add_argument("--camera-size", default="640x360", help="the size asked of the cameras (default 640x360)")
+    q.add_argument("--rotate", action="append", default=[], metavar="ROLE=DEG",
+                   help="turn a camera's frames clockwise, for one mounted upside down: scene=180, wrist=90")
 
 
 def main(argv: list[str] | None = None) -> int:

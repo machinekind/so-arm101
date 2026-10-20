@@ -166,11 +166,14 @@ class SimRig:
 class CameraReader:
     """One OpenCV camera on a thread of its own: the newest frame, RGB, and when it was captured."""
 
-    def __init__(self, name: str, source: str, size: tuple[int, int]):
+    def __init__(self, name: str, source: str, size: tuple[int, int], rotate: int = 0):
         import cv2
 
         self.name = name
         self._cv2 = cv2
+        #: A webcam mounted upside down or on its side: the frame is turned clockwise by this many degrees.
+        self._rotate = {0: None, 90: cv2.ROTATE_90_CLOCKWISE, 180: cv2.ROTATE_180,
+                        270: cv2.ROTATE_90_COUNTERCLOCKWISE}[rotate]
         device: int | str = int(source) if source.isdigit() else source
         self._cap = cv2.VideoCapture(device)
         if not self._cap.isOpened():
@@ -191,6 +194,8 @@ class CameraReader:
                 time.sleep(0.01)
                 continue
             rgb = self._cv2.cvtColor(bgr, self._cv2.COLOR_BGR2RGB)
+            if self._rotate is not None:
+                rgb = self._cv2.rotate(rgb, self._rotate)
             with self._lock:
                 self._latest = (rgb, time.monotonic())
 
@@ -221,7 +226,8 @@ def detect_port() -> str:
 class ArmRig:
     """The real SO-101 through the `feetech` backend, and OpenCV cameras."""
 
-    def __init__(self, port: str, baudrate: int, cameras: Mapping[str, str], size: tuple[int, int]):
+    def __init__(self, port: str, baudrate: int, cameras: Mapping[str, str], size: tuple[int, int],
+                 rotate: Mapping[str, int] | None = None):
         from machinekind_twin_api.backend import BackendContext
 
         from soarm.feetech import FeetechArm
@@ -245,7 +251,7 @@ class ArmRig:
                     low, high = max(low, servo[joint][0]), min(high, servo[joint][1])
                 self.limits[joint] = (low, high)
             for name, source in cameras.items():
-                self.readers[name] = CameraReader(name, source, size)
+                self.readers[name] = CameraReader(name, source, size, (rotate or {}).get(name, 0))
             deadline = time.monotonic() + FIRST_FRAME_TIMEOUT_S
             while any(r.frame() is None for r in self.readers.values()):
                 if time.monotonic() > deadline:
@@ -475,6 +481,17 @@ def _cameras(specs: list[str]) -> dict[str, str]:
     return out
 
 
+def _rotations(specs: list[str]) -> dict[str, int]:
+    out = {}
+    for item in specs:
+        name, sep, degrees = item.partition("=")
+        if not sep or name not in (SCENE, WRIST) or degrees not in ("0", "90", "180", "270"):
+            raise ValueError(f"--rotate {item!r}: expected scene=DEG or wrist=DEG, DEG one of 0, 90, 180 "
+                             "and 270")
+        out[name] = int(degrees)
+    return out
+
+
 def _size(text: str) -> tuple[int, int]:
     width, sep, height = text.lower().partition("x")
     if not sep or not width.isdigit() or not height.isdigit():
@@ -487,7 +504,7 @@ def run_arm(a: argparse.Namespace) -> int:
     if not 0 < a.speed <= 1:
         raise ValueError(f"--speed {a.speed}: a fraction of robot.yaml's max_vel, above 0 and at most 1")
     port = a.port or detect_port()
-    rig = ArmRig(port, a.baudrate, cameras, _size(a.camera_size))
+    rig = ArmRig(port, a.baudrate, cameras, _size(a.camera_size), _rotations(a.rotate))
     for name, reader in rig.readers.items():
         frame = reader.frame()
         shape = "no frame" if frame is None else f"{frame.image.shape[1]}x{frame.image.shape[0]}"
