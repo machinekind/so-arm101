@@ -425,10 +425,11 @@ def run(strategy: DreamStrategy, rig: Rig, info: RunInfo, seconds: float | None 
         try:
             rig.hold()
         finally:
-            if started:
-                strategy.stop(reason)
+            # The recording first: the stop ends the model session over the network and may be interrupted.
             if recorder is not None:
                 recorder.close()
+            if started:
+                strategy.stop(reason)
             rig.close()
     print(f"Stopped: {reason}. The arm holds where it is.")
     return 0

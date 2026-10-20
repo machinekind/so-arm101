@@ -588,7 +588,16 @@ class DreamStrategy(Strategy[DreamSettings]):
         client, self._client = self._client, None
         self.wait_request(STOP_WAIT_S)
         if client is not None:
-            try:
-                client.close()
-            except Exception:  # noqa: BLE001 - a stop must not fail on the session release
-                logger.exception("Dream: closing the client failed")
+            # The close ends the session over HTTPS and may take seconds (its own timeout is 15 s): done on a
+            # daemon thread and waited for briefly, so Ctrl-C returns the terminal without a second Ctrl-C.
+            closer = threading.Thread(target=self._close_client, args=(client,), name="dream-close",
+                                      daemon=True)
+            closer.start()
+            closer.join(STOP_WAIT_S)
+
+    @staticmethod
+    def _close_client(client: Any) -> None:
+        try:
+            client.close()
+        except Exception:  # noqa: BLE001 - a stop must not fail on the session release
+            logger.exception("Dream: closing the client failed")
