@@ -8,7 +8,7 @@ This repository is one uv workspace with two Python packages:
 
 - `soarm` is the robot: its robot folder and the hardware backends.
 - `soarm-lab` (package `soarm_lab`) is the training: RL tasks, the CPU and GPU environments, PPO,
-  evaluation, the base policies, and two strategies for the twin: `policy` and `ik`.
+  evaluation, the base policies, and three strategies for the twin: `policy`, `ik` and `dream` (Dream Labs' Dream-1).
   The training stack is JAX and MuJoCo Warp. Until the JAX trainer is written, training runs a legacy
   torch trainer. Running a policy needs numpy only.
 
@@ -55,8 +55,10 @@ so-arm101/
         sim.py              the compiled scene with the task's objects
         rl/                 tasks, Gymnasium env (CPU), MuJoCo Warp batch (GPU), PPO, policies, evaluation
         policies/           base policies reach-v3 and lift-v3 (policy.npz + meta.json)
-        strategies/         strategies for the twin: policy.py runs a policy, ik.py drives the TCP by IK
-        cli.py              the `soarm-lab` command: train, eval, policies, convert
+        strategies/         strategies for the twin: policy.py runs a policy, ik.py drives the TCP by IK,
+                            dream.py runs Dream Labs' Dream-1 model
+        dream_run.py        `soarm-lab dream`: Dream-1 without the twin, in simulation or on the arm
+        cli.py              the `soarm-lab` command: train, eval, policies, convert, dream
       tests/                pytest, mirroring soarm_lab/
   docs/                     first contact, conventions, safety
   conftest.py               the pytest markers `twin` and `render`
@@ -74,6 +76,7 @@ The twin finds both packages through entry points.
 | `machinekind_twin.backends` | `lerobot` | `soarm.lerobot_backend:create` |
 | `machinekind_twin.strategies` | `policy` | `soarm_lab.strategies.policy:PolicyStrategy` |
 | `machinekind_twin.strategies` | `ik` | `soarm_lab.strategies.ik:IKStrategy` |
+| `machinekind_twin.strategies` | `dream` | `soarm_lab.strategies.dream:DreamStrategy` |
 
 The panel offers the robot `so101` with the `feetech` and `lerobot` connections.
 The panel's Strategies tab lists `policy`, a trained policy, and `ik`, the TCP to a goal by inverse kinematics.
@@ -116,6 +119,7 @@ pytest, ruff and pyright. It installs neither torch nor the twin.
 
 ```
 uv sync --group torch    # torch: the legacy PPO trainer, soarm-lab convert and their tests
+uv sync --extra dream    # Dream Labs: the dream strategy and soarm-lab dream (Python 3.11 to 3.13)
 uv sync --group twin     # the twin, for the tests marked `twin`; needs GitHub access to its private repository
 uv sync --all-groups     # everything, as CI runs it
 ```
@@ -145,6 +149,7 @@ Extras of `soarm-lab`:
 ```
 pip install "soarm-lab[train]" # mujoco-warp and jax: GPU training (the JAX trainer is not written yet)
 pip install "soarm-lab[torch]" # torch: the legacy PPO trainer and soarm-lab convert
+pip install "soarm-lab[dream]" # dreamlabs: Dream-1 on the arm, soarm-lab dream (Python 3.11 to 3.13)
 ```
 
 Without extras, `soarm-lab` runs policies, evaluates them and runs its strategies in the twin.

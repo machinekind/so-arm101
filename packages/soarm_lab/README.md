@@ -1,7 +1,8 @@
 # soarm-lab
 
 Training for the SO-101: RL tasks, a CPU and a GPU environment, PPO, evaluation, the base policies,
-and two strategies for the digital twin (`machinekind_twin`): `policy` runs a policy, `ik` drives the TCP by inverse kinematics.
+and three strategies for the digital twin (`machinekind_twin`): `policy` runs a policy, `ik` drives the TCP by inverse kinematics,
+`dream` runs Dream Labs' Dream-1 model (see [Dream Labs](#dream-labs)).
 It imports the twin's plugin contracts, `machinekind_twin_api`, and never the twin.
 The twin hands it the measured station as data and runs its strategies as plugins.
 It imports `soarm` for the robot folder.
@@ -19,6 +20,7 @@ Policies are `policy.npz` files.
 | `pip install soarm-lab` | numpy, PyYAML, MuJoCo, Gymnasium, `soarm`, `machinekind-twin-api` | the strategies, evaluation, the CPU environments |
 | `pip install "soarm-lab[train]"` | MuJoCo Warp, JAX | GPU training; the JAX trainer will use it |
 | `pip install "soarm-lab[torch]"` | torch | the legacy torch trainer and `soarm-lab convert` |
+| `pip install "soarm-lab[dream]"` | `dreamlabs` (the Dream client and dream's IK), pyserial | the `dream` strategy and `soarm-lab dream` |
 
 The legacy trainer needs both extras and a CUDA build of torch: `pip install "soarm-lab[train,torch]"`.
 The torch extra stays until the PPO trainer is rewritten in JAX. It may also be needed on Windows.
@@ -35,8 +37,9 @@ A command that needs torch without it fails with "install soarm-lab[torch]".
 | `soarm_lab/sim.py` | `Scene`: the compiled station scene with the task's objects; renders |
 | `soarm_lab/rl/` | tasks (`reach`, `lift`, `pickplace`), `ArmEnv` (Gymnasium, CPU), `Policy` (numpy), evaluation, domain randomization; the legacy torch trainer: `BatchEnv` (MuJoCo Warp, GPU), PPO, `torch_policy` |
 | `soarm_lab/policies/` | base policies `reach-v3` and `lift-v3` (`policy.npz` + `meta.json`) |
-| `soarm_lab/strategies/` | strategies for the twin, one module per approach; `policy.py`: `PolicyStrategy`, a policy as a strategy; `ik.py`: `IKStrategy`, the TCP to a goal by IK |
+| `soarm_lab/strategies/` | strategies for the twin, one module per approach; `policy.py`: `PolicyStrategy`, a policy as a strategy; `ik.py`: `IKStrategy`, the TCP to a goal by IK; `dream.py`: `DreamStrategy`, Dream-1 over the network |
 | `soarm_lab/cli.py` | the `soarm-lab` command |
+| `soarm_lab/dream_run.py` | `soarm-lab dream`: Dream-1 without the twin, in the simulation or on the arm |
 | `soarm_lab/paths.py` | where trained policies go |
 
 ## Get a station
@@ -129,6 +132,7 @@ env = gym.make("SoArmLab/Lift-v0")
 [project.entry-points."machinekind_twin.strategies"]
 policy = "soarm_lab.strategies.policy:PolicyStrategy"
 ik = "soarm_lab.strategies.ik:IKStrategy"
+dream = "soarm_lab.strategies.dream:DreamStrategy"
 ```
 
 With `soarm-lab` installed next to the twin, the panel's Strategies tab lists `policy` and `ik`.
@@ -189,3 +193,64 @@ The gripper never moves.
 `start` refuses a goal the IK cannot reach within the limits.
 A goal dragged during the run is not checked again; when the arm cannot follow it, the note says so.
 The run ends as a success once the last target puts the TCP on the goal and the measured TCP is within `tol_m`.
+
+## Dream Labs
+
+The strategy `dream` runs Dream-1, Dream Labs' robot model, over the network: camera frames and a prompt go
+out, joint targets come back. `soarm-lab dream` runs it without the twin, in the simulation or on the arm.
+
+Install the `dream` extra. It brings the `dreamlabs` library: the Dream client and dream's IK (`dream_ik`),
+which an SO-101 needs (Python 3.11 to 3.13; jax, MuJoCo, OpenCV). The extra conflicts with `train`, so the
+two never install together.
+
+```bash
+uv sync --extra dream                 # a plain `uv sync` removes it again; `uv run` keeps it
+```
+
+The API key comes from `DREAM_API_KEY` or `~/.dreamlabs/credentials` (the four lines the Dream Labs platform
+prints; keep the file `chmod 600`). `DREAM_API_KEY=...` in the repository's `.env`, which git ignores, also
+works: `uv run --env-file .env soarm-lab dream ...`. Nothing here prints the key.
+
+```bash
+uv run soarm-lab dream models                                    # the checkpoints the key may run
+uv run soarm-lab dream sim --prompt "pick up the cube" --record /tmp/dream.mp4
+uv run soarm-lab dream arm --prompt "pick up the cube" --camera scene=0 --camera wrist=1 --speed 0.3
+```
+
+`--checkpoint` picks the model (default `dreamlabs/dream-1-beta`). `sim` runs the bundled station with a cube
+on the table: a station camera in the scene slot, the arm's `robot/wrist_cam` in the wrist slot. `arm` drives
+the arm through the `feetech` backend (the port as `soarm-panel` finds it, or `--port`) and reads OpenCV
+cameras by index or device path (on macOS the terminal needs camera access). While it runs, a line typed and
+Enter is a new prompt: the arm holds and a fresh episode starts. `q` and Enter, or Ctrl-C, stops: the arm
+holds where it is measured, torque on.
+
+The run's guards: the command ramps from the measured pose at most `--speed` x `robot.yaml`'s `max_vel` and
+`--max-step-deg` per tick (4 at 20 Hz); targets stay within `robot.yaml`'s limits and the servos' own; the arm
+holds while a camera frame is missing or older than 1 s; the run ends on a servo fault, when the arm lags its
+target by 25 deg, and when no chunk came for 120 s.
+
+Dream-1 is a bimanual model trained on YAM arms. It runs on an SO-101 zero-shot through dream's model of the
+XLeRobot, two SO-101s (`ik` arm `so101_faas`). The client then hides the arm's state from the model: it acts on
+the cameras and the prompt, and its answer is a hand path the client solves back to joints with dream's IK.
+With one arm, this arm is the right one, and every tick also carries a dummy left arm: dream's left rest pose,
+the gripper open, and the scene frame (or black, `--fill black`) as the left wrist camera. The left answer is
+ignored. The joints go out as `deg2rad` of this repository's degrees: dream's SO-101 URDF has the same joint
+frames, zero and directions as the MJCF here. Frames go out at 320x176, JPEG quality 85.
+
+The Dream client uploads every observation tick it is handed (the state and the frames) to Dream Labs'
+recorder, in the background, under one robot id per run. Opening the policy prepares dream's IK, which takes
+up to a minute the first time on a machine (it is cached in `~/.cache/dream_ik`), and a model that is not
+running yet answers only after it starts.
+
+In the twin, `dream` reads its form from `DreamSettings`, prefilled from the `dream:` section:
+
+```yaml
+dream:
+  prompt: pick up the cube
+  checkpoint: dreamlabs/dream-1-beta
+  scene_camera: a            # the twin's camera that sees the table; empty: the first camera
+  wrist_camera: ""           # the arm's wrist camera; empty: none, its slot gets fill_frame
+  fill_frame: scene          # or black: what fills a camera slot no camera has
+  max_step_deg: 4.0          # the most a joint target moves per tick [deg]
+  max_wait_s: 120.0          # end the run when no chunk came for this long
+```

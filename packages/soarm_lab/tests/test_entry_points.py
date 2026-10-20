@@ -15,12 +15,16 @@ EXPECTED = {
     "soarm-lab": {
         (STRATEGIES, "policy"): "soarm_lab.strategies.policy:PolicyStrategy",
         (STRATEGIES, "ik"): "soarm_lab.strategies.ik:IKStrategy",
+        (STRATEGIES, "dream"): "soarm_lab.strategies.dream:DreamStrategy",
         ("console_scripts", "soarm-lab"): "soarm_lab.cli:main",
     },
 }
 CALLABLE = [(dist, key) for dist, eps in EXPECTED.items() for key in eps]
 #: The lab's strategies, by entry point name.
 STRATEGY_NAMES = [name for group, name in EXPECTED["soarm-lab"] if group == STRATEGIES]
+#: The ones that run without a network: `dream` needs Dream Labs' service, and
+#: tests/strategies/test_dream.py runs it on a fake client.
+OFFLINE_STRATEGIES = [name for name in STRATEGY_NAMES if name != "dream"]
 
 
 def own_entry_points(dist: str) -> dict[tuple[str, str], metadata.EntryPoint]:
@@ -52,7 +56,7 @@ def test_the_strategy_entry_point_is_a_class_with_settings(name: str) -> None:
     assert set(kinds.values()) <= {"str", "int", "float", "bool"}
 
 
-@pytest.mark.parametrize("name", STRATEGY_NAMES)
+@pytest.mark.parametrize("name", OFFLINE_STRATEGIES)
 def test_the_strategy_follows_the_strategy_protocol(name: str) -> None:
     """`machinekind_twin_api.Strategy`: built as `cls(settings)`, a positive `hz`, an `Action` from `act`."""
     cls = own_entry_points("soarm-lab")[(STRATEGIES, name)].load()

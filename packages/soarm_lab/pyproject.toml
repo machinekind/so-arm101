@@ -27,10 +27,18 @@ train = ["mujoco-warp>=3.14,<3.15", "jax>=0.4"]
 # Legacy: the torch PPO trainer (rl/ppo.py, rl/batch.py; GPU training needs a CUDA build) and
 # `soarm-lab convert`, which turns a torch checkpoint (policy.pt) into policy.npz.
 torch = ["torch>=2.7,<2.12"]
+# Dream Labs: the `dream` strategy and `soarm-lab dream`, the Dream-1 model over the network. The `dreamlabs` library
+# brings the client and dream's IK (`dream_ik`), which an SO-101 needs; it supports Python 3.11 to 3.13.
+# soarm[feetech] (pyserial) is for `soarm-lab dream arm`. In the workspace: uv sync --extra dream
+dream = [
+    "dreamlabs>=1.0.5,<2; python_version >= '3.11' and python_version < '3.14'",
+    "soarm[feetech]",
+]
 
 [project.entry-points."machinekind_twin.strategies"]
 policy = "soarm_lab.strategies.policy:PolicyStrategy"
 ik = "soarm_lab.strategies.ik:IKStrategy"
+dream = "soarm_lab.strategies.dream:DreamStrategy"
 
 [project.scripts]
 soarm-lab = "soarm_lab.cli:main"
