@@ -6,11 +6,14 @@
     soarm-lab eval lift-v3 --rand                    # evaluate a policy in plain MuJoCo
     soarm-lab policies                               # bundled policies and those trained here, with results
     soarm-lab convert old/policy.pt                  # a torch checkpoint -> policy.npz
+    soarm-lab dream models                           # Dream Labs: the checkpoints the account may run
+    soarm-lab dream sim --prompt "pick up the cube"  # Dream-1 in the simulation
+    soarm-lab dream arm --prompt "pick up the cube" --camera scene=0 --camera wrist=1   # on the arm
 
 `--station` is a folder the twin exported (`scene.xml`, `assets/`, `station.json`) or the name of a
 station bundled with the package (`sim`, the default). `eval` and `policies` need no torch. `train` is
 the legacy torch trainer: it needs the extras `train` (`mujoco-warp`) and `torch` (torch with CUDA).
-`convert` needs the `torch` extra.
+`convert` needs the `torch` extra. `dream` needs the `dream` extra and a Dream Labs API key (`dream_run`).
 """
 
 from __future__ import annotations
@@ -155,6 +158,54 @@ def _convert(a: argparse.Namespace) -> int:
     return 0
 
 
+def _dream(a: argparse.Namespace) -> int:
+    from .dream_run import main as dream_main
+
+    return dream_main(a)
+
+
+def _dream_parser(sub) -> None:
+    """`soarm-lab dream models|sim|arm`: Dream-1 on the SO-101 without the twin (`dream_run`)."""
+    p = sub.add_parser("dream", help="Dream Labs' Dream-1 model on the SO-101 (the dream extra)",
+                       description="Dream-1 on the SO-101 without the twin. Needs `uv sync --extra dream` and a "
+                                   "Dream Labs API key: DREAM_API_KEY or ~/.dreamlabs/credentials.")
+    dream_sub = p.add_subparsers(dest="dream_cmd", required=True)
+    dream_sub.add_parser("models", help="the checkpoints the account may run").set_defaults(fn=_dream)
+
+    def common(q: argparse.ArgumentParser, speed: float) -> None:
+        q.add_argument("--prompt", required=True, help="the task, in plain language; a line typed while it runs "
+                                                       "is a new prompt")
+        q.add_argument("--checkpoint", default=None,
+                       help="the model, an id `soarm-lab dream models` lists (default dreamlabs/dream-1-beta)")
+        q.add_argument("--speed", type=float, default=speed,
+                       help=f"fraction of robot.yaml's max_vel the command may move at (default {speed:g})")
+        q.add_argument("--max-step-deg", type=float, default=None,
+                       help="most a joint target moves per tick at 20 Hz [deg] (default 4)")
+        q.add_argument("--fill", choices=("scene", "black"), default="scene",
+                       help="what fills a camera slot no camera has: the dummy left wrist, and the right wrist "
+                            "without --camera wrist=... (default scene: the scene frame again)")
+        q.add_argument("--seconds", type=float, default=None, help="end the run after this long")
+        q.add_argument("--record", type=Path, default=None, help="write the camera views to this .mp4")
+        q.set_defaults(fn=_dream)
+
+    q = dream_sub.add_parser("sim", help="Dream-1 in the lab's simulation, a cube on the table")
+    common(q, 1.0)
+    q.add_argument("--station", default="sim", help="a folder from `twin export` or a bundled station (sim)")
+    q.add_argument("--scene-camera", default=None, help="the station camera in the scene slot (default: the first)")
+    q.add_argument("--wrist-camera", default=None,
+                   help="the camera in the wrist slot (default robot/wrist_cam, on the arm); '' for none")
+
+    q = dream_sub.add_parser("arm", help="Dream-1 on the real arm (the feetech backend, OpenCV cameras)")
+    common(q, 0.3)
+    q.add_argument("--port", default=None, help="the arm's serial port (default: the one USB-serial device)")
+    q.add_argument("--baudrate", type=int, default=1_000_000)
+    q.add_argument("--camera", action="append", default=[], metavar="ROLE=SOURCE",
+                   help="scene=0 (required) and wrist=1 (optional): an OpenCV camera index or device path")
+    q.add_argument("--camera-size", default="640x360", help="the size asked of the cameras (default 640x360)")
+    q.add_argument("--rotate", action="append", default=[], metavar="ROLE=DEG",
+                   help="turn a camera's frames clockwise, for one mounted upside down: scene=180, wrist=90")
+
+
 def main(argv: list[str] | None = None) -> int:
     a = parser().parse_args(argv)
     return a.fn(a)
@@ -198,6 +249,8 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("checkpoint", help="policy.pt albo jego folder")
     p.add_argument("--out", default=None, help="plik policy.npz (domyslnie obok policy.pt; meta.json obok niego)")
     p.set_defaults(fn=_convert)
+
+    _dream_parser(sub)
     return ap
 
 

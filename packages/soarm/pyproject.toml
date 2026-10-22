@@ -31,6 +31,7 @@ lerobot = "soarm.lerobot_backend:create"
 [project.scripts]
 soarm-bridge = "soarm.serial_bridge:main"
 soarm-panel = "soarm.panel:main"
+soarm-zero = "soarm.zero:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["soarm"]

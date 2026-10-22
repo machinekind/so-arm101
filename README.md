@@ -59,6 +59,20 @@ GPU training uses MuJoCo Warp and PyTorch PPO and requires CUDA. See the
 [lab documentation](packages/soarm_lab/README.md) for training dependencies,
 fine-tuning and policy formats. Policy inference uses NumPy and does not require PyTorch.
 
+### Run Dream-1 on the arm
+
+[Dream Labs](https://dreamlabs.ai)' Dream-1 model drives the arm from a text prompt and
+the cameras. It needs a Dream Labs API key and the `dream` extra. See the
+[lab documentation](packages/soarm_lab/README.md#dream-labs) for the setup and the caveats.
+
+```bash
+uv sync --extra dream
+uv run soarm-lab dream models
+uv run soarm-lab dream arm --prompt "pick up the cube" --camera scene=0 --camera wrist=1
+```
+
+`uv run soarm-zero` moves an arm slowly to its zero pose and holds it; `--off` releases torque.
+
 ## Development
 
 ```bash
@@ -68,7 +82,8 @@ uv run pyright
 ```
 
 Optional dependencies: `uv sync --group torch` installs PyTorch;
-`uv sync --group twin` installs the twin for integration tests.
+`uv sync --group twin` installs the twin for integration tests;
+`uv sync --extra dream` installs the Dream Labs client for `soarm-lab dream`.
 Tests requiring unavailable optional dependencies, GPU support or rendering skip automatically.
 
 See [conventions](docs/conventions.md) for units, joint names, package boundaries

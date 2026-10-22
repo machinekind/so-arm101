@@ -10,6 +10,11 @@ soarm-lab = { workspace = true }
 machinekind-twin-api = { git = "https://github.com/machinekind/twin.git", subdirectory = "packages/machinekind_twin_api", rev = "941fc6b170aaa24b110c1ca31e1b7ddbca2515c0" }
 machinekind-twin = { git = "https://github.com/machinekind/twin.git", rev = "941fc6b170aaa24b110c1ca31e1b7ddbca2515c0" }
 
+# dreamlabs (the `dream` extra of soarm-lab) pins jax to 0.7.1. The GPU trainer's extra keeps its own jax:
+# the two extras are resolved apart and never install together.
+[tool.uv]
+conflicts = [[{ package = "soarm-lab", extra = "dream" }, { package = "soarm-lab", extra = "train" }]]
+
 [dependency-groups]
 # `uv sync`: the arm and the lab, with pytest, ruff and pyright. No torch, no twin.
 dev = [

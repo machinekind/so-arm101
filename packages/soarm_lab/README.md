@@ -82,8 +82,9 @@ With this package installed alongside the twin, its Strategies tab offers:
 
 - `policy`: runs a bundled or trained policy, with tracking and episode limits.
 - `ik`: moves the tool centre point toward a goal without training, keeping the gripper fixed.
+- `dream`: runs Dream Labs' Dream-1 model from a prompt and the cameras; see [Dream Labs](#dream-labs).
 
-Both send joint targets through the twin's safety supervisor. Read the
+All send joint targets through the twin's safety supervisor. Read the
 [safety rules](../../docs/safety.md) before running on hardware.
 Settings can be supplied through the panel or the twin's configuration:
 
@@ -107,6 +108,58 @@ to an object tracker; without a cube pose, they stop after `wait_for_cube_s`.
 See [policy settings](soarm_lab/strategies/policy.py),
 [IK settings](soarm_lab/strategies/ik.py) and
 [conventions](../../docs/conventions.md) for the full interfaces.
+
+## Dream Labs
+
+The `dream` strategy runs [Dream-1](https://dreamlabs.ai/research/dream-1/), Dream Labs' robot
+model, over the network: camera frames, joint state and a text prompt go out, joint targets come
+back. `soarm-lab dream` runs it without the twin, in the simulation or on the arm.
+
+Install the `dream` extra, which brings the `dreamlabs` library with its IK (Python 3.11 to 3.13).
+It conflicts with the `train` extra, so the two never install together. Create an API key on the
+[Dream Labs platform](https://platform.dreamlabs.ai) and put it in `DREAM_API_KEY`, in
+`~/.dreamlabs/credentials`, or in the repository's git-ignored `.env`:
+
+```bash
+uv sync --extra dream
+uv run --env-file .env soarm-lab dream models
+uv run --env-file .env soarm-lab dream sim --prompt "pick up the cube" --record /tmp/dream.mp4
+uv run --env-file .env soarm-lab dream arm --prompt "pick up the cube" \
+    --camera scene=/dev/video2 --camera wrist=/dev/video4 --speed 0.4 --record ~/run.mp4
+```
+
+`models` lists the checkpoints the key may run (`--checkpoint` picks one, default
+`dreamlabs/dream-1-beta`). `sim` uses the bundled station with a cube. `arm` drives the arm through
+the `feetech` backend and reads OpenCV cameras by index or device path; `--rotate scene=180` turns
+a camera mounted upside down. While it runs, a sentence typed and Enter is a new prompt; `q` and
+Enter, or Ctrl-C, stops and holds the arm with torque on.
+
+Cameras: the scene camera sits behind and above the arm, looking down at the table as a head
+camera would, and the wrist camera looks along the fingers. Dream-1 is sensitive to both views.
+
+Guards: the command ramps from the measured pose at most `--speed` times `robot.yaml`'s `max_vel`
+and `--max-step-deg` per tick; targets stay within the robot's limits and the servos' own; the arm
+holds while a camera frame is missing or older than a second; the run ends on a servo fault, when
+the arm lags its target by 25 degrees, and when no chunk came for two minutes.
+
+Caveats. Dream-1 is a bimanual model trained on YAM arms. It runs on an SO-101 zero-shot through
+dream's model of the XLeRobot, two SO-101s. With one arm, this arm is the right one and every tick
+also carries a dummy left arm (dream's rest pose, gripper open, the scene frame as its wrist view);
+the left answer is ignored. Round trips take about a second, so the arm moves in short bursts. The
+Dream client uploads every observation tick, state and frames, to Dream Labs' recorder in the
+background. Opening the policy prepares dream's IK, up to a minute the first time on a machine.
+
+In the twin, the strategy's settings come from the `dream:` section:
+
+```yaml
+dream:
+  prompt: pick up the cube
+  checkpoint: dreamlabs/dream-1-beta
+  scene_camera: a            # the twin's camera that sees the table; empty: the first camera
+  wrist_camera: ""           # the arm's wrist camera; empty: none, its slot gets fill_frame
+  fill_frame: scene          # or black: what fills a camera slot no camera has
+  max_step_deg: 4.0          # the most a joint target moves per tick [deg]
+```
 
 ## License
 

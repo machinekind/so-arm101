@@ -30,6 +30,8 @@ workspace/
 # Local configuration
 configs/local.yaml
 **/configs/local.yaml
+# The Dream Labs API key: `uv run --env-file .env soarm-lab dream ...`
+.env
 
 # Editors and OS
 .DS_Store
