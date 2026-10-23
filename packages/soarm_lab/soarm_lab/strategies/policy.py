@@ -57,8 +57,8 @@ from ..robot import load_robot
 
 logger = logging.getLogger(__name__)
 
-#: Cube pose sources (the twin's `CubeTracker.source`) lift success may be counted from: a fresh
-#: camera detection, the cube carried in the jaws, or simulation truth.
+#: Cube pose sources (`ObjectPose.source`, as the twin's perception publishes it) lift success may be
+#: counted from: a fresh camera detection, the cube carried in the jaws, or simulation truth.
 FRESH_CUBE_SOURCES = ("kamery", "w dloni", "symulacja")
 #: Sources pickplace success may be counted from: the cube SEEN lying (not "w dloni": that pose follows
 #: the jaws) or simulation truth.

@@ -1,16 +1,17 @@
 """The whole sim-to-real chain at once: the lift policy on a live twin, the cube ONLY from the cameras.
 
-The policy as the lab's strategy: frames of simulated cameras -> silhouette matching (with the arm
-masked out) -> tracking the cube in the hand (the twin's perception) -> `ObjectPose` in the observation
--> `PolicyStrategy` in the twin's `StrategyRunner` -> the safety supervisor -> physics. The physics
-truth tells whether the cube was lifted. The test runs the bundled `lift-v3`.
+The policy as the lab's strategy: frames of simulated cameras -> the twin's example cube detector
+(`machinekind-twin-cube`, a colour mask per camera) -> the twin's `Perception` (a cube fitted to the
+silhouettes with the arm masked out, then tracked in the hand) -> `ObjectPose` in the observation ->
+`PolicyStrategy` in the twin's `StrategyRunner` -> the safety supervisor -> physics. The physics truth
+tells whether the cube was lifted. The test runs the bundled `lift-v3`.
 
-The whole chain runs in SIMULATED time, without threads: the twin's loop at 50 Hz (`Twin.step`), vision
-every 0.1 s and the strategy at 20 Hz (`StrategyRunner.step_once`) on one clock.
+The whole chain runs in SIMULATED time, without threads: the twin's loop at 50 Hz (`Twin.step`), the
+detector every 0.1 s (`DetectorRunner.step_once`) and the strategy at 20 Hz (`StrategyRunner.step_once`)
+on one clock. `Perception` gets that clock and a frame source stamping on it.
 
-The cube provider takes the gripper command from the twin's `status.command` (as the panel does,
-`_vision_cube`), not from the strategy's `q_cmd`: `StrategyRunner` asks for objects before the
-strategy's `start`.
+The hand is `Perception`'s default: the gripper command from the twin's `status.command` and the closed
+jaw from the twin's joint limits, as the panel has it.
 """
 
 from __future__ import annotations
@@ -24,10 +25,11 @@ pytest.importorskip("machinekind_twin")
 
 from machinekind_twin import scene as sc  # noqa: E402
 from machinekind_twin.clock import VirtualClock  # noqa: E402
-from machinekind_twin.kinematics import RobotKinematics, inverse, pose  # noqa: E402
-from machinekind_twin.perception import CubeDetector, CubeTracker, TableMapper  # noqa: E402
+from machinekind_twin.detection import Perception  # noqa: E402
+from machinekind_twin.detectors import load_detector  # noqa: E402
+from machinekind_twin.kinematics import inverse, pose  # noqa: E402
 from machinekind_twin.runtime import Twin  # noqa: E402
-from machinekind_twin.strategy import ObjectPose, StrategyRunner  # noqa: E402
+from machinekind_twin.strategy import StrategyRunner  # noqa: E402
 from machinekind_twin.ui.watch import arm_mask  # noqa: E402
 from machinekind_twin.workspace import CameraRecord, Workspace  # noqa: E402
 
@@ -59,11 +61,6 @@ def test_lift_policy_lifts_a_cube_seen_only_by_cameras(twin_robots):
         twin.configure(objects=[sc.Box("cube", (h, h, h), (0.2, 0.0), rgba=(0.85, 0.25, 0.2, 1.0),
                                        mass=task.cube_mass)], grasp_sensors=["cube"])
         twin.connect("sim", threaded=False)
-        mapper = TableMapper.from_workspace(ws)
-        det = CubeDetector()
-        kin = RobotKinematics(ws.spec())
-        grip = kin.spec.gripper
-        g = kin.spec.joints.index(grip)
         pos, quat = tk.sample_cubes(task, np.random.default_rng(5), 1)
         with twin.lock:
             s = twin.scene
@@ -78,25 +75,17 @@ def test_lift_policy_lifts_a_cube_seen_only_by_cameras(twin_robots):
             d.qpos[a + 3:a + 7] = qw
             mujoco.mj_forward(m, d)
 
-        tracker = CubeTracker()
-        last = {"det": None}
         clock = {"t": 0.0}
+        perception = Perception(
+            twin, ws, clock=lambda: clock["t"],
+            frame=lambda c: (twin.render(c), clock["t"]),
+            occluders=lambda times: twin.render_with(
+                lambda sc_: {c: arm_mask(sc_, c, dilate=5) for c in times}))
+        # The example detector's key is "cube", the label the policy reads.
+        detector = perception.start_detector(load_detector("cube"), {"size_m": 2 * h, "interval_s": 0.1},
+                                             threaded=False)
 
-        def vision():
-            frames = {c: twin.render(c) for c in ("a", "b")}
-            occ = twin.render_with(lambda sc_: {c: arm_mask(sc_, c, dilate=5) for c in ("a", "b")})
-            last["det"] = det.detect_frames(frames, mapper, occ)
-
-        def objects():
-            joints = dict(twin.status.measured) or twin.joints()
-            q = kin.to_q(joints)
-            sent = (twin.status.command or {}).get(grip)
-            cmd = kin.to_q({**joints, grip: float(sent)})[g] if sent is not None else q[g]
-            closed = strategy.limits.lo[g] if strategy.started else kin.to_q({grip: 0.0})[g]
-            got = tracker.update(last["det"], kin.tcp(joints), q[g], cmd, closed, clock["t"])
-            return {} if got is None else {"cube": ObjectPose(got[0], got[1], tracker.source)}
-
-        runner = StrategyRunner(twin, strategy, objects=objects)
+        runner = StrategyRunner(twin, strategy, objects=perception.objects)
         runner.start(threaded=False)
         # A clock tick every 10 ms: physics every 20 ms, vision every 100 ms, the strategy every 50 ms.
         for k in range(1, int(30.0 / 0.01) + 1):
@@ -104,15 +93,17 @@ def test_lift_policy_lifts_a_cube_seen_only_by_cameras(twin_robots):
             if k % 2 == 0:
                 twin.step(0.02)
             if k % 10 == 0:
-                vision()
+                detector.step_once()
             if k % 5 == 0 and not runner.step_once(clock["t"]):
                 break
         with twin.lock:
             s = twin.scene
             Ti = inverse(s.T_base2world)
             height = (Ti[:3, :3] @ s.data.xpos[s.model.body("cube").id] + Ti[:3, 3])[2] - h
+        seen = {v.label: v.source for v in perception.snapshot()}
+        perception.stop_all("koniec testu")
         where = (f"takt {strategy.status.step}, powod {strategy.status.stopped_because!r}, kostka ze zrodla "
-                 f"{tracker.source!r}, {height * 100:.1f} cm nad blatem")
+                 f"{seen.get('cube')!r}, {height * 100:.1f} cm nad blatem")
         # The run ends on success (the cube above the table for `end_on_success` ticks) or at the
         # episode limit.
         assert strategy.status.stopped_because in ("zadanie wykonane", "koniec epizodu"), where

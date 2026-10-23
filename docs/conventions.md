@@ -97,9 +97,11 @@ The plugin contracts are the package `machinekind-twin-api` (see the root README
 - The backend contract is `machinekind_twin_api.backend`: `BackendContext`, `BackendPlugin`, `RobotBackend` and `RobotInfo`.
   A backend factory `create(ctx)` takes a `BackendContext` and returns the backend.
   `FeetechArm` and `LeRobotArm` subclass `RobotBackend`, so the twin uses them without its `PluginBackend` wrapper.
-- `machinekind_twin_api.entry_points` names the entry point groups: `ROBOTS`, `BACKENDS` and `STRATEGIES`.
+- `machinekind_twin_api.entry_points` names the entry point groups: `ROBOTS`, `BACKENDS`, `STRATEGIES` and `DETECTORS`.
   `packages/soarm/pyproject.toml` registers the robot folder under `machinekind_twin.robots` (`ROBOTS`)
   and the backend factories under `machinekind_twin.backends` (`BACKENDS`).
+  These packages register no detector (`machinekind_twin.detectors`, `DETECTORS`). The twin places what a detector
+  sees in the base frame and hands strategies `Observation.objects`.
 - The strategy contract is `machinekind_twin_api.strategy`: `Strategy`, `RunInfo`, `Observation`, `ObjectPose` and `Action`.
   The twin builds a strategy's settings dataclass strictly (`machinekind_twin.strategies`).
   Every strategy here subclasses `Strategy[ItsSettings]`, and `uv run pyright` checks it against the contract.
