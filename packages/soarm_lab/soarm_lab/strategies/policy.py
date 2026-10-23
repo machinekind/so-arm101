@@ -26,8 +26,8 @@ arm needs and the training environment does not have:
 * **time limit**: a run on the arm lasts as many ticks as a training episode (`episode_limit`);
 * **end on success**: `end_on_success` success ticks in a row end the run (lift: the cube above the
   table). Lift success counts only from a fresh cube pose (cameras, "in the hand", or simulation
-  truth), never from "last seen", and only while the jaw holds (still, commanded tighter, not
-  creeping closed during the streak);
+  truth, and no older than `max_pose_age_s`), never from "last seen" unless `allow_last_seen` says
+  so, and only while the jaw holds (still, commanded tighter, not creeping closed during the streak);
 * **reach goal in the training area**: a goal outside it (under the table, behind the base) is
   projected onto the area training goals were drawn from;
 * **pickplace**: the place target is the goal projected onto the table (z = 0) and onto the training
@@ -37,8 +37,8 @@ arm needs and the training environment does not have:
 
 Where the inputs come from: the goal is `obs.goal` (the panel's goal); without one the settings'
 `goal_x`, `goal_y`, `goal_z` hold it. The cube is `obs.objects["cube"]`: a pose in the base frame and
-its `source` ("kamery", "w dloni", "ostatnie widziane", "symulacja"); an empty source counts as
-simulation truth on a simulated arm and as stale on a real one.
+its `source` ("kamery", "w dloni", "ostatnie widziane", "symulacja") and `age_s`; an empty source
+counts as simulation truth on a simulated arm and as stale on a real one.
 """
 
 from __future__ import annotations
@@ -60,6 +60,9 @@ logger = logging.getLogger(__name__)
 #: Cube pose sources (`ObjectPose.source`, as the twin's perception publishes it) lift success may be
 #: counted from: a fresh camera detection, the cube carried in the jaws, or simulation truth.
 FRESH_CUBE_SOURCES = ("kamery", "w dloni", "symulacja")
+#: The source of a pose the cameras did not just confirm; lift success counts from it only with
+#: `PolicySettings.allow_last_seen`.
+LAST_SEEN = "ostatnie widziane"
 #: Sources pickplace success may be counted from: the cube SEEN lying (not "w dloni": that pose follows
 #: the jaws) or simulation truth.
 RESTING_CUBE_SOURCES = ("kamery", "symulacja")
@@ -81,6 +84,14 @@ class PolicySettings:
     episode_limit: bool = True
     #: How long the arm waits for the first cube pose [s] (lift, pickplace).
     wait_for_cube_s: float = 3.0
+    #: Lift success counts only from an object pose at most this old (`ObjectPose.age_s`) [s]. The twin
+    #: publishes "kamery" only up to 1 s after capture, so the default never rejects one of those. Raise
+    #: it, with `allow_last_seen`, for a slow detector (a language model answers in seconds).
+    max_pose_age_s: float = 1.0
+    #: Lift success may also count from a plain "ostatnie widziane" pose no older than `max_pose_age_s`.
+    #: Off by default: that source also means the latest detection did not find the object. A dropped
+    #: object ("ostatnie widziane (upuszczona)") never counts.
+    allow_last_seen: bool = False
     #: The goal when the observation has none [m, base frame]: reach drives the TCP there, pickplace
     #: places the cube under it.
     goal_x: float = 0.22
@@ -149,6 +160,8 @@ class PolicyStrategy(Strategy[PolicySettings]):
         self.config = settings if settings is not None else PolicySettings()
         if self.config.max_tracking_deg <= 0:
             raise ValueError(f"policy: max_tracking_deg must be positive, is {self.config.max_tracking_deg}")
+        if not self.config.max_pose_age_s >= 0:
+            raise ValueError(f"policy: max_pose_age_s must be zero or more, is {self.config.max_pose_age_s}")
         self.policy = policy if policy is not None else Policy.load(find_policy(self.config.policy))
         self.task = self.policy.task
         #: The policy's own rate: the twin's runner ticks at it.
@@ -177,6 +190,7 @@ class PolicyStrategy(Strategy[PolicySettings]):
         self.simulated = False
         self._cube: np.ndarray | None = None
         self._cube_src: str | None = None
+        self._cube_age = 0.0
         self._grip_prev: float | None = None
         self._streak_grip = 0.0
         #: pickplace: the cube was carried (as `task.carry_latch` in training), and where it was when the
@@ -260,7 +274,7 @@ class PolicyStrategy(Strategy[PolicySettings]):
             self.q_cmd[self.g] = grip
         self.prev_action = np.zeros(self.task.act_dim)
         self.status = PolicyStatus(goal_clamped=self.status.goal_clamped)
-        self._cube, self._cube_src = None, None
+        self._cube, self._cube_src, self._cube_age = None, None, 0.0
         self._grip_prev = None
         self._carried, self._streak_cube = False, None
         self._take_goal(obs)
@@ -321,6 +335,7 @@ class PolicyStrategy(Strategy[PolicySettings]):
                 raise NoCube(f"zadanie {self.task.name} potrzebuje polozenia kostki - kamery jej nie widza")
             cube_pos, cube_rot = np.asarray(got.position, float), np.asarray(got.rotation, float)
             self._cube_src = str(got.source or "") or None
+            self._cube_age = float(got.age_s)
             self._cube = cube_pos.copy()
             if self.policy.meta.randomization.get("fold_yaw", False):
                 # In training the policy saw the yaw folded to +-45 deg (as the detector gives it); the
@@ -455,9 +470,14 @@ class PolicyStrategy(Strategy[PolicySettings]):
         (camera a): the cube fell out of the jaws after 0.5 s of carrying, and success counted from the
         stale pose in the air ended the run with "zadanie wykonane" while the cube lay on the table.
         Without a source: fresh in simulation (the provider gives the scene's truth), stale on a real arm.
+        Any source: stale when older than `max_pose_age_s`, so a late pose never ends a run as done.
         """
+        if not self._cube_age <= self.config.max_pose_age_s:
+            return False                                    # too old (or an unknown age: NaN)
         if self._cube_src is None:
             return self.simulated
+        if self._cube_src == LAST_SEEN:
+            return self.config.allow_last_seen
         return self._cube_src in FRESH_CUBE_SOURCES
 
     # ---------------------------------------------------------------------- end
