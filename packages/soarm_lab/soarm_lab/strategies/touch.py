@@ -78,10 +78,12 @@ caps; a real arm's sag and jitter may need another `contact_gap_m` or `descend_s
 Phases (`TouchStatus.phase`): wait, then lift (only when the TCP starts below the hover height), approach,
 descend and touched, then done. The "touched" phase is the seam for a decision step after the descent:
 `after_touch` judges it and is the single method to replace; `hold` keeps the arm where it is while a
-decision is pending; `retarget` aims at a new point within the same run, lifting straight up first. A
-decision model's latency counts toward `time_limit_s`. Near the hand the twin's tracker rejects
-single-camera answers and the pose's age keeps growing, a repeated answer is not a new look, and a closed
-jaw on a real arm may be reported as "w dloni", which this strategy never takes.
+decision is pending; `retarget` aims at a new point within the same run, lifting straight up first;
+`descent_verdict` gives the contact geometry's own verdict. `touch_jev` (`soarm_lab.strategies.touch_jev`)
+is such a step: it asks the Jev decision model after each descent. A decision model's latency counts
+toward `time_limit_s`. Near the hand the twin's tracker rejects single-camera answers and the pose's age
+keeps growing, a repeated answer is not a new look, and a closed jaw on a real arm may be reported as
+"w dloni", which this strategy never takes.
 
 The strategy reads `obs.objects[label]` (x, y, source and age_s), `obs.joints`, `obs.command` and
 `obs.t`. It ignores `obs.goal`.
@@ -552,26 +554,33 @@ class TouchStrategy(Strategy[TouchSettings]):
         A decision model replaces this method (in a subclass, or later behind a setting). While its answer
         is pending it returns `hold`, which keeps the arm on the pose it stopped in with the lag guard on;
         `obs.t - self.phase_started` gives it a timeout of its own. To try again it calls `retarget` and
-        returns `hold`. This default ends the run at once. A contact within `contact_band_m` of the touch
-        point, after the arm came down from the hover, is a success. A stall above the band is a block, and
-        so is one where the arm never came down (an arm that does not move). No contact is a miss unless
-        `need_contact` is off.
+        returns `hold`. This default ends the run at once with `descent_verdict`, a success when it says
+        "touched" or "reached". `touch_jev` replaces it with the Jev decision model.
+        """
+        kind, reason = self.descent_verdict()
+        return self._halt(reason, self.kin.from_q(self.q_cmd), success=kind in ("touched", "reached"))
+
+    def descent_verdict(self) -> tuple[str, str]:
+        """What the contact geometry says about the last descent: its kind and the reason for the panel.
+
+        "touched": a contact within `contact_band_m` of the touch point, after the arm came down from the
+        hover. "blocked": a stall above the band. "stuck": a stall where the arm never came down, as an arm
+        that does not move gives. "missed": the touch point in free air, or "reached" when `need_contact`
+        is off.
         """
         st = self.status
-        target = self.kin.from_q(self.q_cmd)
         if st.contact:
             above = st.stop_z_m - self.config.touch_z
             if above > self.config.contact_band_m:
-                return self._halt(f"ramie zablokowane {above * 1000:.0f} mm nad punktem dotyku "
-                                  "- za wysoko na obiekt", target)
+                return "blocked", (f"ramie zablokowane {above * 1000:.0f} mm nad punktem dotyku "
+                                   "- za wysoko na obiekt")
             if not st.drop_m >= self.config.contact_gap_m:
-                return self._halt(f"ramie nie zjechalo z zawisu ({st.drop_m * 1000:.0f} mm) "
-                                  "- zablokowane albo odczyt pozycji stoi", target)
-            return self._halt(f"obiekt dotkniety {above * 1000:.0f} mm nad punktem dotyku", target,
-                              success=True)
+                return "stuck", (f"ramie nie zjechalo z zawisu ({st.drop_m * 1000:.0f} mm) "
+                                 "- zablokowane albo odczyt pozycji stoi")
+            return "touched", f"obiekt dotkniety {above * 1000:.0f} mm nad punktem dotyku"
         if not self.config.need_contact:
-            return self._halt("punkt dotyku osiagniety", target, success=True)
-        return self._halt("brak kontaktu w punkcie dotyku - obiektu tam nie ma", target)
+            return "reached", "punkt dotyku osiagniety"
+        return "missed", "brak kontaktu w punkcie dotyku - obiektu tam nie ma"
 
     def hold(self, note: str = "") -> Action:
         """A tick that keeps the last target: the arm stays where it was sent, the run goes on."""
