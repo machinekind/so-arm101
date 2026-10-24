@@ -24,7 +24,6 @@ import numpy as np
 import pytest
 
 from soarm_lab.strategies.jev import (
-    IMAGES_HEADER,
     KEY_ENV,
     SYSTEM_ONE_URL,
     JevJudge,
@@ -109,7 +108,7 @@ def test_a_frame_goes_out_as_a_png_asset_with_the_images_header():
     ask(jev, images={"a1b2": image}, state={**STATE, "camera_views": {"front": "a1b2"}})
 
     sent = transport.sent[0]
-    assert sent["headers"][IMAGES_HEADER] == "true"
+    assert sent["headers"]["TypeSafe-Danger-Zone-Images"] == "true"
     asset = sent["body"]["assets"]["a1b2"]
     assert set(asset) == {"type", "format", "data_base64"}
     assert asset["type"] == "image" and asset["format"] == "png"
@@ -160,10 +159,10 @@ def test_a_number_that_is_not_finite_never_goes_out():
 
 # ------------------------------------------------------------ the key
 def test_the_key_comes_from_the_environment_and_check_refuses_without_it():
-    for environ in ({}, {KEY_ENV: "   "}):
-        with pytest.raises(RuntimeError, match=f"brak klucza jev: ustaw {KEY_ENV}"):
+    for environ in ({}, {"TYPESAFE_API_KEY": "   "}):
+        with pytest.raises(RuntimeError, match="brak klucza jev: ustaw TYPESAFE_API_KEY"):
             JevJudge(environ=environ).check()
-    JevJudge(environ={KEY_ENV: KEY}).check()
+    JevJudge(environ={"TYPESAFE_API_KEY": KEY}).check()
 
 
 @pytest.mark.parametrize("key", ["sk-live-SECRET\nsecond-line", "sk-live-SECRET\rx", "sk-live SECRET",
@@ -209,8 +208,8 @@ MISSING_STATE = {"detail": [{"loc": ["body", "state"], "msg": "Field required", 
 
 
 @pytest.mark.parametrize("status, body, kind, retryable, reason", [
-    (401, {"detail": "Invalid API key"}, "key_rejected", False, f"jev odrzucil klucz {KEY_ENV} (401)"),
-    (403, NOT_AUTHENTICATED, "key_rejected", False, f"jev odrzucil klucz {KEY_ENV} (403)"),
+    (401, {"detail": "Invalid API key"}, "key_rejected", False, "jev odrzucil klucz TYPESAFE_API_KEY (401)"),
+    (403, NOT_AUTHENTICATED, "key_rejected", False, "jev odrzucil klucz TYPESAFE_API_KEY (403)"),
     (422, MISSING_STATE, "rejected", False, "jev odrzucil pytanie (422: body.state: Field required)"),
     (400, {"detail": "max_tokens_exceeded"}, "rejected", False,
      "jev odrzucil pytanie (400: max_tokens_exceeded)"),

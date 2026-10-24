@@ -198,12 +198,14 @@ class Gated:
         self.outcome = outcome or reply()
         self.gate = threading.Event()
         self.cancels: list[threading.Event] = []
+        self.states: list[Mapping[str, Any]] = []
 
     def check(self) -> None:
         pass
 
     def ask(self, state, questions, *, images, timeout_s, cancel) -> Reply:
         self.cancels.append(cancel)
+        self.states.append(state)
         self.gate.wait(10.0)
         return self.outcome
 
@@ -260,9 +262,9 @@ def test_it_follows_the_strategy_protocol_with_a_fake_judge():
 
 
 def test_it_builds_without_a_key_and_refuses_to_start_without_one(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.delenv(KEY_ENV, raising=False)
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
     for strategy in (JevTouchStrategy(), JevTouchStrategy(judge=JevJudge(environ={}))):
-        with pytest.raises(RuntimeError, match=f"brak klucza jev: ustaw {KEY_ENV}"):
+        with pytest.raises(RuntimeError, match="brak klucza jev: ustaw TYPESAFE_API_KEY"):
             strategy.start(run_info(), obs(SPEC.home))
         assert not strategy.started
 
@@ -385,6 +387,32 @@ def test_a_direction_moves_the_touch_point_one_step(option: str):
     assert judge.states[1]["would_repeat_earlier_point"] == [back]
 
 
+def test_a_sighting_aimed_at_is_no_new_look_on_the_next_descent():
+    """The cameras place the cube 3 cm off during the first descent, then lose it, and the twin keeps that
+    same sighting as "ostatnie widziane": the second descent already aimed at it."""
+    captured: list[float] = []
+
+    def objects(t: float, s: JevTouchStrategy) -> dict[str, ObjectPose]:
+        if s.status.attempt == 0:
+            return ageing(XY)(t, s)
+        if not captured:
+            captured.append(t)
+        source = "kamery" if s.status.attempt == 1 else "ostatnie widziane"
+        return seen(OFF, source=source, age_s=t - captured[0])
+
+    judge = Scripted(reply("missed_object", 0.95, "aim_at_latest_sighting", 0.9),
+                     reply("missed_object", 0.95))
+    s = started(judge, max_attempts=2)
+    follow(s, objects)
+
+    first, second = judge.states
+    assert first["latest_sighting"]["source"] == "cameras" and first["latest_sighting"]["new_look"]
+    assert s.status.touch_point == pytest.approx((*OFF, s.config.touch_z))
+    assert second["aim"]["sighting"]["source"] == "cameras"
+    latest = second["latest_sighting"]
+    assert latest["source"] == "last_seen" and not latest["new_look"] and latest["direction"] == "same_place"
+
+
 def test_a_repeated_stale_sighting_is_no_new_look_and_aiming_at_it_stops_for_review():
     judge = Scripted(reply("missed_object", 0.95, "aim_at_latest_sighting", 0.9))
     s = started(judge)
@@ -398,15 +426,35 @@ def test_a_repeated_stale_sighting_is_no_new_look_and_aiming_at_it_stops_for_rev
 
 
 # ------------------------------------------------------------ when the run ends
-def test_an_unsure_verdict_stops_the_arm_where_it_is_for_a_person():
-    judge = Scripted(reply("touched_object", 0.5))
+@pytest.mark.parametrize("verdict, above, said", [
+    ("touched_object", 0.015, "dotkniety"),
+    ("missed_object", None, "pudlo"),
+    ("blocked_above_object", 0.05, "zablokowany nad obiektem"),
+])
+def test_an_unsure_verdict_stops_the_arm_where_it_is_for_a_person(verdict: str, above: float | None,
+                                                                   said: str):
+    """Whatever the verdict, even a miss with a confident correction: the geometry agrees each time."""
+    judge = Scripted(reply(verdict, 0.5, "to_robot_left", 0.9))
     s = started(judge)
-    answers, *_ = follow(s, seen(), obstacle=on_cube(s))
+    answers, *_ = follow(s, seen(), obstacle=None if above is None else on_cube(s, above=above))
 
     last = answers[-1]
     assert last.done and not last.success and s.judging.needs_review
-    assert last.note == "jev niepewny: dotkniety z pewnoscia 0.50 < 0.80 - ramie stoi, do oceny czlowieka"
+    assert last.note == f"jev niepewny: {said} z pewnoscia 0.50 < 0.80 - ramie stoi, do oceny czlowieka"
     assert last.target == pytest.approx(answers[-2].target)
+    assert len(judge.states) == 1 and s.status.attempt == 1
+    assert s.status.touch_point == pytest.approx((*XY, s.config.touch_z))
+
+
+def test_answers_exactly_at_the_thresholds_are_acted_on():
+    judge = Scripted(reply("missed_object", 0.8, "to_robot_left", 0.6), reply("missed_object", 0.8))
+    s = started(judge, max_attempts=2)
+    answers, *_ = follow(s, ageing(XY))
+
+    _, left = axes(XY)
+    assert not s.judging.needs_review and s.status.attempt == 2 and len(judge.states) == 2
+    assert s.status.touch_point == pytest.approx((*(np.array(XY) + 0.02 * left), s.config.touch_z))
+    assert answers[-1].note == "jev: pudlo w ostatniej probie (2 z 2, pewnosc 0.80)"
 
 
 def test_an_unsure_correction_stops_for_review():
@@ -507,6 +555,8 @@ def test_a_judge_that_never_answers_is_asked_once_more_then_the_run_stops_for_re
     asked = [k for k, a in enumerate(answers) if a.note.startswith(asks)]
     assert len(asked) == 2 and len(judge.cancels) == 2 and all(c.is_set() for c in judge.cancels)
     assert (asked[1] - asked[0]) / s.hz >= 1.0 - 1e-9                      # 0.5 s timeout, then 0.5 s pause
+    assert (len(answers) - 1 - asked[1]) / s.hz >= 0.5 - 1e-9              # counted from the second ask
+    assert len(judge.states) == 2 and judge.states[1] == judge.states[0]
     assert answers[-1].note == "jev nie odpowiedzial w 0.5 s - ramie stoi, do oceny czlowieka"
     decisions = s.judging.decisions
     assert len(decisions) == 4 and all(d.response_s is None and d.confidence is None for d in decisions)
@@ -559,6 +609,8 @@ def test_an_overloaded_jev_is_asked_again_with_the_same_state():
     assert answers[-1].success and s.judging.asks == 2 and s.judging.failures == 1
     assert any(a.note == "jev chwilowo niedostepny (529), pytam ponownie za 0.5 s" for a in answers)
     assert transport.bodies[0] == transport.bodies[1]
+    sent = json.loads(transport.bodies[0])
+    assert sent["model"] == "jev-1.14.0" and sent["questions"] == s.questions
     decisions = s.judging.decisions
     assert [answer_of(d).get("error") for d in decisions] == ["overloaded", "overloaded", None, None]
     assert answer_of(decisions[0])["status"] == 529 and decisions[2].confidence == pytest.approx(0.95)
@@ -613,6 +665,22 @@ def test_with_frames_on_each_usable_frame_goes_with_the_question():
     assert sent["frames_left_out"] == {"wrist": "160x120 px, poza 280..1568"}
     assert s.judging.decisions[0].state["frames"] == ["front"]
     assert "camera_views" in json.dumps(s.questions["touched"])
+
+
+# ------------------------------------------------------------ the request, without the arm
+def test_the_questions_are_typesafe_choices_with_their_options_in_order():
+    """Literal names, as api.typesafe.ai reads them: a wrong key or type is a 422 on every descent, and the
+    order sets which way Jev's lean toward the first option errs."""
+    questions = touch_questions(0.02)
+
+    assert list(questions) == ["touched", "correction"]
+    for question in questions.values():
+        assert set(question) == {"type", "instructions", "criteria"} and question["type"] == "choice"
+        assert 1 <= len(question["criteria"]) <= 255
+    assert list(questions["touched"]["criteria"]) == ["missed_object", "touched_object",
+                                                      "blocked_above_object"]
+    assert list(questions["correction"]["criteria"]) == ["aim_at_latest_sighting", "farther_from_base",
+                                                         "closer_to_base", "to_robot_left", "to_robot_right"]
 
 
 # ------------------------------------------------------------ the state, without the arm
@@ -687,7 +755,8 @@ def test_a_sighting_seen_no_later_than_the_aim_is_no_new_look():
 
 
 # ------------------------------------------------------------ live
-@pytest.mark.skipif(not os.environ.get(KEY_ENV), reason=f"a live call to Jev needs {KEY_ENV}")
+@pytest.mark.skipif(not os.environ.get("TYPESAFE_API_KEY"),
+                    reason="a live call to Jev needs TYPESAFE_API_KEY")
 def test_jev_answers_the_touch_questions_live():
     judge = JevJudge()
     judge.check()

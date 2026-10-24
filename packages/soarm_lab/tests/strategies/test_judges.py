@@ -9,6 +9,7 @@ from __future__ import annotations
 import dataclasses
 import math
 import threading
+import time
 from collections.abc import Mapping
 from typing import Any
 
@@ -173,8 +174,10 @@ def test_a_cancelled_call_is_told_so_and_its_late_answer_is_dropped():
     judge = Gated()
     runner = JudgeRunner(judge)
     runner.ask({}, QUESTIONS, {}, 5.0)
+    deadline = time.monotonic() + 5.0
     while not judge.cancels:
-        threading.Event().wait(0.001)
+        assert time.monotonic() < deadline, "the worker thread never asked"
+        time.sleep(0.001)
     runner.cancel()
 
     assert judge.cancels[0].is_set() and not runner.pending
