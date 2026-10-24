@@ -86,6 +86,9 @@ With this package installed alongside the twin, its Strategies tab offers:
 - `ik`: moves the tool centre point toward a goal without training, keeping the gripper fixed.
 - `touch`: closes the gripper, moves it above an object from `obs.objects` and down until the arm
   stalls on it; built for coarse, late poses such as the LLM detector's.
+- `touch_jev`: `touch` plus a decision step, in which TypeSafe's Jev model says after each descent
+  whether the gripper touched the object and where to aim after a miss; see
+  [Jev in the touch loop](#jev-in-the-touch-loop).
 - `dream`: runs Dream Labs' Dream-1 model from a prompt and the cameras; see [Dream Labs](#dream-labs).
 
 All send joint targets through the twin's safety supervisor. Read the
@@ -105,6 +108,11 @@ touch:
   label: cube
   touch_z: 0.03
   max_pose_age_s: 30.0
+touch_jev:
+  label: cube
+  model: jev-1.14.0
+  min_confidence: 0.8
+  max_attempts: 3
 ```
 
 Goals use metres in the robot's base frame. Enable the panel's 3D goal handle
@@ -132,8 +140,76 @@ slows the run but never reads as a touch.
 
 See [policy settings](soarm_lab/strategies/policy.py),
 [IK settings](soarm_lab/strategies/ik.py),
-[touch settings](soarm_lab/strategies/touch.py) and
+[touch settings](soarm_lab/strategies/touch.py),
+[touch_jev settings](soarm_lab/strategies/touch_jev.py) and
 [conventions](../../docs/conventions.md) for the full interfaces.
+
+## Jev in the touch loop
+
+`touch_jev` runs `touch` and asks [Jev](https://docs.typesafe.ai), TypeSafe's decision model, about
+each descent: did the gripper touch the object, and if it missed, where should it aim next. After a
+miss the arm rises straight up, moves to the new hover point and descends again, within the same run.
+
+Put your TypeSafe API key in `TYPESAFE_API_KEY` in the twin's environment, for example in the
+repository's git-ignored `.env`, and start the twin with it:
+
+```bash
+uv run --env-file .env twin ui
+```
+
+Without the key the strategy refuses the run before the arm moves. The model is a pinned version,
+`jev-1.14.0`, because the confidence thresholds belong to one version; an alias such as `jev-latest`
+moves with new releases.
+
+What goes to `api.typesafe.ai`: one request per descent, and a second only after a timeout, an
+overload or a dropped connection. Each holds the model, a JSON state and two questions. The state says
+how the descent ended, how high it stopped against the object's top, where the latest pose lies
+relative to the touch point and whether it is a new look, the earlier descents, and the corrections
+that would repeat a point already tried. It holds no joint values, not the contact
+geometry's own verdict, and never the key. Camera frames go out only with `send_frames: true`, as PNG
+images; TypeSafe does not yet guarantee image input for production, and Jev refuses a frame unless both
+of its sides lie within 280 to 1568 px.
+
+| Jev's answer | The run |
+| --- | --- |
+| touched, confidence at least `min_confidence` (0.8) | ends as a success |
+| blocked above the object | ends |
+| missed, on the last of `max_attempts` (3) | ends |
+| missed, correction confidence at least `min_correction_confidence` (0.6) | rises, aims at the corrected point, descends again |
+| missed, with a less certain correction, or one that gives no new reachable point | ends for review |
+| any verdict below `min_confidence` | ends for review |
+| no answer within `answer_timeout_s`, an overload or a dropped connection | asks once more after 0.5 s, then ends for review |
+| a refused key or request, an unusable answer | ends for review |
+
+A run that ends for review leaves the arm holding the pose it stopped in, and its stop reason ends with
+"do oceny czlowieka". An arm that never came down is not asked about; it ends as in `touch`. When Jev's
+verdict differs from the contact geometry's, the stop reason adds "geometria: ...". A failed call is
+never read as an answer.
+
+Every call gives one record per question (`judges.Decision`): the answer as received or the error, the
+exact state sent, the confidence and the response time. The strategy keeps them in `judging.decisions`,
+writes one log line per call, and puts a summary in the panel's note and stop reason. The twin API this
+workspace pins (0.1.2) has no place for them in an `Action`. Once the pin moves to 0.1.3 they go to
+`Action.decisions`, and the twin's episode log keeps them.
+
+Caveats:
+
+- Confidence measures how concentrated Jev's probabilities are, not the chance that the answer is
+  right. The thresholds are TypeSafe's starting points (0.8 to act alone, 0.6 as a floor) and are not
+  yet tuned for this task.
+- Jev leans toward the first option of a question. "Missed" comes first, so that bias costs one more
+  descent rather than a false success.
+- Without frames Jev sees only what the geometry measured, so it mostly repeats `touch`'s own verdict.
+  The frames are the A/B that can add information.
+- `need_contact` only changes the geometry label recorded next to each answer; the model decides.
+- Model waits count toward `time_limit_s`, 90 s by default.
+
+Each record holds the exact state and the questions' version (`touch_jev/1`), so the same input can be
+put to Claude or to a person to compare accuracy. A Claude judge would implement the `Judge` protocol
+in [judges.py](soarm_lab/strategies/judges.py); it is not built yet. It needs the process handling of
+the twin's `machinekind_twin_llm.cli` copied here, not imported (that package is only in the `twin`
+group and loads OpenCV), a fake CLI for its tests, and an `answer_timeout_s` near its 60 s limit,
+because the CLI answers in seconds where Jev answers in about 0.1 s.
 
 ## Dream Labs
 
