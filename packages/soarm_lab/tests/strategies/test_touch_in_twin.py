@@ -7,7 +7,9 @@ without a thread on a virtual clock). The strategy package itself imports nothin
 The poses come from the simulation, as the panel's "symulacja" gives them, or are made coarse the way the
 LLM detector's are: off by a centimetre or more, at the table top, "ostatnie widziane", seconds old. The
 runs are judged by the simulation, not by the strategy's own claim: the contact sensors the twin puts
-between the cube and the jaws (`grasp_sensors`), and how far the touch pushed and tilted the cube.
+between the cube and the jaws (`grasp_sensors`), and how far the touch pushed and tilted the cube. Other
+runs put the panel's speed cap on the arm, at the start or during the run, or a fixed wall in its way,
+after which the arm must hold where it measures.
 
 The twin's robot discovery is pinned to `soarm`'s folder (fixture `twin_robots`): the twin registers an
 SO-101 of its own under the same name.
@@ -104,6 +106,12 @@ def truth(twin: Twin) -> tuple[np.ndarray, np.ndarray]:
         position = Ti[:3, :3] @ s.data.xpos[b] + Ti[:3, 3]
         rotation = Ti[:3, :3] @ s.data.xmat[b].reshape(3, 3)
     return position.copy(), rotation.copy()
+
+
+def fixed_pose(xy: tuple[float, float]) -> Objects:
+    """A pose at the table top that never changes, as "symulacja" gives a cube that does not move."""
+    pose = {"cube": ObjectPose(np.array([*xy, 0.0]), np.eye(3), "symulacja")}
+    return lambda: pose
 
 
 def sim_cube(twin: Twin) -> dict[str, ObjectPose]:
@@ -300,6 +308,73 @@ def test_a_decision_step_aims_again_after_a_miss_and_touches_the_cube(twin):
     assert runner.status.stopped_because == "zadanie wykonane"
     assert strategy.status.attempt == 2 and strategy.status.contact
     assert scene.ok, (scene, strategy.status)
+
+
+@pytest.mark.parametrize("xy", [(0.2, 0.0), (0.22, 0.05)])
+def test_under_the_panels_speed_cap_a_descent_in_free_air_is_a_miss(twin, xy):
+    """The twin app caps the arm joints at 20 deg/s from its start (`Twin.set_speed`), and `RunInfo.max_vel`
+    says so: the targets keep to it, so the run neither ends on lag nor reads a lagging command as a touch."""
+    twin.set_speed(20.0)
+    twin.connect("sim", threaded=False)
+    strategy = load_strategy(NAME).create({})
+    runner = StrategyRunner(twin, strategy, objects=fixed_pose(xy))
+
+    runner.start(threaded=False)
+    drive(twin, runner, 60.0, Clock())
+
+    assert runner.status.stopped_because == "strategia skonczyla", strategy.status
+    assert strategy.status.stopped_because.startswith("brak kontaktu"), strategy.status
+
+
+def test_under_the_panels_speed_cap_the_cube_is_touched(twin):
+    twin.set_speed(20.0)
+    add_cube(twin)
+    twin.connect("sim", threaded=False)
+    strategy = load_strategy(NAME).create({})
+    runner = StrategyRunner(twin, strategy, objects=lambda: sim_cube(twin))
+
+    runner.start(threaded=False)
+    scene = run_and_judge(twin, runner, Clock(), seconds=60.0)
+
+    assert runner.status.stopped_because == "zadanie wykonane", strategy.status
+    assert scene.ok, (scene, strategy.status)
+
+
+def test_a_speed_cap_lowered_during_the_run_never_reads_as_a_touch(twin):
+    """The operator lowers the cap to 4 deg/s after the start, so `RunInfo.max_vel` does not know it. The
+    supervisor's command then trails the targets, and the arm is measured against that command."""
+    twin.connect("sim", threaded=False)
+    strategy = load_strategy(NAME).create({})
+    runner = StrategyRunner(twin, strategy, objects=fixed_pose((0.22, 0.05)))
+
+    runner.start(threaded=False)
+    twin.set_speed(4.0)
+    drive(twin, runner, 60.0, Clock())
+
+    assert runner.status.stopped_because == "strategia skonczyla", strategy.status
+    assert strategy.status.stopped_because.startswith("brak kontaktu"), strategy.status
+
+
+def test_on_lag_the_twin_holds_the_arm_where_it_measures(twin):
+    """A fixed wall in the way from home: the arm stalls on it and the run ends on lag. The arm then holds
+    where it measures, not at the command the supervisor had already sent past the wall."""
+    twin.configure(objects=[twin_scene.Box("wall", (0.006, 0.06, 0.065), (0.215, 0.0), free=False)])
+    twin.connect("sim", threaded=False)
+    strategy = load_strategy(NAME).create({})
+    runner = StrategyRunner(twin, strategy, objects=fixed_pose((0.2, 0.0)))
+
+    runner.start(threaded=False)
+    drive(twin, runner, 10.0, Clock())
+
+    assert not runner.status.running and not runner.status.success
+    assert strategy.status.stopped_because.startswith("ramie nie nadaza za celem"), strategy.status
+    assert runner.status.stopped_because.endswith(strategy.status.stopped_because)
+    for _ in range(round(2.0 / TWIN_PERIOD)):
+        twin.step(TWIN_PERIOD)
+    arm = strategy.kin.spec.arm_joints
+    status = twin.status
+    assert status.state != "ESTOP" and twin.owner is None
+    assert {n: status.command[n] for n in arm} == pytest.approx({n: status.measured[n] for n in arm}, abs=1.0)
 
 
 def test_without_a_pose_the_run_ends_after_the_wait(twin):

@@ -1,15 +1,16 @@
 """The touch strategy without the twin: the wait, the pose check, the path, contact, the jaw and the seam.
 
 The tests build the contracts' own `RunInfo`, `Observation` and `ObjectPose` (`machinekind_twin_api`) and
-play the arm themselves: the measured joints are the previous tick's target (perfect tracking), except
-where a target would put the TCP into an obstacle; there the arm stays where it was. That stall is what
-the strategy reads as contact. test_touch_in_twin.py runs the same strategy through the twin's runner and
-physics, with a cube.
+play the twin's supervisor and the arm themselves (`follow`): the supervisor's command goes to each target,
+at once or under a speed cap, and the measured joints follow the command, at once or with a servo's lag,
+and with a constant height offset at the TCP when the arm sags or is held up. Where the arm would put the
+TCP into an obstacle it stays where it was. That stall is what the strategy reads as contact.
+test_touch_in_twin.py runs the same strategy through the twin's runner and physics, with a cube.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 import numpy as np
 import pytest
@@ -19,18 +20,22 @@ import soarm
 
 pytest.importorskip("mujoco")
 
+from soarm_lab.kinematics import RobotKinematics  # noqa: E402
 from soarm_lab.robot import load_robot  # noqa: E402
 from soarm_lab.strategies.touch import TouchSettings, TouchStrategy  # noqa: E402
 
 SPEC = load_robot()
+KIN = RobotKinematics(SPEC)
 #: Where the object lies in most tests [m, base frame].
 XY = (0.22, 0.05)
 NAN = float("nan")
 
 
-def run_info(limits: dict[str, tuple[float, float]] | None = None, simulated: bool = True) -> RunInfo:
+def run_info(limits: dict[str, tuple[float, float]] | None = None, simulated: bool = True,
+             max_vel: dict[str, float] | None = None) -> RunInfo:
     return RunInfo(robot="so101", joints=tuple(SPEC.joints), gripper=SPEC.gripper,
-                   limits=dict(SPEC.limits) if limits is None else limits, max_vel=dict(SPEC.max_vel),
+                   limits=dict(SPEC.limits) if limits is None else limits,
+                   max_vel=dict(SPEC.max_vel) if max_vel is None else max_vel,
                    folder=soarm.ROBOT_DIR, simulated=simulated)
 
 
@@ -48,10 +53,25 @@ def seen(xy: tuple[float, float] = XY, source: str = "ostatnie widziane", age_s:
 
 def started(objects: dict[str, ObjectPose] | None = None, joints: dict[str, float] | None = None,
             simulated: bool = True, command: dict[str, float] | None = None,
-            strategy: type[TouchStrategy] = TouchStrategy, **settings) -> TouchStrategy:
+            strategy: type[TouchStrategy] = TouchStrategy, max_vel: dict[str, float] | None = None,
+            **settings) -> TouchStrategy:
     s = strategy(TouchSettings(**settings))
-    s.start(run_info(simulated=simulated), obs(dict(joints or SPEC.home), objects=objects, command=command))
+    s.start(run_info(simulated=simulated, max_vel=max_vel),
+            obs(dict(joints or SPEC.home), objects=objects, command=command))
     return s
+
+
+def pose_at(point: tuple[float, float, float], gripper: float = 0.0) -> dict[str, float]:
+    """The joints that put the TCP on `point` [m, base frame]."""
+    solution = KIN.ik(np.array(point, float), seed=SPEC.home)
+    assert solution.ok
+    return dict(solution.joints, gripper=gripper)
+
+
+def capped(cap_deg_s: float) -> dict[str, float]:
+    """The supervisor's speed limits under the panel's speed cap: the arm joints at most `cap_deg_s`."""
+    return {name: value if name == SPEC.gripper else min(value, cap_deg_s)
+            for name, value in SPEC.max_vel.items()}
 
 
 def cube_at(xy: tuple[float, float], top: float, half: float = 0.015) -> Callable[[np.ndarray], bool]:
@@ -60,23 +80,82 @@ def cube_at(xy: tuple[float, float], top: float, half: float = 0.015) -> Callabl
 
 
 def follow(s: TouchStrategy, joints: dict[str, float], objects: dict[str, ObjectPose] | None, ticks: int,
-           t0: float = 0.0, obstacle: Callable[[np.ndarray], bool] | None = None,
+           t0: float = 0.0, obstacle: Callable[[np.ndarray], bool] | None = None, offset_z: float = 0.0,
+           cap_deg_s: float | None = None, lag_s: float = 0.0, commands: list[dict[str, float]] | None = None,
            ) -> tuple[list[Action], list[str], dict[str, float], float]:
-    """Up to `ticks` ticks of perfect tracking, ending on `done`; a target into `obstacle` is not followed.
+    """Up to `ticks` ticks of the supervisor and the arm, ending on `done`.
+
+    The supervisor's command goes to each target, every arm joint at most `cap_deg_s` per second (None: at
+    once). The arm follows the command, as a first-order servo with time constant `lag_s` (0: at once), with
+    its TCP `offset_z` higher. A pose whose TCP lies in `obstacle` is not reached: the arm stays where it was.
+    `commands` collects the command each tick observed.
 
     Returns the answers, the phase after each tick, the last measured joints and the time to go on from.
     """
     answers, phases = [], []
+    command = dict(joints)
+    share = 1.0 if lag_s <= 0 else 1.0 - np.exp(-1.0 / (s.hz * lag_s))
     t = t0
     for _ in range(ticks):
-        answers.append(a := s.act(obs(joints, t=t, objects=objects)))
+        if commands is not None:
+            commands.append(command)
+        answers.append(a := s.act(obs(joints, t=t, objects=objects, command=command)))
         phases.append(s.status.phase)
         t += 1 / s.hz
-        if obstacle is None or not obstacle(tcp(s, a.target)):
-            joints = dict(a.target)
+        command = supervised(command, a.target, None if cap_deg_s is None else cap_deg_s / s.hz)
+        arm = servo(joints, held(s, command, offset_z), share)
+        if obstacle is None or not obstacle(tcp(s, arm)):
+            joints = arm
         if a.done:
             break
     return answers, phases, joints, t
+
+
+def supervised(command: dict[str, float], target: Mapping[str, float],
+               step_deg: float | None) -> dict[str, float]:
+    """The supervisor's next command: toward the target, every arm joint by at most `step_deg`."""
+    out = dict(command)
+    for name, value in target.items():
+        if step_deg is None or name == SPEC.gripper:
+            out[name] = float(value)
+        else:
+            out[name] = command[name] + float(np.clip(value - command[name], -step_deg, step_deg))
+    return out
+
+
+def held(s: TouchStrategy, command: dict[str, float], offset_z: float) -> dict[str, float]:
+    """Where the arm settles under `command`: its TCP `offset_z` higher (sag below zero)."""
+    if offset_z == 0.0:
+        return dict(command)
+    point = tcp(s, command) + np.array([0.0, 0.0, offset_z])
+    return dict(s.kin.ik_step(point, seed=command, tol=1e-5).joints, gripper=command[SPEC.gripper])
+
+
+def servo(measured: dict[str, float], settled: dict[str, float], share: float) -> dict[str, float]:
+    """The arm after one tick: every joint goes `share` of the way to where it settles."""
+    return {name: measured[name] + share * (value - measured[name]) for name, value in settled.items()}
+
+
+def run_frozen(s: TouchStrategy, frozen: dict[str, float], objects: dict[str, ObjectPose], ticks: int,
+               with_command: bool = True) -> tuple[list[Action], list[str], str]:
+    """Ticks with an arm that never moves while the supervisor follows the targets.
+
+    Without `with_command` the observations carry no supervisor's command. Returns the answers, the phases
+    and the lag guard's exception text, empty when it did not stop the run.
+    """
+    answers, phases = [], []
+    command = dict(frozen)
+    try:
+        for k in range(ticks):
+            answers.append(a := s.act(obs(frozen, t=k / s.hz, objects=objects,
+                                          command=command if with_command else None)))
+            phases.append(s.status.phase)
+            command = supervised(command, a.target, None)
+            if a.done:
+                break
+    except RuntimeError as exc:
+        return answers, phases, str(exc)
+    return answers, phases, ""
 
 
 def tcp(s: TouchStrategy, joints) -> np.ndarray:
@@ -113,16 +192,28 @@ def test_without_a_pose_the_run_ends_after_the_wait():
     assert s.status.stopped_because == a.note and s.status.phase == "done" and s.status.attempt == 0
 
 
+def test_a_pose_that_stays_too_old_ends_the_run_after_the_wait():
+    s = started(wait_for_pose_s=1.0)
+
+    assert not s.act(obs(dict(SPEC.home), t=0.5, objects=seen(age_s=40.0))).done
+    a = s.act(obs(dict(SPEC.home), t=1.5, objects=seen(age_s=40.0)))
+
+    assert a.done and not a.success
+    assert "brak uzytecznego polozenia obiektu 'cube' po 1 s (za stare: 40 s)" in a.note
+    assert s.status.touch_point is None and s.status.attempt == 0
+
+
 # ------------------------------------------------------------ which poses count
+# `max_pose_age_s` differs from `wait_for_pose_s` (30 s), so a check against the wrong setting fails.
 @pytest.mark.parametrize("source, age_s, simulated", [
     ("kamery", 0.2, False),
-    ("ostatnie widziane", 12.0, False),
-    ("ostatnie widziane", 30.0, False),                    # the limit itself
+    ("ostatnie widziane", 4.0, False),
+    ("ostatnie widziane", 5.0, False),                     # the limit itself
     ("symulacja", 0.0, True),
     ("", 0.0, True),                                       # no source: the simulation's truth
 ])
 def test_a_usable_pose_gives_the_target(source: str, age_s: float, simulated: bool):
-    s = started(simulated=simulated)
+    s = started(simulated=simulated, max_pose_age_s=5.0)
     a = s.act(obs(dict(SPEC.home), t=0.05, objects=seen(source=source, age_s=age_s)))
 
     assert not a.done and s.status.phase == "approach"
@@ -131,7 +222,7 @@ def test_a_usable_pose_gives_the_target(source: str, age_s: float, simulated: bo
 
 
 @pytest.mark.parametrize("source, age_s, simulated, why", [
-    ("ostatnie widziane", 31.0, False, "za stare: 31 s"),
+    ("ostatnie widziane", 6.0, False, "za stare: 6 s"),
     ("ostatnie widziane", NAN, False, "za stare"),
     ("ostatnie widziane (upuszczona)", 1.0, False, "zrodlo 'ostatnie widziane (upuszczona)'"),
     ("ostatnie widziane (1 kamera widzi ja gdzie indziej)", 1.0, False, "zrodlo"),
@@ -139,7 +230,7 @@ def test_a_usable_pose_gives_the_target(source: str, age_s: float, simulated: bo
     ("", 0.0, False, "bez zrodla poza symulacja"),
 ])
 def test_an_unusable_pose_keeps_the_arm_waiting(source: str, age_s: float, simulated: bool, why: str):
-    s = started(simulated=simulated)
+    s = started(simulated=simulated, max_pose_age_s=5.0)
     a = s.act(obs(dict(SPEC.home), t=0.05, objects=seen(source=source, age_s=age_s)))
 
     assert not a.done and s.status.phase == "wait" and why in a.note
@@ -220,6 +311,54 @@ def test_a_stall_on_the_object_ends_the_run_as_a_success_holding_the_measured_po
     assert not any("nie nadaza" in a.note for a in answers)
 
 
+def test_a_stall_just_above_the_touch_point_is_a_contact():
+    """The hand meets the object 2.5 mm above the touch point: the rise stays under `contact_gap_m`, but an
+    arm held up there is a contact, and it holds the measured pose instead of pressing on."""
+    s = started(seen())
+    top = s.config.touch_z + 0.0025
+    answers, phases, joints, _ = follow(s, dict(SPEC.home), seen(), 400, obstacle=cube_at(XY, top))
+
+    last = answers[-1]
+    assert last.done and last.success and last.note.startswith("obiekt dotkniety") and s.status.contact
+    assert top <= s.status.stop_z_m <= top + s.descend_step_m
+    assert last.target == pytest.approx(dict(joints, gripper=SPEC.limits["gripper"][0]))
+
+
+@pytest.mark.parametrize("offset_z", [-0.003, 0.005])
+def test_an_arm_that_sags_or_is_held_up_still_tells_a_miss_from_a_touch(offset_z: float):
+    """A constant offset between the commanded and the measured TCP: the arm stands still off the hover point,
+    and the offset measured there is what the descent compares with."""
+    s = started(seen())
+    answers, phases, *_ = follow(s, dict(SPEC.home), seen(), 600, offset_z=offset_z)
+
+    assert runs(phases) == ["approach", "descend", "done"]
+    assert answers[-1].note == "brak kontaktu w punkcie dotyku - obiektu tam nie ma"
+
+    s = started(seen())
+    top = s.config.touch_z + 0.015
+    answers, *_ = follow(s, dict(SPEC.home), seen(), 600, obstacle=cube_at(XY, top), offset_z=offset_z)
+
+    assert answers[-1].success and answers[-1].note.startswith("obiekt dotkniety")
+    assert top <= s.status.stop_z_m <= top + s.config.contact_gap_m + s.descend_step_m
+
+
+def test_a_lagging_servo_coming_up_to_the_hover_is_not_a_block():
+    """A first-order servo (0.15 s) starting below the hover at the object's x and y, as after a touch: the
+    arm comes up to the hover from below, and the offset there is taken only once it has settled."""
+    xy, below = (0.2, 0.0), pose_at((0.2, 0.0, 0.04))
+    s = started(seen(xy), joints=below)
+    answers, phases, *_ = follow(s, below, seen(xy), 600, lag_s=0.15)
+
+    assert runs(phases)[0] == "lift" and runs(phases)[-2:] == ["descend", "done"]
+    assert answers[-1].note == "brak kontaktu w punkcie dotyku - obiektu tam nie ma"
+
+    s = started(seen(xy), joints=below)
+    top = s.config.touch_z + 0.015
+    answers, *_ = follow(s, below, seen(xy), 600, obstacle=cube_at(xy, top), lag_s=0.15)
+
+    assert answers[-1].success and answers[-1].note.startswith("obiekt dotkniety")
+
+
 def test_a_stall_above_the_contact_band_is_a_block():
     s = started(seen())
     top = s.config.touch_z + 0.05
@@ -227,6 +366,63 @@ def test_a_stall_above_the_contact_band_is_a_block():
 
     assert answers[-1].done and not answers[-1].success
     assert answers[-1].note.startswith("ramie zablokowane") and s.status.contact
+
+
+@pytest.mark.parametrize("frozen_at, xy, settings, descends", [
+    ((*XY, 0.05), XY, {}, False),                           # below the hover, at the object
+    ((*XY, 0.055), (XY[0], XY[1] + 0.018), {}, False),      # 1.8 cm from the object
+    ((*XY, 0.055), XY, {"hover_m": 0.025}, True),           # on the hover point
+])
+def test_an_arm_that_never_moves_is_never_a_touch(frozen_at, xy, settings, descends: bool):
+    """Readings that stop updating, torque off or a jammed joint: the targets move, the measured pose not.
+
+    Standing still counts as arrival only within `SAG_M`, so a frozen arm away from the hover never starts a
+    descent. One frozen on the hover point does, and its stall is no touch, because it never came down.
+    """
+    frozen = pose_at(frozen_at)
+    s = started(seen(xy), joints=frozen, **settings)
+    answers, phases, _ = run_frozen(s, frozen, seen(xy), 400)
+
+    assert not any(a.success for a in answers) and not s.status.success
+    assert not any(a.note.startswith("obiekt dotkniety") for a in answers)
+    assert ("descend" in phases) == descends
+    if descends:
+        assert answers[-1].done and answers[-1].note.startswith("ramie nie zjechalo z zawisu")
+
+
+# ------------------------------------------------------------ the supervisor's speed cap
+def test_targets_respect_the_supervisors_speed_limits():
+    """The panel's speed cap at 20 deg/s, given in `RunInfo.max_vel`: no arm joint's target moves faster."""
+    s = started(seen(), max_vel=capped(20.0))
+    start = s.kin.from_q(s.q_cmd)
+    answers, phases, *_ = follow(s, dict(SPEC.home), seen(), 3000, cap_deg_s=20.0)
+
+    assert answers[-1].note == "brak kontaktu w punkcie dotyku - obiektu tam nie ma"
+    targets = [start] + [a.target for a in answers]
+    for before, after in zip(targets, targets[1:], strict=False):
+        assert all(abs(after[n] - before[n]) <= 20.0 / s.hz + 1e-6 for n in SPEC.arm_joints)
+
+
+@pytest.mark.parametrize("told", [True, False], ids=["cap at the start", "cap lowered during the run"])
+def test_under_a_speed_cap_free_air_is_a_miss_and_a_stall_is_a_touch(told: bool):
+    """The supervisor's command trails the targets at 4 deg/s: that is neither a contact nor a collision."""
+    max_vel = capped(4.0) if told else None
+    s = started(seen(), max_vel=max_vel)
+    answers, *_ = follow(s, dict(SPEC.home), seen(), 4000, cap_deg_s=4.0)
+
+    assert answers[-1].done and answers[-1].note == "brak kontaktu w punkcie dotyku - obiektu tam nie ma"
+
+    s = started(seen(), max_vel=max_vel)
+    top = s.config.touch_z + 0.015
+    commands: list[dict[str, float]] = []
+    answers, *_ = follow(s, dict(SPEC.home), seen(), 4000, obstacle=cube_at(XY, top), cap_deg_s=4.0,
+                         commands=commands)
+
+    assert answers[-1].success and answers[-1].note.startswith("obiekt dotkniety")
+    assert top <= s.status.stop_z_m <= top + s.config.contact_gap_m + s.descend_step_m
+    # The verdict waits for the command to reach the hold pose: the twin drops the target sent with `done`.
+    arm, held = SPEC.arm_joints, answers[-1].target
+    assert {n: commands[-1][n] for n in arm} == pytest.approx({n: held[n] for n in arm}, abs=0.2)
 
 
 # ------------------------------------------------------------ reach
@@ -297,21 +493,27 @@ def test_a_squeezing_command_keeps_squeezing(close_jaw: bool):
 
 
 # ------------------------------------------------------------ lag = collision
-def test_the_lag_guard_ends_the_run_with_the_measured_pose():
-    """The measured pose stops following (a blocked arm) while the base turns toward the object."""
+@pytest.mark.parametrize("with_command", [True, False])
+def test_the_lag_guard_ends_the_run_by_raising(with_command: bool):
+    """The measured pose stops following (a blocked arm) while the base turns toward the object.
+
+    The guard raises: the twin's runner then holds the arm where it measures, while a target sent with
+    `done` would be dropped. It compares the measured pose with the supervisor's command, or with the last
+    target when the observation has no command.
+    """
     blocked = dict(SPEC.home, gripper=40.0)
     where = seen((0.05, 0.22))
     s = started(where, joints=blocked)
-    answers = []
-    for k in range(400):
-        answers.append(a := s.act(obs(blocked, t=k / s.hz, objects=where)))
-        if a.done:
-            break
+    answers, _, lagged = run_frozen(s, blocked, where, 400, with_command=with_command)
 
-    last = answers[-1]
-    assert last.done and not last.success and "nie nadaza" in last.note
-    assert last.target == pytest.approx(dict(blocked, gripper=SPEC.limits["gripper"][0]))
-    assert s.status.step == len(answers) - 1                             # the stopping tick does not count
+    assert lagged.startswith("ramie nie nadaza za celem (")
+    assert lagged.endswith(" st.) - kolizja albo blokada")
+    assert not any(a.done for a in answers)
+    assert s.status.phase == "done" and not s.status.success and s.status.stopped_because == lagged
+    assert s.status.step == len(answers)                                 # the stopping tick does not count
+    s.stop(f"RuntimeError: {lagged}")                                    # the runner's reason after the raise
+    assert s.status.stopped_because == lagged
+
 
 
 # ------------------------------------------------------------ the seam for a decision step
