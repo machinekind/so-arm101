@@ -44,8 +44,9 @@ def obs(joints: dict[str, float], t: float = 0.0, command: dict[str, float] | No
     return Observation(t=t, step=0, joints=joints, command=command or {}, goal=goal, objects=objects or {})
 
 
-def cube(position, source: str = "kamery") -> dict[str, ObjectPose]:
-    return {"cube": ObjectPose(position=np.asarray(position, float), rotation=np.eye(3), source=source)}
+def cube(position, source: str = "kamery", age_s: float = 0.0) -> dict[str, ObjectPose]:
+    return {"cube": ObjectPose(position=np.asarray(position, float), rotation=np.eye(3), source=source,
+                               age_s=age_s)}
 
 
 def strategy(task: str = "reach", action: dict[int, float] | None = None, **settings) -> PolicyStrategy:
@@ -184,6 +185,50 @@ def test_lift_success_needs_a_fresh_cube_and_a_holding_jaw():
     for k in range(5):
         s.act(obs(held, t=0.05 * k, objects=cube(lifted, "")))
     assert s.status.success
+
+
+def lift_success(s: PolicyStrategy, objects: dict[str, ObjectPose], ticks: int = 5) -> bool:
+    """Whether a lifted cube in a holding jaw counts as success after `ticks` ticks from a fresh start."""
+    held = dict(SPEC.home, gripper=25.0)                  # the jaw blocked on the cube
+    s.start(run_info(), obs(held))
+    for k in range(ticks):
+        s.act(obs(held, t=0.05 * k, objects=objects))
+    return s.status.success
+
+
+def test_lift_success_needs_a_young_cube_pose():
+    """A pose older than `max_pose_age_s` never counts, whatever its source says."""
+    s = strategy("lift", {5: -1.0})
+    lifted = [0.2, 0.0, s.task.cube_half + s.task.lift_height + 0.02]
+    assert s.config.max_pose_age_s == 1.0
+    # The default keeps today's camera path: the twin says "kamery" only up to 1 s after capture.
+    assert lift_success(s, cube(lifted, "kamery", age_s=0.66))
+    assert lift_success(s, cube(lifted, "kamery", age_s=1.0))
+    assert not lift_success(s, cube(lifted, "kamery", age_s=1.5))
+    assert not lift_success(s, cube(lifted, "kamery", age_s=float("nan")))
+    assert lift_success(s, cube(lifted, "w dloni", age_s=0.0))
+    s = strategy("lift", {5: -1.0}, max_pose_age_s=0.2)
+    assert not lift_success(s, cube(lifted, "kamery", age_s=0.3))
+    assert not lift_success(s, cube(lifted, "w dloni", age_s=0.3))
+
+
+def test_lift_success_from_last_seen_only_when_the_operator_allows_it():
+    """A slow detector (a language model) publishes "ostatnie widziane"; it counts only when allowed."""
+    s = strategy("lift", {5: -1.0})
+    lifted = [0.2, 0.0, s.task.cube_half + s.task.lift_height + 0.02]
+    assert not s.config.allow_last_seen
+    assert not lift_success(s, cube(lifted, "ostatnie widziane", age_s=0.1))
+    s = strategy("lift", {5: -1.0}, allow_last_seen=True, max_pose_age_s=15.0)
+    assert lift_success(s, cube(lifted, "ostatnie widziane", age_s=12.0))
+    assert not lift_success(s, cube(lifted, "ostatnie widziane", age_s=20.0))
+    assert not lift_success(s, cube(lifted, "ostatnie widziane (upuszczona)", age_s=1.0))
+
+
+def test_max_pose_age_must_not_be_negative():
+    with pytest.raises(ValueError, match="max_pose_age_s must be zero or more"):
+        strategy("lift", max_pose_age_s=-1.0)
+    with pytest.raises(ValueError, match="max_pose_age_s must be zero or more"):
+        strategy("lift", max_pose_age_s=float("nan"))
 
 
 def test_the_run_ends_after_a_training_episode():
