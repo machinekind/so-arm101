@@ -448,10 +448,12 @@ def test_the_model_decides_alone_and_a_disagreement_with_the_geometry_is_said():
     assert answers[-1].note == "jev: obiekt dotkniety (pewnosc 0.90); geometria: brak kontaktu"
 
 
-def test_an_arm_that_never_came_down_is_not_asked_about():
-    """Frozen readings on the hover point: the stall is no touch, and touch's default ends the run."""
-    frozen = pose_at((*XY, 0.055))
-    s = started(Scripted(), joints=frozen, hover_m=0.025)
+@pytest.mark.parametrize("hover_m, kind", [(0.06, "blocked"), (0.025, "stuck")])
+def test_an_arm_that_never_came_down_is_not_asked_about(hover_m: float, kind: str):
+    """Frozen readings on the hover point: the stall is no touch, and touch's default ends the run. With the
+    default hover the stall lies above the contact band, which touch calls a block."""
+    frozen = pose_at((*XY, JevTouchSettings().touch_z + hover_m))
+    s = started(Scripted(), joints=frozen, hover_m=hover_m)
     answers = []
     command = dict(frozen)
     for k in range(400):
@@ -460,7 +462,8 @@ def test_an_arm_that_never_came_down_is_not_asked_about():
         if answers[-1].done:
             break
 
-    assert answers[-1].done and answers[-1].note.startswith("ramie nie zjechalo z zawisu")
+    assert answers[-1].done and not answers[-1].success and s.status.drop_m < s.config.contact_gap_m
+    assert s.descent_verdict() == (kind, answers[-1].note)
     assert s.judging.asks == 0 and s.judging.decisions == []
 
 

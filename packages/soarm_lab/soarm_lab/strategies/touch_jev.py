@@ -30,7 +30,8 @@ always asked with the verdict, so one round trip serves a miss, and read only af
 
 The rules, in order:
 
-* a stuck descent, where the arm never came down, is not asked about: touch's default ends the run;
+* a stall where the arm never came down from the hover is not asked about, at any height: touch's
+  default ends the run;
 * a verdict less confident than `min_confidence` ends the run, the arm holding where it stopped, for a
   person to judge (`JudgeStatus.needs_review`);
 * touched_object is a success, and blocked_above_object ends the run;
@@ -488,9 +489,11 @@ class JevTouchStrategy(TouchStrategy):
         """Asks the judge once per descent, holds while the answer is pending, then acts on it."""
         st = self.status
         if self._asked_attempt != st.attempt:
-            kind, _ = self.descent_verdict()
-            if kind == "stuck":
+            if st.contact and not st.drop_m >= self.config.contact_gap_m:
+                # A stall where the arm never came down from the hover, frozen or jammed: touch calls it
+                # stuck within the contact band and a block above it, and either way its default ends it.
                 return super().after_touch(obs)
+            kind, _ = self.descent_verdict()
             self._asked_attempt, self._asks, self._geometry = st.attempt, 0, kind
             views, left_out, self._images = self._frames(obs)
             self._facts = self._descent_facts(obs, views, left_out)
