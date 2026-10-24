@@ -483,7 +483,8 @@ def test_the_twin_finds_touch_jev_and_builds_it_without_a_key(monkeypatch):
     fields = {field.name: field for field in plugin.fields}
 
     assert plugin.cls is JevTouchStrategy and plugin.settings is JevTouchSettings
-    assert plugin.summary.startswith("Touches an object as `touch` does, and asks Jev after each descent")
+    assert plugin.summary == ("Touches an object as `touch` does; Jev judges each descent and picks where to "
+                              "try again.")
     assert list(fields) == TOUCH_FIELDS + ["model", "min_confidence", "min_correction_confidence",
                                            "max_attempts", "correction_m", "answer_timeout_s", "send_frames"]
     assert fields["model"].kind is str and fields["model"].default == "jev-1.14.0"

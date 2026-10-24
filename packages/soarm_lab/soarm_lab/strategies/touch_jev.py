@@ -395,8 +395,7 @@ def touch_questions(correction_m: float, with_frames: bool = False) -> dict[str,
 
 
 class JevTouchStrategy(TouchStrategy):
-    """Touches an object as `touch` does, and asks Jev after each descent whether it touched it and where to
-    try again."""
+    """Touches an object as `touch` does; Jev judges each descent and picks where to try again."""
 
     settings = JevTouchSettings
 
