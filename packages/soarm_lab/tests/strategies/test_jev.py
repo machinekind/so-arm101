@@ -8,14 +8,16 @@ a local HTTP server. No test needs TYPESAFE_API_KEY.
 from __future__ import annotations
 
 import base64
+import contextlib
 import http.server
 import json
 import math
 import struct
 import threading
 import urllib.error
+import urllib.request
 import zlib
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from typing import Any
 
 import numpy as np
@@ -164,6 +166,15 @@ def test_the_key_comes_from_the_environment_and_check_refuses_without_it():
     JevJudge(environ={KEY_ENV: KEY}).check()
 
 
+@pytest.mark.parametrize("key", ["sk-live-SECRET\nsecond-line", "sk-live-SECRET\rx", "sk-live SECRET",
+                                 "sk-live-SECRET\tx", "sk-live-SECRET-\u0142"])
+def test_a_key_that_cannot_go_in_a_header_is_refused_without_being_quoted(key: str):
+    """http.client would refuse such a header with a ValueError that quotes it whole."""
+    with pytest.raises(RuntimeError) as caught:
+        JevJudge(environ={"TYPESAFE_API_KEY": key}).check()
+    assert "TYPESAFE_API_KEY" in str(caught.value) and "SECRET" not in str(caught.value)
+
+
 def test_ask_reads_the_key_itself_when_check_was_not_called():
     jev, transport = judge((200, ANSWERED))
     reply = ask(jev)
@@ -237,6 +248,32 @@ def test_no_response_at_all_is_unreachable_and_worth_another_try(raised: Excepti
     assert KEY not in caught.value.detail
 
 
+def test_a_request_the_http_library_refuses_is_an_error_that_quotes_nothing():
+    jev, _ = judge(ValueError(f"Invalid header value b'Bearer {KEY}'"))
+
+    with pytest.raises(JudgeError) as caught:
+        ask(jev)
+    error = caught.value
+    assert error.kind == "error" and not error.retryable and error.reason == "jev: zly naglowek zapytania"
+    assert KEY not in f"{error.reason} {error.detail} {error!r}"
+
+
+@pytest.mark.parametrize("response", [
+    (401, {"detail": f"Invalid API key {KEY}"}),
+    (422, {"detail": [{"loc": ["header", "authorization"], "msg": f"bad token {KEY}", "type": "value"}]}),
+    (400, {"detail": "x" * 190 + KEY}),                                  # the quote's cut falls in the key
+    (200, f"<html>{KEY}</html>".encode()),
+    OSError(f"proxy refused Bearer {KEY}"),
+])
+def test_a_key_echoed_back_is_masked_in_every_error(response: tuple[int, Any] | Exception):
+    jev, _ = judge(response)
+
+    with pytest.raises(JudgeError) as caught:
+        ask(jev)
+    text = f"{caught.value.reason} {caught.value.detail} {caught.value!r}"
+    assert KEY[:10] not in text and "***" in caught.value.detail
+
+
 def test_error_details_are_short():
     assert error_detail(json.dumps({"detail": "x" * 1000}).encode()) == "x" * 200
     assert error_detail(json.dumps({"detail": [{"loc": ["body", "questions", "touched"], "msg": "bad"},
@@ -245,13 +282,21 @@ def test_error_details_are_short():
 
 # ------------------------------------------------------------ the urllib transport
 class Recorder(http.server.BaseHTTPRequestHandler):
-    """Answers POST /ok with a reply and anything else with a 422, and keeps what it received."""
+    """Answers POST /ok with a reply, /moved with a 302 to `location` and anything else with a 422, and
+    keeps what it received."""
 
     received: list[dict[str, Any]] = []
+    location = ""
 
     def do_POST(self) -> None:  # noqa: N802 - http.server's name
         body = self.rfile.read(int(self.headers["Content-Length"]))
         Recorder.received.append({"path": self.path, "headers": dict(self.headers), "body": json.loads(body)})
+        if self.path == "/moved":
+            self.send_response(302)
+            self.send_header("Location", Recorder.location)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         status, payload = (200, ANSWERED) if self.path == "/ok" else (422, MISSING_STATE)
         data = json.dumps(payload).encode()
         self.send_response(status)
@@ -264,20 +309,63 @@ class Recorder(http.server.BaseHTTPRequestHandler):
         pass
 
 
-def test_the_urllib_transport_returns_error_statuses_with_their_body():
-    server = http.server.HTTPServer(("127.0.0.1", 0), Recorder)
+class Elsewhere(http.server.BaseHTTPRequestHandler):
+    """Another host, where a followed redirect would take the request and its headers."""
+
+    received: list[dict[str, Any]] = []
+
+    def do_GET(self) -> None:  # noqa: N802 - http.server's name
+        Elsewhere.received.append({"path": self.path, "headers": dict(self.headers)})
+        self.send_response(200)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    do_POST = do_GET  # noqa: N815 - http.server's name
+
+    def log_message(self, format: str, *args: Any) -> None:
+        pass
+
+
+@contextlib.contextmanager
+def serving(handler: type[http.server.BaseHTTPRequestHandler]) -> Iterator[str]:
+    """A local HTTP server on a free port, by its base URL."""
+    server = http.server.HTTPServer(("127.0.0.1", 0), handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    base = f"http://127.0.0.1:{server.server_address[1]}"
-    headers = {"Authorization": "Bearer local", "Content-Type": "application/json"}
     try:
-        ok = urllib_transport(f"{base}/ok", headers, b'{"state": 1}', 5.0)
-        refused = urllib_transport(f"{base}/refuse", headers, b'{"state": 1}', 5.0)
+        yield f"http://127.0.0.1:{server.server_address[1]}"
     finally:
         server.shutdown()
         server.server_close()
+
+
+HEADERS = {"Authorization": "Bearer local", "Content-Type": "application/json"}
+
+
+def test_the_urllib_transport_returns_error_statuses_with_their_body():
+    Recorder.received.clear()
+    with serving(Recorder) as base:
+        ok = urllib_transport(f"{base}/ok", HEADERS, b'{"state": 1}', 5.0)
+        refused = urllib_transport(f"{base}/refuse", HEADERS, b'{"state": 1}', 5.0)
 
     assert ok[0] == 200 and json.loads(ok[1]) == ANSWERED
     assert refused[0] == 422 and json.loads(refused[1]) == MISSING_STATE
     assert Recorder.received[0]["headers"]["Authorization"] == "Bearer local"
     assert Recorder.received[0]["body"] == {"state": 1}
+
+
+def test_the_urllib_transport_never_follows_a_redirect_with_the_key():
+    """urllib's default opener would follow a 302 to any host, Authorization header included."""
+    Elsewhere.received.clear()
+    with serving(Elsewhere) as elsewhere, serving(Recorder) as base:
+        Recorder.location = f"{elsewhere}/stolen"
+        urllib.request.urlopen(urllib.request.Request(f"{base}/moved", data=b"{}", headers=HEADERS,
+                                                      method="POST"), timeout=5.0).close()
+        followed = list(Elsewhere.received)
+        Elsewhere.received.clear()
+        status, _ = urllib_transport(f"{base}/moved", HEADERS, b"{}", 5.0)
+
+    assert followed and followed[0]["headers"]["Authorization"] == "Bearer local"
+    assert status == 302 and Elsewhere.received == []
+    with pytest.raises(JudgeError, match="jev odpowiedzial statusem 302"):
+        parse_reply(status, b"", QUESTIONS)

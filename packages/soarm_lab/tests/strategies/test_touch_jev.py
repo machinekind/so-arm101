@@ -585,8 +585,8 @@ def test_an_error_inside_the_judge_ends_the_run_honestly():
 
 def test_the_key_appears_in_no_record_note_or_log_line(caplog: pytest.LogCaptureFixture):
     caplog.set_level(logging.INFO)
-    transport = FakeTransport((503, {"detail": f"echo {KEY[:4]}"}), (200, answered("missed_object", 0.95)),
-                              (401, {"detail": "Invalid API key"}))
+    transport = FakeTransport((503, {"detail": f"echo {KEY}"}), (200, answered("missed_object", 0.95)),
+                              (401, {"detail": f"Invalid API key {KEY}"}))
     s = started(JevJudge(transport=transport, environ={KEY_ENV: KEY}))
     answers, *_ = follow(s, then(ageing(OFF), truth(XY)))
 

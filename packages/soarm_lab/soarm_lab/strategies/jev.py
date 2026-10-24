@@ -11,8 +11,10 @@ pydantic, tenacity, truststore and anyio, retry for up to 30 s inside our own ti
 and multipart on its own. The strategy retries itself, once, after an overload or a dropped connection.
 
 The key comes from `TYPESAFE_API_KEY` in the environment, read by `check`, never in `__init__`, so the
-strategy builds and its settings load without one. It goes only into the Authorization header: no error,
-note, record or log line holds it. The URL is a constant, so no config file can send the key elsewhere.
+strategy builds and its settings load without one; `check` refuses a key that could not go in a header
+without quoting it. It goes only into the Authorization header: no error, note, record or log line holds
+it, and where a server or a library echoes it back it is masked. The URL is a constant and a redirect is
+never followed, so neither a config file nor a reply can send the key elsewhere.
 
 Images (Jev 1.14, which TypeSafe does not yet guarantee for production) go out only when the strategy is
 given frames: each one as a PNG asset, base64 in the JSON body, named by a reference the state contains,
@@ -23,6 +25,7 @@ within 280 to 1568 px (`frame_problem`); it never resizes one.
 from __future__ import annotations
 
 import base64
+import email.message
 import http.client
 import json
 import os
@@ -32,7 +35,7 @@ import urllib.error
 import urllib.request
 import zlib
 from collections.abc import Callable, Mapping
-from typing import Any
+from typing import IO, Any
 
 import numpy as np
 
@@ -49,18 +52,29 @@ IMAGES_HEADER = "TypeSafe-Danger-Zone-Images"
 IMAGE_SIDE_PX = (280, 1568)
 #: How much of an error body a reason quotes.
 QUOTE_LIMIT = 200
+#: What stands in for the key where a server or a library echoes it back.
+MASK = "***"
 
 #: Sends one request: (url, headers, body, timeout_s) -> (HTTP status, response body). Raises OSError (or
-#: http.client.HTTPException) when no response came.
+#: http.client.HTTPException) when no response came, and ValueError when http.client refuses a header.
 Transport = Callable[[str, Mapping[str, str], bytes, float], tuple[int, bytes]]
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Leaves a redirect unfollowed: urllib would send it on to any host with the Authorization header."""
+
+    def redirect_request(self, req: urllib.request.Request, fp: IO[bytes], code: int, msg: str,
+                         headers: email.message.Message, newurl: str) -> urllib.request.Request | None:
+        return None
 
 
 def urllib_transport(url: str, headers: Mapping[str, str], body: bytes,
                      timeout_s: float) -> tuple[int, bytes]:
-    """POSTs `body` with `urllib`; an HTTP error status is returned with its body, not raised."""
+    """POSTs `body` with `urllib`; an HTTP error or redirect status is returned with its body, not raised
+    or followed."""
     request = urllib.request.Request(url, data=body, headers=dict(headers), method="POST")
     try:
-        with urllib.request.urlopen(request, timeout=timeout_s) as response:
+        with urllib.request.build_opener(NoRedirect).open(request, timeout=timeout_s) as response:
             return int(response.status), response.read()
     except urllib.error.HTTPError as error:
         with error:
@@ -172,11 +186,15 @@ class JevJudge:
         return f"JevJudge(model={self.model!r})"
 
     def check(self) -> None:
-        """Reads the key from the environment; raises when there is none."""
+        """Reads the key from the environment; raises when there is none, or when it holds white space or
+        characters beyond printable ASCII, which http.client would refuse with an error quoting the key."""
+        self._key = ""
         key = str(self._environ.get(KEY_ENV, "")).strip()
         if not key:
             raise RuntimeError(f"brak klucza jev: ustaw {KEY_ENV} w srodowisku twina "
                                "(uv run --env-file .env twin ui)")
+        if not (key.isascii() and key.isprintable()) or any(character.isspace() for character in key):
+            raise RuntimeError(f"zly klucz jev: {KEY_ENV} ma spacje, konce linii albo znaki spoza ASCII")
         self._key = key
 
     def ask(self, state: Mapping[str, Any], questions: Questions, *, images: Mapping[str, np.ndarray],
@@ -195,7 +213,18 @@ class JevJudge:
             raise JudgeError("jev: pytanie odwolane", kind="cancelled")
         try:
             status, payload = self._transport(SYSTEM_ONE_URL, headers, body, timeout_s)
+        except ValueError:
+            raise JudgeError("jev: zly naglowek zapytania", kind="error", detail="ValueError") from None
         except (OSError, http.client.HTTPException) as exc:
             raise JudgeError(f"jev nieosiagalny ({type(exc).__name__})", kind="unreachable", retryable=True,
-                             detail=f"{type(exc).__name__}: {exc}") from None
-        return parse_reply(status, payload, questions)
+                             detail=self._masked(f"{type(exc).__name__}: {exc}")) from None
+        try:
+            return parse_reply(status, payload.replace(self._key.encode(), MASK.encode()), questions)
+        except JudgeError as error:
+            if self._key not in error.reason and self._key not in error.detail:
+                raise
+            raise JudgeError(self._masked(error.reason), kind=error.kind, retryable=error.retryable,
+                             status=error.status, detail=self._masked(error.detail)) from None
+
+    def _masked(self, text: str) -> str:
+        return text.replace(self._key, MASK)
