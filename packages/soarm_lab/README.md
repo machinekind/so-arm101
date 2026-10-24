@@ -110,19 +110,25 @@ touch:
 Goals use metres in the robot's base frame. Enable the panel's 3D goal handle
 to follow a moving goal; `end_on_reach: false` keeps IK following until stopped.
 Lift, pick-and-place and touch require object poses in `obs.objects`. The Strategies
-panel passes the twin's perception to every run, so they need a running detector
-such as `cube` or `llm`; without a pose, lift and pick-and-place stop after
-`wait_for_cube_s` and touch after `wait_for_pose_s`.
+panel passes the twin's perception to every run, so they need a running detector;
+without a pose, lift and pick-and-place stop after `wait_for_cube_s` and touch after
+`wait_for_pose_s`. Touch works with the `cube` or the `llm` detector. Lift and
+pick-and-place need `cube`: they count success only from fresh poses, and the LLM
+detector's poses are seconds old ("ostatnie widziane"). Lift accepts those only with
+`allow_last_seen: true` and a `max_pose_age_s` above their age. Pick-and-place never
+does: it counts only a cube the cameras see lying ("kamery") or the simulation's truth.
 
 `touch` takes x and y from the first usable pose of its `label` and touches at
 `touch_z` above the table, because the LLM detector's poses lie on the table top,
 1 to 3 cm off, with no size or orientation. Set the detector's `objects` to the
 same label. Its poses arrive as "ostatnie widziane", seconds old, so
-`max_pose_age_s` is 30 s by default. Success means the arm stalled on something
-in the column above the pose; a descent that reaches `touch_z` in free air is
-reported as a miss. The hand touches first, because the approach is tilted, so a
+`max_pose_age_s` is 30 s by default. Success means the arm came down and stalled
+on something in the column above the pose; a descent that reaches `touch_z` in free
+air is reported as a miss. The hand touches first, because the approach is tilted, so a
 touch pushes a light object by a few millimetres. Near the base the hand would hit
-the arm's own shoulder; the run then ends before it does.
+the arm's own shoulder; the run then ends before it does. The arm keeps to the
+panel's speed cap and is measured against the supervisor's command, so a low cap
+slows the run but never reads as a touch.
 
 See [policy settings](soarm_lab/strategies/policy.py),
 [IK settings](soarm_lab/strategies/ik.py),
