@@ -111,7 +111,8 @@ The plugin contracts are the package `machinekind-twin-api` (see the root README
   Every strategy here subclasses `Strategy[ItsSettings]`, and `uv run pyright` checks it against the contract.
   `soarm_lab.strategies.policy.PolicyStrategy` takes `RunInfo` and `Observation` and returns an `Action`.
   `soarm_lab.strategies.ik.IKStrategy` does the same.
+  `soarm_lab.strategies.touch.TouchStrategy` does the same and reads `Observation.objects`.
 - `packages/soarm_lab/pyproject.toml` registers these strategies under `machinekind_twin.strategies` (`STRATEGIES`)
-  as `policy`, `ik` and `dream`. `soarm_lab.strategies.dream.DreamStrategy` imports the Dream client only in `start`.
+  as `policy`, `ik`, `touch` and `dream`. `soarm_lab.strategies.dream.DreamStrategy` imports the Dream client only in `start`.
 - The station export is `Workspace.export` in the twin (`twin export`). `soarm_lab.station.Station` reads it.
   `soarm_lab.robot.RobotSpec` reads only the `robot.yaml` fields the lab uses and skips the others.
