@@ -171,6 +171,7 @@ class Scripted:
         self.outcomes = list(outcomes)
         self.clock, self.latency_s = clock, latency_s
         self.states: list[Mapping[str, Any]] = []
+        self.questions: list[Mapping[str, Any]] = []
         self.images: list[Mapping[str, np.ndarray]] = []
 
     def check(self) -> None:
@@ -178,6 +179,7 @@ class Scripted:
 
     def ask(self, state, questions, *, images, timeout_s, cancel) -> Reply:
         self.states.append(state)
+        self.questions.append(questions)
         self.images.append(images)
         if self.clock is not None:
             self.clock.t += self.latency_s
@@ -283,8 +285,9 @@ def test_its_settings_are_touchs_and_the_judges():
     ({"min_confidence": 1.5}, "min_confidence must lie within 0..1"),
     ({"min_correction_confidence": math.nan}, "min_correction_confidence must lie within 0..1"),
     ({"max_attempts": 0}, "max_attempts must be at least 1"),
-    ({"correction_m": 0.0}, r"correction_m must lie within \(0, 0.1\] m"),
-    ({"correction_m": 0.2}, r"correction_m must lie within \(0, 0.1\] m"),
+    ({"correction_m": 0.0}, r"correction_m must lie within \(0.01, 0.1\] m"),
+    ({"correction_m": 0.01}, r"correction_m must lie within \(0.01, 0.1\] m"),
+    ({"correction_m": 0.2}, r"correction_m must lie within \(0.01, 0.1\] m"),
     ({"answer_timeout_s": 0.0}, r"answer_timeout_s must lie within \(0, 60\] s"),
     ({"answer_timeout_s": 120.0}, r"answer_timeout_s must lie within \(0, 60\] s"),
 ])
@@ -297,7 +300,7 @@ def test_bad_settings_are_refused(settings: dict[str, Any], message: str):
 def test_a_confident_touch_on_the_cube_is_a_success_recorded_with_both_answers():
     clock = Clock()
     judge = Scripted(reply("touched_object", 0.95), clock=clock, latency_s=0.12)
-    s = started(judge, clock=clock)
+    s = started(judge, clock=clock, correction_m=0.03)
     answers, phases, *_ = follow(s, seen(), obstacle=on_cube(s))
 
     last, asking = answers[-1], answers[-2]
@@ -319,6 +322,8 @@ def test_a_confident_touch_on_the_cube_is_a_success_recorded_with_both_answers()
     assert state["sent"] is judge.states[0] and state["questions"] == QUESTIONS_VERSION
     assert state["geometry"] == "touched" and state["judge"] == "jev" and state["model_asked"] == "jev-1.14.0"
     assert state["attempt"] == 1 and state["ask"] == 1 and state["frames"] == []
+    assert state["questions_sent"] == judge.questions[0] == touch_questions(0.03)
+    assert "one step, 3 cm," in json.dumps(state["questions_sent"])
     sent = judge.states[0]
     assert sent["descent"]["ended"] == "stalled_on_something"
     assert sent["descent"]["stop_height"] == "near_object_top"

@@ -60,7 +60,8 @@ too. They collect in `judging.decisions` and in `drain_decisions`, and a summary
 stop reason and one log line per call. The pinned api (0.1.2) has no `Action.decisions`: the twin's runner
 would drop an extra attribute, so `act` returns plain `Action`s. Once the pin reaches api 0.1.3,
 `_with_decisions` hands the drained records to `Action.decisions` and the twin's episode log keeps them.
-`state.sent` and `QUESTIONS_VERSION` let Claude, Jev or a person be asked the identical input later.
+`state.sent` and `state.questions_sent`, with `QUESTIONS_VERSION`, let Claude, Jev or a person be asked the
+identical input later.
 
 With `send_frames` on, each camera frame of the asking tick within 280..1568 px also goes out as a PNG
 image named in the state (`camera_views`), for an A/B against the text-only state. Jev's images are not
@@ -136,7 +137,8 @@ class JevTouchSettings(TouchSettings):
     min_correction_confidence: float = 0.6
     #: Descents per run, the first included.
     max_attempts: int = 3
-    #: One step of a correction that moves the touch point [m].
+    #: One step of a correction that moves the touch point [m]; more than `SAME_PLACE_M`, or every step
+    #: would count as the point already tried.
     correction_m: float = 0.02
     #: The longest wait for one answer, counted from the question; also the HTTP timeout [s].
     answer_timeout_s: float = 5.0
@@ -411,8 +413,9 @@ class JevTouchStrategy(TouchStrategy):
                 raise ValueError(f"touch_jev: {name} must lie within 0..1, is {value}")
         if not config.max_attempts >= 1:
             raise ValueError(f"touch_jev: max_attempts must be at least 1, is {config.max_attempts}")
-        if not 0.0 < config.correction_m <= 0.1:
-            raise ValueError(f"touch_jev: correction_m must lie within (0, 0.1] m, is {config.correction_m}")
+        if not SAME_PLACE_M < config.correction_m <= 0.1:
+            raise ValueError(f"touch_jev: correction_m must lie within ({SAME_PLACE_M:g}, 0.1] m, "
+                             f"is {config.correction_m}")
         if not 0.0 < config.answer_timeout_s <= 60.0:
             raise ValueError(f"touch_jev: answer_timeout_s must lie within (0, 60] s, "
                              f"is {config.answer_timeout_s}")
@@ -636,9 +639,10 @@ class JevTouchStrategy(TouchStrategy):
     def _record(self, outcome: Outcome, to_outbox: bool = True) -> None:
         """One `Decision` per question, the answer as received or the error; and a log line."""
         judging, reply, error = self.judging, outcome.reply, outcome.error
-        state = {"sent": self._sent, "questions": QUESTIONS_VERSION, "judge": self.judge.name,
-                 "model_asked": self.jev_settings.model, "attempt": self._asked_attempt, "ask": self._asks,
-                 "geometry": self._geometry, "frames": sorted(self._sent.get("camera_views", {}))}
+        state = {"sent": self._sent, "questions": QUESTIONS_VERSION, "questions_sent": self.questions,
+                 "judge": self.judge.name, "model_asked": self.jev_settings.model,
+                 "attempt": self._asked_attempt, "ask": self._asks, "geometry": self._geometry,
+                 "frames": sorted(self._sent.get("camera_views", {}))}
         entry: dict[str, Any] = {"attempt": self._asked_attempt, "ask": self._asks, "judge": self.judge.name,
                                  "geometry": self._geometry, "response_s": outcome.response_s}
         if reply is not None:

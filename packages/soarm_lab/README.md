@@ -204,12 +204,12 @@ Caveats:
 - `need_contact` only changes the geometry label recorded next to each answer; the model decides.
 - Model waits count toward `time_limit_s`, 90 s by default.
 
-Each record holds the exact state and the questions' version (`touch_jev/1`), so the same input can be
-put to Claude or to a person to compare accuracy. A Claude judge would implement the `Judge` protocol
-in [judges.py](soarm_lab/strategies/judges.py); it is not built yet. It needs the process handling of
-the twin's `machinekind_twin_llm.cli` copied here, not imported (that package is only in the `twin`
-group and loads OpenCV), a fake CLI for its tests, and an `answer_timeout_s` near its 60 s limit,
-because the CLI answers in seconds where Jev answers in about 0.1 s.
+Each record holds the exact state, the exact questions and their version (`touch_jev/1`), so the same
+input can be put to Claude or to a person to compare accuracy. A Claude judge would implement the
+`Judge` protocol in [judges.py](soarm_lab/strategies/judges.py); it is not built yet. It needs the
+process handling of the twin's `machinekind_twin_llm.cli` copied here, not imported (that package is
+only in the `twin` group and loads OpenCV), a fake CLI for its tests, and an `answer_timeout_s` near
+its 60 s limit, because the CLI answers in seconds where Jev answers in about 0.1 s.
 
 ## Dream Labs
 
