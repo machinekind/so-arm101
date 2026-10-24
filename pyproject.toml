@@ -7,10 +7,12 @@ soarm-lab = { workspace = true }
 # The plugin contracts (`machinekind_twin_api`) come from packages/machinekind_twin_api
 # in the public twin repository; they are not on PyPI.
 # The twin comes from the same commit, because it depends on that package too,
-# and so does the twin's example cube detector (examples/detectors/cube).
-machinekind-twin-api = { git = "https://github.com/machinekind/twin.git", subdirectory = "packages/machinekind_twin_api", rev = "44ab7e33c1482f8804b8037ee53bb7ada8d6b86c" }
-machinekind-twin = { git = "https://github.com/machinekind/twin.git", rev = "44ab7e33c1482f8804b8037ee53bb7ada8d6b86c" }
-machinekind-twin-cube = { git = "https://github.com/machinekind/twin.git", subdirectory = "examples/detectors/cube", rev = "44ab7e33c1482f8804b8037ee53bb7ada8d6b86c" }
+# and so do the twin's example cube detector (examples/detectors/cube)
+# and its LLM detector (packages/machinekind_twin_llm).
+machinekind-twin-api = { git = "https://github.com/machinekind/twin.git", subdirectory = "packages/machinekind_twin_api", rev = "fb3838f9ab72d6a2bb9cc34d2fdbb113580a4afc" }
+machinekind-twin = { git = "https://github.com/machinekind/twin.git", rev = "fb3838f9ab72d6a2bb9cc34d2fdbb113580a4afc" }
+machinekind-twin-cube = { git = "https://github.com/machinekind/twin.git", subdirectory = "examples/detectors/cube", rev = "fb3838f9ab72d6a2bb9cc34d2fdbb113580a4afc" }
+machinekind-twin-llm = { git = "https://github.com/machinekind/twin.git", subdirectory = "packages/machinekind_twin_llm", rev = "fb3838f9ab72d6a2bb9cc34d2fdbb113580a4afc" }
 
 # dreamlabs (the `dream` extra of soarm-lab) pins jax to 0.7.1. The JAX trainer's extra (`train`) keeps its
 # own jax and optax: the two extras are resolved apart and never install together.
@@ -30,9 +32,10 @@ dev = [
 # into policy.npz, and its tests (packages/soarm_lab/tests/rl/test_policy_format.py). Training needs no torch.
 torch = ["soarm-lab[torch]"]
 # `uv sync --group twin`: the twin, for the tests marked `twin` that run both packages through its own code,
-# and its example cube detector, which the lift test sees the cube with.
+# its example cube detector, which the lift test sees the cube with, and its LLM detector, which places
+# objects coarsely, seconds late, from a language model's answers.
 # The application stays optional; the base packages depend only on its API.
-twin = ["machinekind-twin", "machinekind-twin-cube"]
+twin = ["machinekind-twin", "machinekind-twin-cube", "machinekind-twin-llm"]
 
 # The type checker runs on what implements the twin's contracts and on the test panel; the rest is not typed yet.
 [tool.pyright]
