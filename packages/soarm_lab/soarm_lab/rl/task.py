@@ -3,13 +3,14 @@
 One definition for the three places a policy lives in:
 
 * the Gymnasium environment on the CPU (`env.ArmEnv`, numpy, one environment),
-* the batch environment on the GPU (`batch.BatchEnv`, torch, thousands of MuJoCo Warp worlds),
+* the batch environment on the GPU (`batch.BatchEnv`, JAX, thousands of MuJoCo Warp worlds),
 * the loop on the real arm (`strategies.policy.PolicyStrategy` in the twin's `StrategyRunner`, numpy,
   angles from the servos).
 
-The functions below take arrays with a batch dimension `(N, ...)` and a module `xp`, numpy or torch,
-so all three compute EXACTLY the same formulas. Two copies of "almost the same" observation are a
-classic silent source of sim-to-real gaps: the policy trains on one and runs on the other.
+The functions below take arrays with a batch dimension `(N, ...)` and a module `xp`, numpy or
+jax.numpy (torch works too), so all three compute EXACTLY the same formulas. Two copies of "almost
+the same" observation are a classic silent source of sim-to-real gaps: the policy trains on one and
+runs on the other.
 
 All positions are in the arm's BASE frame (the table top at z = 0), joint angles in MJCF radians, in
 the order of `RobotSpec.joints` (gripper last).
@@ -189,13 +190,15 @@ class Limits:
         return Limits(lo, hi, np.clip(kin.to_q(spec.home), lo, hi), n_arm=grip, grip=grip, roll=roll)
 
 
-# -------------------------------------------------------- numpy / torch
+# -------------------------------------------- numpy / jax.numpy / torch
+# numpy and jax.numpy share their names (`concatenate`, `clip`, `asarray`, `.astype`); torch has its
+# own (`cat`, `clamp`, `as_tensor`, `.to`), so the helpers ask the module what it has.
 def _cat(xp, parts):
-    return xp.concatenate(parts, axis=-1) if xp is np else xp.cat(parts, dim=-1)
+    return xp.cat(parts, dim=-1) if hasattr(xp, "cat") else xp.concatenate(parts, axis=-1)
 
 
 def _clip(xp, x, lo, hi):
-    return np.clip(x, lo, hi) if xp is np else xp.clamp(x, lo, hi)
+    return xp.clamp(x, lo, hi) if hasattr(xp, "clamp") else xp.clip(x, lo, hi)
 
 
 def _norm(x):
@@ -203,8 +206,18 @@ def _norm(x):
 
 
 def _as(xp, a, like):
-    """A numpy constant as an array of the same kind, dtype and device as `like`."""
-    return np.asarray(a, like.dtype) if xp is np else xp.as_tensor(a, dtype=like.dtype, device=like.device)
+    """A numpy constant as an array of the same kind, dtype and device as `like`.
+
+    jax.numpy: the device follows `jit` (a constant inside a traced function lands where it runs).
+    """
+    if hasattr(xp, "as_tensor"):
+        return xp.as_tensor(a, dtype=like.dtype, device=like.device)
+    return xp.asarray(a, dtype=like.dtype)
+
+
+def _cast(xp, b, like):
+    """`b` (e.g. a boolean mask) as an array of `like`'s dtype: `.astype` in numpy and JAX, `.to` in torch."""
+    return b.astype(like.dtype) if hasattr(b, "astype") else b.to(like.dtype)
 
 
 # ---------------------------------------------------------------- action
@@ -247,7 +260,8 @@ def observe(xp, task: TaskConfig, limits: Limits, q, q_cmd, tcp, prev_action, go
 
 def fold_yaw(xp, R):
     """The rotation about z folded to +-45 deg: how the detector sees the cube (a 90 deg symmetry)."""
-    yaw = xp.arctan2(R[..., 1, 0], R[..., 0, 0]) if xp is np else xp.atan2(R[..., 1, 0], R[..., 0, 0])
+    atan2 = xp.arctan2 if hasattr(xp, "arctan2") else xp.atan2
+    yaw = atan2(R[..., 1, 0], R[..., 0, 0])
     yaw = (yaw + np.pi / 4) % (np.pi / 2) - np.pi / 4
     c, s = xp.cos(yaw), xp.sin(yaw)
     z, o = xp.zeros_like(c), xp.ones_like(c)
@@ -263,10 +277,6 @@ def limit_cost(xp, task: TaskConfig, limits: Limits, q_cmd):
     room = xp.minimum(q_cmd[..., :na] - lo, hi - q_cmd[..., :na])
     near = _clip(xp, 1.0 - room / task.limit_margin, 0.0, 1.0)
     return task.limit_penalty * (near * near).sum(-1)
-
-
-def _float(xp, b, like):
-    return b.to(like.dtype) if xp is not np else b.astype(like.dtype)
 
 
 def grasped(xp, jaw_contacts):
@@ -329,8 +339,7 @@ def reward(xp, task: TaskConfig, tcp, action, prev_action, goal=None, cube_pos=N
     height = cube_pos[..., 2] - task.cube_half
     lifted = _clip(xp, height / task.lift_height, 0.0, 1.0)
     success = grasped & (height > task.lift_height)
-    g = grasped.to(tcp.dtype) if xp is not np else grasped.astype(tcp.dtype)
-    s = success.to(tcp.dtype) if xp is not np else success.astype(tcp.dtype)
+    g, s = _cast(xp, grasped, tcp), _cast(xp, success, tcp)
     r = (1.0 - xp.tanh(d / 0.05)) + g + 4.0 * g * lifted + 2.0 * s
     if task.hold_still > 0:
         na = action.shape[-1] - 1 if limits is None else limits.n_arm
@@ -356,8 +365,8 @@ def _reward_pickplace(xp, task: TaskConfig, tcp, action, cost, cube_pos, jaw_con
     released = ~g & opened
     still = _norm(cube_vel) < task.settle_speed
     success = carried & placed & released & still
-    gf, cf = _float(xp, g, tcp), _float(xp, carried, tcp)
-    pf, sf = _float(xp, placed, tcp), _float(xp, success, tcp)
+    gf, cf = _cast(xp, g, tcp), _cast(xp, carried, tcp)
+    pf, sf = _cast(xp, placed, tcp), _cast(xp, success, tcp)
     r = ((1.0 - xp.tanh(d / 0.05)) + gf + 2.0 * gf * lifted + 4.0 * cf * (1.0 - xp.tanh(d_t / 0.10))
          + 4.0 * cf * pf + 4.0 * sf)
     if task.hold_still > 0:
@@ -433,7 +442,7 @@ def sample_targets(task: TaskConfig, rng: np.random.Generator, cube_pos: np.ndar
     Polar sampling in `target_radius` / `target_bearing`, like the cubes; rows too close to their
     cube are drawn again (only those), at most `TARGET_TRIES` times. A row that still does not fit
     gets a target on the outer radius at the end of the bearing range away from its cube.
-    On the GPU: `batch.BatchEnv._sample_targets`, the same rule.
+    On the GPU: `batch.BatchEnv._sample_targets`, the same rule in JAX.
     """
     cube = np.asarray(cube_pos, float).reshape(-1, 3)
     n = len(cube)

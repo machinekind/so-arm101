@@ -12,7 +12,7 @@ Policies live in two places: the base ones bundled with the package (`soarm_lab/
 `bundled_dir`) and the ones trained here (`DEFAULT_DIR`, see `soarm_lab.paths`). `find_policy`
 finds the file by name or path.
 
-Running a policy needs numpy only: the strategy, evaluation and `soarm-lab eval` never import torch.
+Running a policy needs numpy only: the strategy, evaluation and `soarm-lab eval` never import jax or torch.
 The weights file is `policy.npz`, format 1, read with `np.load(allow_pickle=False)`; all arrays float32:
 
     format              ()                       1

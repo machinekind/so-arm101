@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
-# Running a policy (the strategy, evaluation, the CPU environments) needs numpy only, no torch.
+# Running a policy (the strategy, evaluation, the CPU environments) needs numpy only: no jax, no torch.
 dependencies = [
     "soarm",
     # The twin's plugin contracts (numpy only); never the twin itself.
@@ -22,11 +22,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# GPU training: thousands of MuJoCo Warp worlds, trained in JAX. mujoco and mujoco-warp must have the
-# same version. The JAX trainer is not written yet: today's trainer is the torch one (the torch extra).
-train = ["mujoco-warp>=3.14,<3.15", "jax>=0.4"]
-# Legacy: the torch PPO trainer (rl/ppo.py, rl/batch.py; GPU training needs a CUDA build) and
-# `soarm-lab convert`, which turns a torch checkpoint (policy.pt) into policy.npz.
+# GPU training (`soarm-lab train`): the JAX PPO trainer (rl/ppo.py) on thousands of MuJoCo Warp worlds
+# (rl/batch.py), no torch. mujoco and mujoco-warp must have the same version. On Linux jax comes with its
+# CUDA 12 build (x86_64 and aarch64 wheels); elsewhere it is the CPU build, enough for the tests.
+# jax 0.6 is the floor for `jax.dlpack.from_dlpack(copy=True)` and typed random keys (rl/batch.py).
+train = [
+    "mujoco-warp>=3.14,<3.15",
+    "jax>=0.6",
+    "jax[cuda12]>=0.6; sys_platform == 'linux'",
+    "optax>=0.2",
+]
+# The converter of old torch checkpoints (`soarm-lab convert`, rl/torch_policy.py) only: it turns a
+# policy.pt into policy.npz. Training and running a policy need no torch.
 torch = ["torch>=2.7,<2.12"]
 # Dream Labs: the `dream` strategy and `soarm-lab dream`, the Dream-1 model over the network. The `dreamlabs` library
 # brings the client and dream's IK (`dream_ik`), which an SO-101 needs; it supports Python 3.11 to 3.13.

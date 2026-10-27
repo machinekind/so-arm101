@@ -12,8 +12,8 @@ machinekind-twin-api = { git = "https://github.com/machinekind/twin.git", subdir
 machinekind-twin = { git = "https://github.com/machinekind/twin.git", rev = "44ab7e33c1482f8804b8037ee53bb7ada8d6b86c" }
 machinekind-twin-cube = { git = "https://github.com/machinekind/twin.git", subdirectory = "examples/detectors/cube", rev = "44ab7e33c1482f8804b8037ee53bb7ada8d6b86c" }
 
-# dreamlabs (the `dream` extra of soarm-lab) pins jax to 0.7.1. The GPU trainer's extra keeps its own jax:
-# the two extras are resolved apart and never install together.
+# dreamlabs (the `dream` extra of soarm-lab) pins jax to 0.7.1. The JAX trainer's extra (`train`) keeps its
+# own jax and optax: the two extras are resolved apart and never install together.
 [tool.uv]
 conflicts = [[{ package = "soarm-lab", extra = "dream" }, { package = "soarm-lab", extra = "train" }]]
 
@@ -26,8 +26,8 @@ dev = [
     "ruff>=0.6",
     "pyright>=1.1",
 ]
-# `uv sync --group torch`: the legacy torch trainer, `soarm-lab convert` and their tests
-# (packages/soarm_lab/tests/test_dependency_rule.py).
+# `uv sync --group torch`: torch for `soarm-lab convert`, which turns an old torch checkpoint (policy.pt)
+# into policy.npz, and its tests (packages/soarm_lab/tests/rl/test_policy_format.py). Training needs no torch.
 torch = ["soarm-lab[torch]"]
 # `uv sync --group twin`: the twin, for the tests marked `twin` that run both packages through its own code,
 # and its example cube detector, which the lift test sees the cube with.

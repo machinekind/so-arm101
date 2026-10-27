@@ -11,9 +11,10 @@
     soarm-lab dream arm --prompt "pick up the cube" --camera scene=0 --camera wrist=1   # on the arm
 
 `--station` is a folder the twin exported (`scene.xml`, `assets/`, `station.json`) or the name of a
-station bundled with the package (`sim`, the default). `eval` and `policies` need no torch. `train` is
-the legacy torch trainer: it needs the extras `train` (`mujoco-warp`) and `torch` (torch with CUDA).
-`convert` needs the `torch` extra. `dream` needs the `dream` extra and a Dream Labs API key (`dream_run`).
+station bundled with the package (`sim`, the default). `eval` and `policies` need neither jax nor torch.
+`train` is PPO in JAX on MuJoCo Warp: it needs the `train` extra (jax, on Linux its CUDA build, optax,
+mujoco-warp) and no torch. `convert` needs the `torch` extra. `dream` needs the `dream` extra and a Dream
+Labs API key (`dream_run`).
 """
 
 from __future__ import annotations
@@ -230,7 +231,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--eval-episodes", type=int, default=50)
     p.add_argument("--stop-file", default=None, help="przerwij trening, gdy ten plik sie pojawi")
     p.add_argument("--init", default=None, help="douczanie: start z tej polityki (nazwa albo policy.npz)")
-    p.add_argument("--device", default="cuda:0", help="urzadzenie torcha i MuJoCo Warp (domyslnie cuda:0)")
+    p.add_argument("--device", default="cuda:0", help="device of JAX and MuJoCo Warp (default cuda:0)")
     p.set_defaults(fn=_train)
 
     p = sub.add_parser("eval", help="ewaluacja polityki na CPU (zwykle MuJoCo)")
