@@ -21,7 +21,7 @@ This is the environment of the JAX trainer (`ppo`): it needs the `soarm-lab[trai
 mujoco-warp), no torch. Everything it returns is a plain JAX array on `env.device`.
 
 JAX and Warp meet through DLPack. The physics state lives in Warp arrays (`env.d`, `env.m`). It is
-read into JAX as COPIES (`jax.dlpack.from_dlpack(..., copy=True)`): an aliasing view would be
+read into JAX as COPIES (a zero-copy `jax.dlpack.from_dlpack` view, copied at once): an aliasing view would be
 overwritten by the next physics launch, and JAX's jit may hand an input straight back as an output.
 That is N x a few hundred floats per step, nothing next to the physics. Writes go the other way as
 WHOLE arrays: the complete new `qpos` (`jnp.where(done, new, old)`), `qvel`, `ctrl` and so on, wrapped
@@ -246,7 +246,11 @@ class BatchEnv:
 
     # ------------------------------------------------------------ warp <-> jax
     def _read_one(self, a) -> Array:
-        return jax.dlpack.from_dlpack(a, copy=True)
+        # A zero-copy view first, then a copy made by JAX: `from_dlpack(copy=True)` works on the
+        # CPU backend but the CUDA PJRT plugin refuses it ("does not support HostBufferSemantics
+        # other than ... kImmutableZeroCopy"; jax 0.11.2). The copy is what `_phys` keeps, and
+        # `_write` waits for it before the next launch overwrites the buffer it was taken from.
+        return jnp.copy(jax.dlpack.from_dlpack(a))
 
     def _read(self, names) -> dict[str, Array]:
         """Copies of the Warp arrays `names` of `d`, vector dimensions last (`site_xpos` (N, nsite, 3))."""
