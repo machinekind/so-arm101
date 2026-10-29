@@ -17,6 +17,7 @@ EXPECTED = {
         (STRATEGIES, "ik"): "soarm_lab.strategies.ik:IKStrategy",
         (STRATEGIES, "dream"): "soarm_lab.strategies.dream:DreamStrategy",
         (STRATEGIES, "touch"): "soarm_lab.strategies.touch:TouchStrategy",
+        (STRATEGIES, "touch_jev"): "soarm_lab.strategies.touch_jev:JevTouchStrategy",
         ("console_scripts", "soarm-lab"): "soarm_lab.cli:main",
     },
 }
@@ -24,8 +25,9 @@ CALLABLE = [(dist, key) for dist, eps in EXPECTED.items() for key in eps]
 #: The lab's strategies, by entry point name.
 STRATEGY_NAMES = [name for group, name in EXPECTED["soarm-lab"] if group == STRATEGIES]
 #: The ones that run without a network: `dream` needs Dream Labs' service, and
-#: tests/strategies/test_dream.py runs it on a fake client.
-OFFLINE_STRATEGIES = [name for name in STRATEGY_NAMES if name != "dream"]
+#: tests/strategies/test_dream.py runs it on a fake client. `touch_jev` refuses to start without
+#: TYPESAFE_API_KEY, and tests/strategies/test_touch_jev.py runs this protocol check with a fake judge.
+OFFLINE_STRATEGIES = [name for name in STRATEGY_NAMES if name not in ("dream", "touch_jev")]
 
 
 def own_entry_points(dist: str) -> dict[tuple[str, str], metadata.EntryPoint]:

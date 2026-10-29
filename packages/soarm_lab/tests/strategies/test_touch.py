@@ -516,6 +516,32 @@ def test_the_lag_guard_ends_the_run_by_raising(with_command: bool):
 
 
 
+# ------------------------------------------------------------ the geometry's verdict
+@pytest.mark.parametrize("kind, settings, above, success", [
+    ("missed", {}, None, False),
+    ("reached", {"need_contact": False}, None, True),
+    ("touched", {}, 0.015, True),
+    ("blocked", {}, 0.05, False),
+])
+def test_the_descent_verdict_is_what_the_run_ends_with(kind: str, settings: dict, above: float | None,
+                                                        success: bool):
+    s = started(seen(), **settings)
+    obstacle = None if above is None else cube_at(XY, s.config.touch_z + above)
+    answers, *_ = follow(s, dict(SPEC.home), seen(), 400, obstacle=obstacle)
+
+    assert s.descent_verdict() == (kind, answers[-1].note)
+    assert answers[-1].done and answers[-1].success is success
+
+
+def test_an_arm_that_never_came_down_is_stuck():
+    frozen = pose_at((*XY, 0.055))
+    s = started(seen(), joints=frozen, hover_m=0.025)
+    answers, *_ = run_frozen(s, frozen, seen(), 400)
+
+    assert s.descent_verdict() == ("stuck", answers[-1].note)
+    assert answers[-1].done and not answers[-1].success
+
+
 # ------------------------------------------------------------ the seam for a decision step
 class TryAgain(TouchStrategy):
     """A stand-in for a decision step: after a descent with no contact it aims at `corrected`."""

@@ -11,6 +11,9 @@ between the cube and the jaws (`grasp_sensors`), and how far the touch pushed an
 runs put the panel's speed cap on the arm, at the start or during the run, or a fixed wall in its way,
 after which the arm must hold where it measures.
 
+`touch_jev` runs here with a judge that answers from the same contact sensors instead of Jev, or with the
+real Jev client on a fake HTTP transport; no test needs TYPESAFE_API_KEY.
+
 The twin's robot discovery is pinned to `soarm`'s folder (fixture `twin_robots`): the twin registers an
 SO-101 of its own under the same name.
 """
@@ -20,6 +23,7 @@ from __future__ import annotations
 import importlib.metadata
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import pytest
@@ -37,9 +41,15 @@ from machinekind_twin.strategies import load_strategy, strategies  # noqa: E402
 from machinekind_twin.strategy import ObjectPose, Observation, StrategyRunner  # noqa: E402
 from machinekind_twin.workspace import Workspace  # noqa: E402
 
+from soarm_lab.strategies.jev import KEY_ENV, JevJudge  # noqa: E402
+from soarm_lab.strategies.judges import Reply, checked_reply  # noqa: E402
 from soarm_lab.strategies.touch import TouchSettings, TouchStrategy  # noqa: E402
+from soarm_lab.strategies.touch_jev import CORRECTIONS, VERDICTS, JevTouchSettings, JevTouchStrategy  # noqa: E402
 
 NAME = "touch"
+TOUCH_FIELDS = ["label", "touch_z", "hover_m", "wait_for_pose_s", "max_pose_age_s", "close_jaw",
+                "need_contact", "hz", "speed_mps", "descend_speed_mps", "contact_gap_m", "contact_band_m",
+                "max_tracking_deg", "time_limit_s"]
 #: The simulated clock's step, and the twin loop's period [s].
 CLOCK_STEP = 0.01
 TWIN_PERIOD = 0.02
@@ -162,10 +172,11 @@ class SceneTouch:
         return self.contact_at_end and self.contact_settled and self.push_m < 0.01 and self.tilt_deg < 20.0
 
 
-def run_and_judge(twin: Twin, runner: StrategyRunner, clock: Clock, seconds: float = 20.0) -> SceneTouch:
+def run_and_judge(twin: Twin, runner: StrategyRunner, clock: Clock, seconds: float = 20.0,
+                  until: Callable[[], bool] | None = None) -> SceneTouch:
     """Drives the run to its end, then 0.5 s more physics, and judges it from the simulation."""
     start_position, start_rotation = truth(twin)
-    most = drive(twin, runner, seconds, clock, watch=lambda: contact(twin))
+    most = drive(twin, runner, seconds, clock, until=until, watch=lambda: contact(twin))
     assert not runner.status.running, runner.status
     at_end = contact(twin) > 0.5
     for _ in range(round(0.5 / TWIN_PERIOD)):
@@ -208,9 +219,7 @@ def test_the_twin_finds_the_strategy_through_its_entry_point():
 def test_its_settings_become_the_panel_form():
     fields = {field.name: field for field in load_strategy(NAME).fields}
 
-    assert list(fields) == ["label", "touch_z", "hover_m", "wait_for_pose_s", "max_pose_age_s", "close_jaw",
-                            "need_contact", "hz", "speed_mps", "descend_speed_mps", "contact_gap_m",
-                            "contact_band_m", "max_tracking_deg", "time_limit_s"]
+    assert list(fields) == TOUCH_FIELDS
     assert fields["label"].kind is str and fields["label"].default == "cube"
     assert fields["close_jaw"].kind is bool and fields["close_jaw"].default is True
     assert fields["need_contact"].kind is bool and fields["need_contact"].default is True
@@ -421,3 +430,154 @@ def test_a_plain_stop_during_the_descent(twin):
     assert runner.status.stopped_because == "zatrzymana"
     assert strategy.status.stopped_because == "zatrzymana" and strategy.status.phase == "done"
     assert twin.owner is None
+
+
+# --------------------------------------------------------------------------- touch_jev
+
+
+class ContactJudge:
+    """Answers touch_jev's questions from the simulation's contact sensors instead of Jev: touched_object
+    while a jaw touches the cube, else missed_object, with the confidences it is given."""
+
+    name = "jev"
+
+    def __init__(self, twin: Twin, sure: float = 0.95, correction: str = "aim_at_latest_sighting",
+                 correction_sure: float = 0.9):
+        self.twin, self.sure, self.correction, self.correction_sure = twin, sure, correction, correction_sure
+        self.states: list[dict[str, Any]] = []
+        self.verdicts: list[str] = []
+
+    def check(self) -> None:
+        pass
+
+    def ask(self, state, questions, *, images, timeout_s, cancel) -> Reply:
+        self.states.append(state)
+        verdict = "touched_object" if contact(self.twin) > 0.5 else "missed_object"
+        self.verdicts.append(verdict)
+        answers = {"touched": choice(verdict, self.sure, VERDICTS),
+                   "correction": choice(self.correction, self.correction_sure, CORRECTIONS)}
+        return checked_reply(self.name, answers, "contact-sensors", {}, questions)
+
+
+def choice(option: str, confidence: float, options: tuple[str, ...]) -> dict[str, Any]:
+    n = len(options)
+    top = confidence * (1 - 1 / n) + 1 / n
+    return {"type": "choice", "choice": option, "confidence": confidence,
+            "probabilities": {o: top if o == option else (1 - top) / (n - 1) for o in options}}
+
+
+def phases_of(strategy: TouchStrategy, phases: list[str]) -> Callable[[], bool]:
+    """An `until` that never ends the run and keeps the strategy's phases in `phases`, repeats dropped."""
+
+    def record() -> bool:
+        if not phases or phases[-1] != strategy.status.phase:
+            phases.append(strategy.status.phase)
+        return False
+
+    return record
+
+
+def test_the_twin_finds_touch_jev_and_builds_it_without_a_key(monkeypatch):
+    monkeypatch.delenv(KEY_ENV, raising=False)
+    plugin = load_strategy("touch_jev")
+    fields = {field.name: field for field in plugin.fields}
+
+    assert plugin.cls is JevTouchStrategy and plugin.settings is JevTouchSettings
+    assert plugin.summary == ("Touches an object as `touch` does; Jev judges each descent and picks where to "
+                              "try again.")
+    assert list(fields) == TOUCH_FIELDS + ["model", "min_confidence", "min_correction_confidence",
+                                           "max_attempts", "correction_m", "answer_timeout_s", "send_frames"]
+    assert fields["model"].kind is str and fields["model"].default == "jev-1.14.0"
+    assert fields["max_attempts"].kind is int and fields["send_frames"].kind is bool
+    assert fields["time_limit_s"].default == 90.0
+    assert all(fields[name].kind is float for name in ("min_confidence", "min_correction_confidence",
+                                                       "correction_m", "answer_timeout_s"))
+    strategy = plugin.create({"max_attempts": 2, "model": "jev-latest"})
+    assert isinstance(strategy, JevTouchStrategy) and strategy.jev_settings.max_attempts == 2
+
+
+def test_without_the_key_touch_jev_refuses_the_run_before_the_arm_moves(twin, monkeypatch):
+    monkeypatch.delenv(KEY_ENV, raising=False)
+    twin.connect("sim", threaded=False)
+    runner = StrategyRunner(twin, load_strategy("touch_jev").create({}))
+
+    with pytest.raises(RuntimeError, match="brak klucza jev"):
+        runner.start(threaded=False)
+    assert runner.status.stopped_because.startswith(f"strategia odmowila: brak klucza jev: ustaw {KEY_ENV}")
+    assert twin.owner is None
+
+
+def test_jev_in_the_loop_aims_again_after_a_miss_and_touches_the_cube(twin):
+    """The first pose is 3 cm off; once the first descent has started the simulation's truth comes in, as
+    a camera seeing the cube again would. The judge says missed, the strategy rises, aims at the new
+    sighting and touches."""
+    add_cube(twin)
+    twin.connect("sim", threaded=False)
+    clock = Clock()
+    judge = ContactJudge(twin)
+    strategy = JevTouchStrategy(JevTouchSettings(), judge=judge, threaded=False)
+    first = coarse(twin, clock, (0.0, 0.03))
+    runner = StrategyRunner(twin, strategy,
+                            objects=lambda: sim_cube(twin) if strategy.status.attempt >= 1 else first())
+    phases: list[str] = []
+
+    runner.start(threaded=False)
+    scene = run_and_judge(twin, runner, clock, seconds=40.0, until=phases_of(strategy, phases))
+
+    assert runner.status.stopped_because == "zadanie wykonane", strategy.status
+    assert strategy.status.stopped_because == "jev: obiekt dotkniety (pewnosc 0.95)"
+    assert judge.verdicts == ["missed_object", "touched_object"] and strategy.status.attempt == 2
+    # The recorder sees every tick but the last, which ends the run.
+    assert phases[phases.index("touched"):] == ["touched", "lift", "approach", "descend", "touched"]
+    assert strategy.status.phase == "done"
+    assert judge.states[0]["latest_sighting"]["direction"] == "to_robot_right"      # base -y: the right
+    assert judge.states[1]["aim"]["chosen_by"] == "correction:aim_at_latest_sighting"
+    assert len(strategy.judging.decisions) == 4 and not strategy.judging.needs_review
+    assert scene.ok, (scene, strategy.status)
+
+
+def test_an_unsure_answer_stops_the_run_with_the_arm_holding_on_the_cube(twin):
+    add_cube(twin)
+    twin.connect("sim", threaded=False)
+    clock = Clock()
+    strategy = JevTouchStrategy(JevTouchSettings(), judge=ContactJudge(twin, sure=0.4), threaded=False)
+    runner = StrategyRunner(twin, strategy, objects=lambda: sim_cube(twin))
+
+    runner.start(threaded=False)
+    scene = run_and_judge(twin, runner, clock)
+    held = dict(twin.status.measured)
+    for _ in range(round(1.0 / TWIN_PERIOD)):
+        twin.step(TWIN_PERIOD)
+
+    assert runner.status.stopped_because == "strategia skonczyla" and not runner.status.success
+    assert strategy.status.stopped_because == ("jev niepewny: dotkniety z pewnoscia 0.40 < 0.80 - ramie "
+                                               "stoi, do oceny czlowieka")
+    assert strategy.judging.needs_review and strategy.status.attempt == 1
+    arm = strategy.kin.spec.arm_joints
+    assert {n: twin.status.measured[n] for n in arm} == pytest.approx({n: held[n] for n in arm}, abs=0.5)
+    assert {n: twin.status.command[n] for n in arm} == pytest.approx({n: held[n] for n in arm}, abs=1.0)
+    assert scene.contact_at_end and scene.contact_settled and twin.owner is None
+
+
+def test_a_refused_key_ends_the_run_honestly_through_the_real_client(twin):
+    """The Jev client on a fake transport that answers 401: no answer, no retry, the arm holds."""
+    add_cube(twin)
+    twin.connect("sim", threaded=False)
+    sent: list[bytes] = []
+
+    def refuse(url: str, headers: Any, body: bytes, timeout_s: float) -> tuple[int, bytes]:
+        sent.append(body)
+        return 401, b'{"detail": "Invalid API key"}'
+
+    judge = JevJudge(transport=refuse, environ={KEY_ENV: "test-key"})
+    strategy = JevTouchStrategy(JevTouchSettings(), judge=judge, threaded=False)
+    runner = StrategyRunner(twin, strategy, objects=lambda: sim_cube(twin))
+
+    runner.start(threaded=False)
+    run_and_judge(twin, runner, Clock())
+
+    assert runner.status.stopped_because == "strategia skonczyla" and not runner.status.success
+    assert strategy.status.stopped_because == (f"jev odrzucil klucz {KEY_ENV} (401) - ramie stoi, "
+                                               "do oceny czlowieka")
+    assert len(sent) == 1 and strategy.judging.needs_review and strategy.judging.answers == 0
+    assert [d.confidence for d in strategy.judging.decisions] == [None, None]
