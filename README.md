@@ -61,6 +61,7 @@ GPU training is PPO in JAX on MuJoCo Warp and requires CUDA. See the
 [lab documentation](packages/soarm_lab/README.md) for training dependencies,
 fine-tuning and policy formats. Policy inference uses NumPy and requires neither JAX
 nor PyTorch. PyTorch is needed only to convert checkpoints of the old PyTorch trainer.
+One lift policy can also [learn several wooden blocks](packages/soarm_lab/README.md#lift-a-block).
 
 ### Run Dream-1 on the arm
 

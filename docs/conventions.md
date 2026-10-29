@@ -25,7 +25,7 @@ Running a policy needs neither jax nor torch.
 The strategies, the policy file, evaluation and the `soarm-lab` commands other than `train` and `convert`
 import numpy, never jax, optax or torch.
 Training needs the optional extra `soarm-lab[train]`: PPO in JAX and optax on MuJoCo Warp, with the CUDA 12
-build of jax on Linux. Only the trainer's modules import jax themselves: `rl.ppo`, `rl.jax_policy` and `rl.batch`.
+build of jax on Linux. Only the trainer's modules import jax themselves: `rl.ppo`, `rl.jax_policy`, `rl.batch` and `rl.mixed`.
 torch is the optional extra `soarm-lab[torch]`, only for `soarm-lab convert`, which turns a checkpoint of
 the old torch trainer (`policy.pt`) into `policy.npz`. Neither extra is a default dependency.
 `packages/soarm_lab/tests/test_dependency_rule.py` runs the bundled policies in a fresh interpreter and

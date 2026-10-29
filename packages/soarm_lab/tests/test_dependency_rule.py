@@ -80,7 +80,7 @@ def test_the_lab_imports_nothing_from_the_twin_at_runtime() -> None:
         "import soarm_lab.dream_run\n"
         "import soarm_lab.rl, soarm_lab.rl.env, soarm_lab.rl.evaluate\n"
         "if all(importlib.util.find_spec(m) for m in ('jax', 'optax', 'mujoco_warp')):\n"
-        "    import soarm_lab.rl.ppo, soarm_lab.rl.jax_policy, soarm_lab.rl.batch\n"
+        "    import soarm_lab.rl.ppo, soarm_lab.rl.jax_policy, soarm_lab.rl.batch, soarm_lab.rl.mixed\n"
         "if importlib.util.find_spec('torch'):\n"
         "    import soarm_lab.rl.torch_policy\n"
         "print(sorted(m for m in sys.modules if m.split('.')[0] == 'machinekind_twin'))\n"

@@ -61,6 +61,15 @@ CPU MuJoCo (the most in one physics step, over random episodes and a scripted pi
 SO-101 24 contacts / 142 constraint rows (expert, grasp), A1X 12 / 49. MuJoCo Warp generates mesh
 contacts (the convex hulls of the A1X links) differently from the CPU, so the A1X gets a margin of
 64 / 384, still to be confirmed on a GPU (`int(env.d.ncon.numpy().max())` after 200 steps).
+
+The wooden blocks (`objects`, `TaskConfig.object_kind`) have a budget of their own per collision part
+(`BLOCK_CONTACTS`), times the block's number of parts. Measured on Warp's CPU device, SO-101, 8 worlds,
+the most in one world in one physics step over 200 random ticks and then 400 ticks of lift-v3 grasping
+the block (it lifts all four zero-shot): cube 33 contacts / 204 constraint rows, cuboid5 32 / 194,
+cuboid85 26 / 160, cylinder 25 / 152; random actions alone reach 10 / 58. The legacy cube measured
+32 / 194 the same way, two rows over its `CONTACTS`: Warp drops the rows past `njmax`, and with
+`warn_overflow` off it says nothing. The blocks get 48 / 288 per part, about 1.4 times the most
+measured.
 """
 
 from __future__ import annotations
@@ -75,13 +84,21 @@ import numpy as np
 from .. import sim as sc
 from ..station import Station
 from . import task as tk
-from .env import TARGET_SIZE, scene_config
+from .env import TARGET_SIZE, object_geoms, scene_config
 from .jax_policy import devices
 from .randomize import Randomization
 
-#: (nconmax, njmax) per world in the tasks with a cube; without a cube (reach) 16 / 64. See the module
-#: docstring.
-CONTACTS = {"so101": (32, 192), "a1x": (64, 384)}
+#: (nconmax, njmax) per world for the legacy cube; without a cube (reach) 16 / 64. The SO-101 budget
+#: was 32 / 192 until 2026-10-29, when lift-v3 grasping the cube on Warp's CPU device measured 33
+#: contacts / 204 rows: Warp drops the rows past njmax and says nothing (`warn_overflow` is off),
+#: so grasps were computed short. Now the block budget below, about 1.4 x the measured peak.
+#: Warp warns "CCD pairs without multicontact support: (CAPSULE, CYLINDER). At most 1 contact": the
+#: fixed jaw's capsule meets a cylinder at one point on Warp, several on the CPU, a known gap between
+#: training and the CPU evaluation of the cylinder.
+CONTACTS = {"so101": (48, 288), "a1x": (64, 384)}
+#: (nconmax, njmax) per world and per collision part of a wooden block (`objects`), times the block's
+#: number of parts. Measured for the SO-101 (module docstring); the A1X keeps its cube's margin.
+BLOCK_CONTACTS = {"so101": (48, 288), "a1x": (64, 384)}
 #: The model fields randomization changes, separate in every world (`put_model(batch_sizes=)`).
 FIELDS = ("actuator_gainprm", "actuator_biasprm", "dof_damping", "dof_armature", "dof_frictionloss",
           "body_mass", "body_inertia", "geom_friction")
@@ -118,6 +135,17 @@ def _sel_hist(done: Array, new: Array, old: Array) -> Array:
     return jnp.where(done.reshape((1, -1) + (1,) * (old.ndim - 2)), new[None], old)
 
 
+def contact_budget(task: tk.TaskConfig, robot: str) -> tuple[int, int]:
+    """(nconmax, njmax) per world for `task` on the arm `robot` (see the module docstring)."""
+    if task.cube is None:
+        return 16, 64
+    if tk.legacy_cube(task):
+        return CONTACTS.get(robot, CONTACTS["so101"])
+    ncon, nefc = BLOCK_CONTACTS.get(robot, BLOCK_CONTACTS["so101"])
+    parts = len(tk.task_object(task).parts)
+    return ncon * parts, nefc * parts
+
+
 class BatchEnv:
     def __init__(self, task: str | tk.TaskConfig = "reach", num_envs: int = 4096, *,
                  station: Station | None = None, randomization: Randomization | None = None,
@@ -146,7 +174,7 @@ class BatchEnv:
         mujoco.mj_forward(mjm, scene.data)
 
         cube = self.task.cube is not None
-        nconmax, njmax = CONTACTS.get(spec.name, CONTACTS["so101"]) if cube else (16, 64)
+        nconmax, njmax = contact_budget(self.task, spec.name)
         with wp.ScopedDevice(self.wp_device):
             self.m = mjw.put_model(mjm, batch_sizes={k: N for k in (*FIELDS, *DERIVED)})
             if hasattr(self.m.opt, "warn_overflow"):
@@ -171,7 +199,11 @@ class BatchEnv:
         self.home = self.limits.home.astype(f32)
         if cube:
             b = mjm.body(self.task.cube).id
-            self.cube_body, self.cube_geom = b, mjm.geom(self.task.cube).id
+            #: The object's body, and every geom of it: a block of several parts has one geom per part,
+            #: and randomization scales the friction of all of them.
+            self.cube_body, self.cube_geoms = b, object_geoms(mjm, self.task.cube)
+            #: The yaw symmetry the detector cannot see (`task.yaw_period`): the perception's fold.
+            self.yaw_period = float(tk.yaw_period(self.task))
             self.cube_qadr = int(mjm.jnt_qposadr[mjm.body_jntadr[b]])
             self.cube_dadr = int(mjm.jnt_dofadr[mjm.body_jntadr[b]])
             self.jaw_adr = np.array([mjm.sensor(f"{self.task.cube}_jaw{k}").adr[0] for k in range(2)])
@@ -317,6 +349,9 @@ class BatchEnv:
         if self.task.cube:
             out["cube_pos"] = (phys["xpos"][:, self.cube_body] - t) @ R
             out["cube_rot"] = R.T @ phys["xmat"][:, self.cube_body]
+            # The height of the object's lowest point above the table (`task.object_bottom`): the legacy
+            # cube's centre minus `cube_half`, a block's from its parts and its rotation.
+            out["bottom"] = tk.object_bottom(jnp, self.task, out["cube_pos"], out["cube_rot"])
             out["jaws"] = phys["sensordata"][:, self.jaw_adr]
             if self.task.target:
                 a = self.cube_dadr
@@ -351,7 +386,7 @@ class BatchEnv:
         if self.rand.cube_noise > 0:
             pos = pos.at[:, :2].add(self.rand.cube_noise * jax.random.normal(key, (self.num_envs, 2)))
         if self.rand.fold_yaw:
-            rot = tk.fold_yaw(jnp, rot)
+            rot = tk.fold_yaw(jnp, rot, self.yaw_period)
         return {**s, "hist_i": i, "hist_pos": hist_pos, "hist_rot": hist_rot,
                 "seen_pos": jnp.where(upd[:, None], pos, s["seen_pos"]),
                 "seen_rot": jnp.where(upd[:, None, None], rot, s["seen_rot"])}
@@ -364,12 +399,12 @@ class BatchEnv:
         st = self._state(phys, s["target"])
         carried, kw = s["carried"], {}
         if tsk.target:
-            carried = tk.carry_latch(jnp, tsk, carried, st["jaws"], st["cube_pos"])
+            carried = tk.carry_latch(jnp, tsk, carried, st["jaws"], st["cube_pos"], bottom=st["bottom"])
             kw = dict(target=s["target"], cube_vel=st["cube_vel"], carried=carried,
                       grip_open=tk.grip_is_open(jnp, self.limits, s["q_cmd"]))
         rew, success, failure = tk.reward(jnp, tsk, st["tcp"], action, s["prev_action"], goal=s["goal"],
                                           cube_pos=st.get("cube_pos"), jaw_contacts=st.get("jaws"),
-                                          q_cmd=s["q_cmd"], limits=self.limits, **kw)
+                                          q_cmd=s["q_cmd"], limits=self.limits, bottom=st.get("bottom"), **kw)
         streak, finished = tk.success_streak(jnp, tsk, s["streak"], success)
         s = {**s, "key": key, "t": t, "streak": streak, "carried": carried}
         if tsk.cube:
@@ -390,7 +425,7 @@ class BatchEnv:
         if tsk.name == "reach":
             info["distance"] = jnp.sqrt(((s["goal"] - st["tcp"]) ** 2).sum(1))
         else:
-            info["height"] = st["cube_pos"][:, 2] - tsk.cube_half
+            info["height"] = st["bottom"]
         if tsk.target:
             info["dist_target"] = jnp.sqrt(((st["cube_pos"][:, :2] - s["target"][:, :2]) ** 2).sum(1))
             info["carried"] = carried
@@ -457,10 +492,12 @@ class BatchEnv:
         put("dof_armature", (slice(None), dof), nom["dof_armature"][dof] * smp["armature"][:, None])
         put("dof_frictionloss", (slice(None), dof), nom["dof_frictionloss"][dof] * smp["frictionloss"][:, None])
         if self.task.cube:
-            b, g, mass = self.cube_body, self.cube_geom, smp["cube_mass"]
+            b, g, mass = self.cube_body, self.cube_geoms, smp["cube_mass"]
             put("body_mass", (slice(None), b), nom["body_mass"][b] * mass)
             put("body_inertia", (slice(None), b), nom["body_inertia"][b] * mass[:, None])
-            put("geom_friction", (slice(None), g, 0), nom["geom_friction"][g, 0] * smp["cube_friction"])
+            # The same multiplier on every part: it is one block of one material.
+            friction = nom["geom_friction"][g, 0] * smp["cube_friction"][:, None]
+            put("geom_friction", (slice(None), g, 0), friction)
         return {**s, "fields": f,
                 "delay_n": _sel(done, jnp.clip(smp["delay"], 0, self.Hd - 1), s["delay_n"]),
                 "cube_d": _sel(done, smp["cube_delay"], s["cube_d"]),
@@ -487,7 +524,7 @@ class BatchEnv:
         if tsk.cube:
             r = u(k_r, (N,), minval=tsk.cube_radius[0], maxval=tsk.cube_radius[1])
             b = u(k_b, (N,), minval=tsk.cube_bearing[0], maxval=tsk.cube_bearing[1])
-            p = jnp.stack([r * jnp.cos(b), r * jnp.sin(b), jnp.full_like(r, tsk.cube_half)], 1)
+            p = jnp.stack([r * jnp.cos(b), r * jnp.sin(b), jnp.full_like(r, tk.rest_height(tsk))], 1)
             yaw = u(k_yaw, (N,), minval=-np.pi, maxval=np.pi)
             qb = self.q_base
             # a rotation about z in the base frame, then into the world: q_base * q_yaw
@@ -505,7 +542,8 @@ class BatchEnv:
             s["hist_pos"] = _sel_hist(done, p, s["hist_pos"])
             s["hist_rot"] = _sel_hist(done, R, s["hist_rot"])
             s["seen_pos"] = _sel(done, p, s["seen_pos"])
-            s["seen_rot"] = _sel(done, tk.fold_yaw(jnp, R) if self.rand.fold_yaw else R, s["seen_rot"])
+            s["seen_rot"] = _sel(done, tk.fold_yaw(jnp, R, self.yaw_period) if self.rand.fold_yaw else R,
+                                 s["seen_rot"])
             if tsk.target:
                 # The target on the table top (z = 0) in the base frame; the mocap pad follows it.
                 target = self._sample_targets(k_t, p)

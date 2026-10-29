@@ -8,7 +8,7 @@ the race between a claim and the clutch.
 
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 import numpy as np
 import pytest
@@ -19,6 +19,7 @@ import soarm
 pytest.importorskip("mujoco")
 
 from soarm_lab.rl import task as tk  # noqa: E402
+from soarm_lab.rl.objects import DESCRIPTOR_DIM, descriptor  # noqa: E402
 from soarm_lab.rl.policy import Policy, PolicyMeta  # noqa: E402
 from soarm_lab.robot import load_robot  # noqa: E402
 from soarm_lab.strategies.policy import PolicySettings, PolicyStrategy, project_goal, project_target  # noqa: E402
@@ -241,3 +242,61 @@ def test_the_run_ends_after_a_training_episode():
     assert s.status.stopped_because == "koniec epizodu"
     s.stop("przerwana: STOP z panelu")
     assert s.status.stopped_because == "przerwana: STOP z panelu"
+
+
+# ------------------------------------------------------------ wooden blocks
+def block_policy(kind: str = "cuboid5", action: dict[int, float] | None = None) -> Policy:
+    """A constant shape-conditioned lift policy whose own block is `kind`, trained with the yaw folded."""
+    pol = constant_policy(replace(tk.make_task("lift"), object_kind=kind, shape_conditioned=True), action)
+    pol.meta.randomization = {"fold_yaw": True}
+    return pol
+
+
+def block(label: str, position, yaw_deg: float = 0.0, rotation=None, source: str = "kamery"):
+    """`obs.objects` with one object under `label`, turned by `yaw_deg` about z (or by `rotation`)."""
+    c, s_ = np.cos(np.radians(yaw_deg)), np.sin(np.radians(yaw_deg))
+    R = np.array([[c, -s_, 0.0], [s_, c, 0.0], [0.0, 0.0, 1.0]]) if rotation is None else rotation
+    return {label: ObjectPose(position=np.asarray(position, float), rotation=R, source=source)}
+
+
+def test_a_shape_conditioned_policy_sees_its_block_appended():
+    """The observation is the lift observation plus the descriptor of the policy's own block."""
+    s = PolicyStrategy(policy=block_policy("cuboid5"))
+    s.start(run_info(), obs(dict(SPEC.home)))
+    vec = s.observation(dict(SPEC.home), block("cube", [0.2, 0.05, 0.0125]))
+    assert vec.shape == (tk.OBS_DIMS["lift"] + DESCRIPTOR_DIM,) == (40,) and vec.dtype == np.float32
+    np.testing.assert_array_equal(vec[33:], descriptor("cuboid5"))
+    legacy = PolicyStrategy(policy=constant_policy(tk.make_task("lift")))
+    legacy.start(run_info(), obs(dict(SPEC.home)))
+    want = legacy.observation(dict(SPEC.home), block("cube", [0.2, 0.05, 0.0125]))
+    np.testing.assert_allclose(vec[:33], want)                       # the first 33: the lift layout
+
+
+def test_the_settings_object_kind_overrides_the_policys_own():
+    """`object_kind` picks the block: its descriptor, its name in `obs.objects` and its yaw symmetry."""
+    s = PolicyStrategy(PolicySettings(object_kind="cylinder"), policy=block_policy("cuboid5"))
+    assert s.task.object_kind == "cylinder" and s.policy.task.object_kind == "cuboid5"
+    s.start(run_info(), obs(dict(SPEC.home)))
+    seen = {**block("cube", [0.25, 0.0, 0.0125]), **block("cylinder", [0.2, 0.05, 0.0125], yaw_deg=100.0)}
+    vec = s.observation(dict(SPEC.home), seen)
+    np.testing.assert_array_equal(vec[33:], descriptor("cylinder"))
+    np.testing.assert_allclose(vec[15:18], [0.2, 0.05, 0.0125])                 # the object named "cylinder"
+    # A cylinder looks the same every 180 deg: 100 deg folds to -80 (a cube would fold it to +10).
+    np.testing.assert_allclose(vec[21:23], [np.cos(np.radians(-80.0)), np.sin(np.radians(-80.0))], atol=1e-6)
+    # Without an object of the kind's name, the one named "cube" (the cube detector, the twin's simulation).
+    vec = s.observation(dict(SPEC.home), block("cube", [0.25, 0.0, 0.0125]))
+    np.testing.assert_allclose(vec[15:18], [0.25, 0.0, 0.0125])
+    with pytest.raises(ValueError, match="unknown object_kind 'pyramid'"):
+        PolicyStrategy(PolicySettings(object_kind="pyramid"), policy=block_policy())
+    with pytest.raises(ValueError, match="needs a task with an object"):
+        PolicyStrategy(PolicySettings(object_kind="cube"), policy=constant_policy(tk.make_task("reach")))
+
+
+def test_lift_success_counts_the_blocks_lowest_point():
+    """A cuboid85 stood on its end is not lifted although its centre is high: its lowest point counts."""
+    s = PolicyStrategy(PolicySettings(object_kind="cuboid85"), policy=block_policy("cube", {5: -1.0}))
+    centre = [0.2, 0.0, 0.08]                    # lying flat its bottom is 6.75 cm up, stood up 3.75 cm
+    standing = np.array([[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]])  # body x (the long side) up
+    assert lift_success(s, block("cuboid85", centre))
+    assert not lift_success(s, block("cuboid85", centre, rotation=standing))
+    assert "3.8 cm nad blatem" in s._note()

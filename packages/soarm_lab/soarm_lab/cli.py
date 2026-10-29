@@ -3,7 +3,9 @@
     soarm-lab train --task reach                     # a PPO policy on the GPU (MuJoCo Warp) + CPU evaluation
     soarm-lab train --task lift --station ~/desk1    # ... on the station from `twin export ~/desk1`
     soarm-lab train --task pickplace                 # ... the cube carried onto a target on the table
+    soarm-lab train --init lift-v3 --kinds cube,cuboid5,cuboid85,cylinder   # one policy for four blocks
     soarm-lab eval lift-v3 --rand                    # evaluate a policy in plain MuJoCo
+    soarm-lab eval <block policy> --kind cylinder    # ... on one of the blocks it was trained on
     soarm-lab policies                               # bundled policies and those trained here, with results
     soarm-lab convert old/policy.pt                  # a torch checkpoint -> policy.npz
     soarm-lab dream models                           # Dream Labs: the checkpoints the account may run
@@ -15,6 +17,11 @@ station bundled with the package (`sim`, the default). `eval` and `policies` nee
 `train` is PPO in JAX on MuJoCo Warp: it needs the `train` extra (jax, on Linux its CUDA build, optax,
 mujoco-warp) and no torch. `convert` needs the `torch` extra. `dream` needs the `dream` extra and a Dream
 Labs API key (`dream_run`).
+
+`train --kinds` trains one shape-conditioned policy on several wooden blocks (`rl.objects`): the task
+observes the block's descriptor, the environment is a `rl.mixed.MixedBatchEnv` with an equal share of
+the worlds per kind, `--init lift-v3` widens the cube policy to the new inputs (`rl.ppo`), and the CPU
+evaluation runs once per kind (`meta.evals["cpu_<kind>"]`, `["cpu_rand_<kind>"]`).
 """
 
 from __future__ import annotations
@@ -47,6 +54,72 @@ def _train_plan(dyn, no_rand: bool, spread: float):
     return rand, evals
 
 
+def _kind_arg(text: str) -> str:
+    """An object kind (`--kind`), checked against the object table."""
+    from .rl.objects import KINDS
+
+    if text not in KINDS:
+        raise argparse.ArgumentTypeError(f"unknown object kind {text!r}; known: {', '.join(KINDS)}")
+    return text
+
+
+def _kinds_arg(text: str) -> tuple[str, ...]:
+    """Comma-separated object kinds (`--kinds cube,cylinder`), each known and none twice."""
+    kinds = tuple(_kind_arg(k.strip()) for k in text.split(",") if k.strip())
+    if not kinds:
+        raise argparse.ArgumentTypeError("no object kind given")
+    if len(set(kinds)) != len(kinds):
+        raise argparse.ArgumentTypeError(f"an object kind repeats in {text!r}")
+    return kinds
+
+
+def _train_task(a: argparse.Namespace, st, init):
+    """The task to train: `init`'s own, else `--task`'s, with `--kinds` and `--episode-steps` on top.
+
+    `--kinds` makes it shape-conditioned. Its `object_kind` is the policy's own kind (`cpu_nominal`
+    and `cpu_rand` evaluate it, the strategy uses it by default): the base task's when it is among
+    the kinds, else the first of them.
+    """
+    from dataclasses import replace
+
+    from .rl.task import make_task
+
+    base = init.task if init is not None else make_task(a.task, spec=st.spec())
+    over = {}
+    if a.kinds:
+        if base.cube is None:
+            raise ValueError(f"--kinds needs a task with an object (lift, pickplace), not {base.name}")
+        over["shape_conditioned"] = True
+        if base.object_kind not in a.kinds:
+            over["object_kind"] = a.kinds[0]
+    if a.episode_steps:
+        over["episode_steps"] = a.episode_steps
+    return replace(base, **over)
+
+
+def _kind_key(key: str, kind: str) -> str:
+    """The per-kind key of an evaluation in `meta.evals`: `cpu_nominal` -> `cpu_<kind>`, `cpu_rand` ->
+    `cpu_rand_<kind>`."""
+    return f"cpu_{kind}" if key == "cpu_nominal" else f"{key}_{kind}"
+
+
+def _kinds_summary(evals: dict) -> str:
+    """For a policy evaluated per object kind: the mean and the worst kind's CPU success, else ''.
+
+    The randomized evaluations when there are any, else the nominal ones.
+    """
+    from .rl.objects import KINDS
+
+    for key, label in (("cpu_rand", "z rand."), ("cpu_nominal", "bez rand.")):
+        got = {k: evals[_kind_key(key, k)].get("success") for k in KINDS if _kind_key(key, k) in evals}
+        got = {k: v for k, v in got.items() if v is not None}
+        if got:
+            worst = min(got, key=got.__getitem__)
+            mean = sum(got.values()) / len(got)
+            return f"klocki {label} srednio {mean:5.1%}, najslabszy {worst} {got[worst]:5.1%}"
+    return ""
+
+
 def _describe(rand) -> str:
     c = rand.centre
     delay = f"{rand.min_delay}" if rand.min_delay == rand.max_delay else f"{rand.min_delay}-{rand.max_delay}"
@@ -66,27 +139,42 @@ def _train(a: argparse.Namespace) -> int:
     from .rl.randomize import Dynamics
 
     st = _station(a)
-    name = a.name or f"{a.task}-{time.strftime('%Y%m%d-%H%M%S')}"
-    out = Path(a.out or policies_dir()) / name
     dyn = Dynamics.from_dict(st.dynamics)
     rand, evals = _train_plan(dyn, a.no_rand, a.spread)
     cfg = PPOConfig(num_envs=a.envs, iterations=a.iters, seed=a.seed)
-    init = None
+    init, init_name = None, ""
     if a.init:
         from .rl.policy import Policy, find_policy
 
-        init = Policy.load(find_policy(a.init))
+        path = find_policy(a.init)
+        init, init_name = Policy.load(path), path.parent.name
         a.task = init.task.name
         cfg.init_std = 0.25                            # fine-tuning: less exploration at the start
         cfg.critic_warmup = 30                         # for policies saved without a critic (see ppo)
         print(f"Start z polityki {a.init} ({init.task.name})")
-    print(f"Trening {a.task} na stanowisku {st.folder}: {a.envs} swiatow x {a.iters} iteracji -> {out}")
+    task = _train_task(a, st, init)
+    make_env = None
+    if a.kinds:
+        from functools import partial
+
+        from .rl.mixed import MixedBatchEnv
+
+        # One MixedBatchEnv even for one kind: the same environment and the same info["kind"].
+        make_env = partial(MixedBatchEnv, kinds=a.kinds)
+    name = a.name or f"{a.task}-{time.strftime('%Y%m%d-%H%M%S')}"
+    out = Path(a.out or policies_dir()) / name
+    blocks = f" (klocki: {', '.join(a.kinds)})" if a.kinds else ""
+    print(f"Trening {a.task}{blocks} na stanowisku {st.folder}: {a.envs} swiatow x {a.iters} iteracji -> {out}")
     print(f"  {_describe(rand)}{'' if a.no_rand else f', rozrzut x{a.spread}'}")
 
     def show(p):
         if p.iteration == 1 or p.iteration % 10 == 0 or p.status != "uczenie":
+            worst = ""
+            if p.success_by_kind:
+                kind = min(p.success_by_kind, key=p.success_by_kind.__getitem__)
+                worst = f"  najslabszy {kind} {p.success_by_kind[kind]:5.1%}"
             print(f"  it {p.iteration:4d}/{p.iterations}  {p.steps / 1e6:7.2f} M krokow  {p.fps / 1e3:5.0f} k/s  "
-                  f"sukces {p.success:5.1%}  nagroda {p.reward:7.2f}  {p.elapsed:5.0f} s", flush=True)
+                  f"sukces {p.success:5.1%}{worst}  nagroda {p.reward:7.2f}  {p.elapsed:5.0f} s", flush=True)
 
     stop = None
     if a.stop_file:
@@ -102,14 +190,23 @@ def _train(a: argparse.Namespace) -> int:
                     stop.set()
                 time.sleep(0.5)
         threading.Thread(target=watch, daemon=True).start()
-    pol = train(a.task, cfg, station=st, randomization=rand, out_dir=out, on_progress=show, stop=stop,
-                init=init, device=a.device)
-    print("Ewaluacja na CPU (zwykle MuJoCo, inny silnik niz w treningu):")
-    for label, key, r in evals:
-        res = evaluate(pol, a.eval_episodes, randomization=r, station=st)
-        pol.meta.evals[key] = res
+    pol = train(task, cfg, station=st, randomization=rand, out_dir=out, on_progress=show, stop=stop,
+                init=init, device=a.device, make_env=make_env, init_name=init_name)
+
+    def report(label, res):
         rounded = {k: round(v, 3) if isinstance(v, float) else v for k, v in res.items()}
-        print(f"  {label:17s} sukces {res['success']:5.1%}  ({json.dumps(rounded)})")
+        print(f"  {label:27s} sukces {res['success']:5.1%}  ({json.dumps(rounded)})")
+
+    print("Ewaluacja na CPU (zwykle MuJoCo, inny silnik niz w treningu):")
+    for label, key, r in evals:                        # the policy's own kind
+        pol.meta.evals[key] = res = evaluate(pol, a.eval_episodes, randomization=r, station=st)
+        report(label, res)
+    for kind in a.kinds or ():
+        for label, key, r in evals:
+            res = pol.meta.evals[key] if kind == task.object_kind else \
+                evaluate(pol, a.eval_episodes, randomization=r, station=st, kind=kind)
+            pol.meta.evals[_kind_key(key, kind)] = res
+            report(f"{kind} {label}", res)
     print(f"Zapisano {pol.save(out / POLICY_FILE)}")
     return 0
 
@@ -124,8 +221,8 @@ def _eval(a: argparse.Namespace) -> int:
     pol = Policy.load(path)
     # Randomization around the station's measured dynamics, as in training, not around Menagerie.
     rand = Randomization.around(Dynamics.from_dict(st.dynamics)) if a.rand else None
-    res = evaluate(pol, a.episodes, randomization=rand, station=st, seed=a.seed)
-    print(f"{path}: {res}")
+    res = evaluate(pol, a.episodes, randomization=rand, station=st, seed=a.seed, kind=a.kind)
+    print(f"{path}{f' ({a.kind})' if a.kind else ''}: {res}")
     return 0
 
 
@@ -143,9 +240,10 @@ def _policies(a: argparse.Namespace) -> int:
 
     for p in items:
         where = "bazowa" if p["bundled"] else "uczona"
+        blocks = _kinds_summary(p["evals"])
         print(f"  {p['name']:32s} {p['task']:9s} {where:6s} GPU {p['success'] or 0:5.1%}  "
               f"CPU bez/z rand. {pct('cpu_nominal')} / {pct('cpu_rand')}  "
-              f"{p['steps'] / 1e6:6.1f} M  {p['created']}")
+              f"{p['steps'] / 1e6:6.1f} M  {p['created']}{f'  {blocks}' if blocks else ''}")
     for pt in torch_checkpoints(a.dir or policies_dir()):
         print(f"  {pt.parent.name:32s} tylko policy.pt (torch): soarm-lab convert {pt}")
     return 0
@@ -232,6 +330,11 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--stop-file", default=None, help="przerwij trening, gdy ten plik sie pojawi")
     p.add_argument("--init", default=None, help="douczanie: start z tej polityki (nazwa albo policy.npz)")
     p.add_argument("--device", default="cuda:0", help="device of JAX and MuJoCo Warp (default cuda:0)")
+    p.add_argument("--kinds", type=_kinds_arg, default=None, metavar="KIND,KIND",
+                   help="one shape-conditioned policy for these wooden blocks, an equal share of the worlds "
+                        "each: cube, cuboid5, cuboid85, cylinder (rl/objects.py); default: the task's one cube")
+    p.add_argument("--episode-steps", type=int, default=None,
+                   help="episode length in policy ticks (default: the task's, lift 200)")
     p.set_defaults(fn=_train)
 
     p = sub.add_parser("eval", help="ewaluacja polityki na CPU (zwykle MuJoCo)")
@@ -240,6 +343,8 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--rand", action="store_true", help="z randomizacja dziedziny")
     p.add_argument("--seed", type=int, default=10_000, help="ziarno pierwszego epizodu")
     p.add_argument("--station", default="sim", help=station_help)
+    p.add_argument("--kind", type=_kind_arg, default=None,
+                   help="the wooden block to evaluate on (rl/objects.py); default: the policy's own")
     p.set_defaults(fn=_eval)
 
     p = sub.add_parser("policies", help="polityki bazowe i uczone, z wynikami")

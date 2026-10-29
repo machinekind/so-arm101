@@ -21,7 +21,15 @@ iteration.
 
 Progress goes to `on_progress(Progress)` and, with `out_dir`, to `progress.json` in the run's folder.
 Interrupting: `stop` (threading.Event); the policy as it is at that point is returned, and saved with
-`out_dir`.
+`out_dir`. An environment of several object kinds (`mixed.MixedBatchEnv`) marks every world's kind in
+`info["kind"]`, and `Progress.success_by_kind` gives the success per kind.
+
+Fine-tuning (`init`) keeps the policy's layers. One change of shape is allowed: a shape-conditioned
+task (`TaskConfig.shape_conditioned`) observes `objects.DESCRIPTOR_DIM` more inputs, the object's
+descriptor, than a policy trained on one object. Such a policy is widened (`_widen_layers`,
+`jax_policy.widen_norm`): the first layer of the actor and of the critic gets zero weights for the
+new inputs, the normalizer gets mean 0 and variance 1 for them. It starts by doing exactly what it
+did (lift-v3 grasps the cube) and learns what the descriptor means from there.
 """
 
 from __future__ import annotations
@@ -41,6 +49,7 @@ from ..station import Station
 from . import jax_policy as jp
 from . import task as tk
 from .jax_policy import jax, jnp
+from .objects import DESCRIPTOR_DIM
 from .policy import POLICY_FILE, Policy, PolicyMeta
 from .randomize import Randomization
 
@@ -86,7 +95,8 @@ class EnvLike(Protocol):
     """What `train` needs of an environment: the interface of `batch.BatchEnv`.
 
     Worlds reset themselves inside `step`; `info` holds bool arrays (N,) "time_outs" (episodes to
-    bootstrap with the state value) and "success".
+    bootstrap with the state value) and "success". An environment of several object kinds adds
+    "kind", an int array (N,) of indices into its `kinds` (names), for `Progress.success_by_kind`.
     """
 
     num_envs: int
@@ -116,6 +126,9 @@ class Progress:
     elapsed: float = 0.0
     status: str = "uczenie"
     history: list[dict[str, float]] = field(default_factory=list)
+    #: The success of the recent episodes per object kind, when the environment reports `info["kind"]`
+    #: (`mixed.MixedBatchEnv`); empty otherwise.
+    success_by_kind: dict[str, float] = field(default_factory=dict)
 
 
 class _State(NamedTuple):
@@ -146,11 +159,15 @@ def train(task: str | tk.TaskConfig, cfg: PPOConfig | None = None, *, station: S
           randomization: Randomization | None = None, out_dir: str | Path | None = None,
           on_progress: Callable[[Progress], None] | None = None,
           stop: threading.Event | None = None, device: str = "cuda:0", init: Policy | None = None,
-          make_env: Callable[..., EnvLike] | None = None) -> Policy:
+          make_env: Callable[..., EnvLike] | None = None, init_name: str = "") -> Policy:
     """Trains a policy for `task`; `init` starts from an existing one (actor, normalizer, critic if saved).
 
     `init` is for fine-tuning: after identifying the arm's dynamics, after a change of randomization
-    or perception, instead of discovering the grasp from scratch.
+    or perception, instead of discovering the grasp from scratch. It trains on the task `init` was
+    trained on, unless `task` is a `TaskConfig` of the same name: then on that one (the CLI turns on
+    `shape_conditioned` and overrides `episode_steps` this way). A shape-conditioned task widens a
+    policy trained without the descriptor (see the module docstring). `init_name` (`--init`) goes
+    into `meta.notes`.
 
     `device` is "cuda:0" ("cuda:k", "cuda") or "cpu": the JAX device, and the same string goes to the
     environment. `make_env` builds the environment, called as `batch.BatchEnv` (the default):
@@ -165,18 +182,31 @@ def train(task: str | tk.TaskConfig, cfg: PPOConfig | None = None, *, station: S
     if init is not None:
         if init.meta.robot != spec.name:
             raise RuntimeError(f"polityka uczona na {init.meta.robot}, stanowisko ma {spec.name}")
-        tsk = init.task                                # the task it was trained on
+        if not isinstance(task, tk.TaskConfig):
+            tsk = init.task                            # the task it was trained on
+        elif tsk.name != init.task.name:
+            raise ValueError(f"the init policy was trained on {init.task.name}, the task is {tsk.name}")
     rand = randomization if randomization is not None else Randomization()
     if make_env is None:
         from .batch import BatchEnv
 
         make_env = BatchEnv
     env = make_env(tsk, cfg.num_envs, station=station, randomization=rand, device=device, seed=cfg.seed)
+    #: The names of `info["kind"]`'s indices (`mixed.MixedBatchEnv.kinds`); empty for one object.
+    kinds = tuple(getattr(env, "kinds", ()) or ())
     meta = PolicyMeta(task=asdict(tsk), hidden=list(cfg.hidden), obs_dim=env.obs_dim, act_dim=env.act_dim,
                       randomization=_rand_dict(rand), robot=spec.name)
+    # A policy trained without the object's descriptor, on a task that observes it: widened.
+    extra = 0
     if init is not None:
         meta.hidden = list(init.meta.hidden)
-        meta.notes = f"douczana z polityki z {init.meta.created} ({init.meta.steps / 1e6:.0f} mln krokow)"
+        source = f"{init_name}, " if init_name else ""
+        meta.notes = (f"douczana z polityki z {init.meta.created} ({source}{init.meta.steps / 1e6:.0f} mln "
+                      "krokow)")
+        if tsk.shape_conditioned and meta.obs_dim - init.meta.obs_dim == DESCRIPTOR_DIM:
+            extra = DESCRIPTOR_DIM
+            meta.notes += (f"; obserwacja poszerzona z {init.meta.obs_dim} do {meta.obs_dim} wejsc o opis "
+                           "obiektu, nowe wejscia z zerowymi wagami")
     key, k_actor, k_critic = jax.random.split(key, 3)
     sizes = [meta.obs_dim, *meta.hidden]
     norm = jp.Norm.new(meta.obs_dim)
@@ -185,9 +215,11 @@ def train(task: str | tk.TaskConfig, cfg: PPOConfig | None = None, *, station: S
     warmup = 0
     if init is not None:
         norm, init_actor, init_critic = jp.from_policy(init)
-        actor = _same_layers("actor", init_actor, actor)
+        actor = _widen_layers("actor", init_actor, actor, extra)
+        if extra:
+            norm = jp.widen_norm(norm, meta.obs_dim)
         if init_critic is not None:
-            critic = _same_layers("critic", init_critic, critic)
+            critic = _widen_layers("critic", init_critic, critic, extra)
         else:
             warmup = cfg.critic_warmup
     log_std = jnp.full(meta.act_dim, np.log(cfg.init_std), jnp.float32)
@@ -199,9 +231,10 @@ def train(task: str | tk.TaskConfig, cfg: PPOConfig | None = None, *, station: S
     out = Path(out_dir) if out_dir else None
     if out:
         out.mkdir(parents=True, exist_ok=True)
-        (out / "config.json").write_text(json.dumps({"ppo": asdict(cfg), "task": asdict(tsk),
-                                                     "randomization": meta.randomization}, indent=2),
-                                         encoding="utf-8")
+        config = {"ppo": asdict(cfg), "task": asdict(tsk), "randomization": meta.randomization}
+        if kinds:
+            config["kinds"] = list(kinds)
+        (out / "config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
 
     N, T = cfg.num_envs, cfg.horizon
     obs = env.reset()
@@ -212,6 +245,7 @@ def train(task: str | tk.TaskConfig, cfg: PPOConfig | None = None, *, station: S
     recent_succ: list[float] = []
     recent_ret: list[float] = []
     recent_len: list[float] = []
+    recent_kind: list[int] = []                        # with `info["kind"]`: the kind of each episode
 
     for it in range(1, cfg.iterations + 1):
         t0 = time.perf_counter()
@@ -231,24 +265,28 @@ def train(task: str | tk.TaskConfig, cfg: PPOConfig | None = None, *, station: S
             rew, done_f, ep_ret, ep_len, ret_end, len_end = _record(val, rew, done, info["time_outs"], ep_ret,
                                                                     ep_len, cfg.gamma)
             steps.append((obs_n, act, logp, val, rew, done_f))
-            ends.append((done, info["success"], ret_end, len_end))
+            end = (done, info["success"], ret_end, len_end)
+            ends.append((*end, info["kind"]) if "kind" in info else end)
         roll = _Rollout(*(jnp.stack(x) for x in zip(*steps)))
 
         # ------------------------------------------------------------ update
         key, k_update = jax.random.split(key)
         state = update(state, roll, obs, k_update, warming=warming)
         # The episodes that ended in this rollout, in the order they ended.
-        done_h, succ_h, ret_h, len_h = (np.asarray(jnp.stack(x)) for x in zip(*ends))
+        done_h, succ_h, ret_h, len_h, *kind_h = (np.asarray(jnp.stack(x)) for x in zip(*ends))
         done_h = done_h.astype(bool)
         recent_succ += succ_h[done_h].astype(float).tolist()
         recent_ret += ret_h[done_h].tolist()
         recent_len += len_h[done_h].tolist()
+        if kind_h:
+            recent_kind += kind_h[0][done_h].astype(int).tolist()
         jax.block_until_ready(state)
 
         # ---------------------------------------------------------- progress
         dt = time.perf_counter() - t0
         keep = max(cfg.num_envs, 200)
         recent_succ, recent_ret, recent_len = recent_succ[-keep:], recent_ret[-keep:], recent_len[-keep:]
+        recent_kind = recent_kind[-keep:]
         prog.iteration, prog.steps = it, it * T * N
         prog.fps = T * N / dt
         prog.success = float(np.mean(recent_succ)) if recent_succ else 0.0
@@ -256,7 +294,10 @@ def train(task: str | tk.TaskConfig, cfg: PPOConfig | None = None, *, station: S
         prog.episode_len = float(np.mean(recent_len)) if recent_len else 0.0
         prog.lr, prog.std = float(state.lr), float(jnp.exp(state.params["log_std"]).mean())
         prog.elapsed = time.perf_counter() - t_start
-        prog.history.append({"it": it, "steps": prog.steps, "success": prog.success, "reward": prog.reward})
+        if recent_kind:
+            prog.success_by_kind = _success_by_kind(recent_succ, recent_kind, kinds)
+        prog.history.append({"it": it, "steps": prog.steps, "success": prog.success, "reward": prog.reward,
+                             **{f"success_{k}": v for k, v in prog.success_by_kind.items()}})
         stopping = stop is not None and stop.is_set()
         if it == cfg.iterations or stopping:
             prog.status = "przerwane" if stopping and it < cfg.iterations else "gotowe"
@@ -414,13 +455,30 @@ def _adam(params: Any, grads: Any, opt: Any, lr: jax.Array) -> tuple[Any, Any]:
     return jax.tree_util.tree_map(lambda p, u: p - lr * u, params, updates), opt
 
 
-def _same_layers(name: str, layers: jp.JaxLayers, like: jp.JaxLayers) -> jp.JaxLayers:
-    """The `init` policy's layers, checked against the shapes the environment needs."""
+def _widen_layers(name: str, layers: jp.JaxLayers, like: jp.JaxLayers, extra: int = 0) -> jp.JaxLayers:
+    """The `init` policy's layers, checked against the shapes the environment needs (those of `like`).
+
+    With `extra` > 0 the environment's observation may be `extra` inputs wider than the policy's:
+    the first layer then gets zero weights for them (`jax_policy.widen_inputs`). Any other difference
+    raises.
+    """
     got = [tuple(w.shape) for w, _ in layers]
     want = [tuple(w.shape) for w, _ in like]
-    if got != want:
-        raise ValueError(f"the {name} of the init policy has layers {got}, the environment needs {want}")
-    return layers
+    if got == want:
+        return layers
+    narrower = [(want[0][0], want[0][1] - extra), *want[1:]]
+    if extra > 0 and got == narrower:
+        return jp.widen_inputs(layers, want[0][1])
+    raise ValueError(f"the {name} of the init policy has layers {got}, the environment needs {want}")
+
+
+def _success_by_kind(success: list[float], kind: list[int], names: tuple[str, ...]) -> dict[str, float]:
+    """The mean success per object kind of the recent episodes (`success` and `kind` of equal length).
+
+    A kind is named by `names[index]`, or by its index when the environment gives no names.
+    """
+    succ, idx = np.asarray(success, float), np.asarray(kind, int)
+    return {(names[k] if 0 <= k < len(names) else str(k)): float(succ[idx == k].mean()) for k in np.unique(idx)}
 
 
 def _finish(meta: PolicyMeta, state: _State, prog: Progress, path: Path | None) -> Policy:

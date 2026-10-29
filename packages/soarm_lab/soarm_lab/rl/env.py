@@ -47,9 +47,7 @@ def scene_config(task: tk.TaskConfig, station: Station | None = None, view: bool
     ws = station or Station.load()
     cfg = sc.SceneConfig(ws)
     if task.cube:
-        h = task.cube_half
-        cfg.objects = [*cfg.objects, sc.Box(task.cube, (h, h, h), (0.2, 0.0), rgba=(0.85, 0.25, 0.2, 1.0),
-                                            mass=task.cube_mass)]
+        cfg.objects = [*cfg.objects, tk.scene_box(task, task.cube, (0.2, 0.0))]
         cfg.grasp_sensors = [*cfg.grasp_sensors, task.cube]
     if task.target:
         # A mocap body without collisions: the cube lies on the table top, so `height` means the same
@@ -62,6 +60,11 @@ def scene_config(task: tk.TaskConfig, station: Station | None = None, view: bool
         cfg.cameras = [sc.CameraView.from_fov(VIEW, 480, 360, 50.0, look_at(np.array([0.62, -0.42, 0.42]) * f,
                                                                            np.array([0.18, 0.0, 0.05]) * f))]
     return cfg
+
+
+def object_geoms(m: mujoco.MjModel, name: str) -> np.ndarray:
+    """The geom ids of the object body `name`: one per part (a plain box has one)."""
+    return np.flatnonzero(m.geom_bodyid == m.body(name).id)
 
 
 class ModelFields:
@@ -77,10 +80,11 @@ class ModelFields:
         self.armature = m.dof_armature[self.dof].copy()
         self.frictionloss = m.dof_frictionloss[self.dof].copy()
         self.cube_body = m.body(cube).id if cube else None
-        self.cube_geom = m.geom(cube).id if cube else None
+        #: Every geom of the object: a block of several parts slides on all of them.
+        self.cube_geoms = object_geoms(m, cube) if cube else None
         self.cube_mass = m.body_mass[self.cube_body] if cube else 0.0
         self.cube_inertia = m.body_inertia[self.cube_body].copy() if cube else None
-        self.cube_friction = m.geom_friction[self.cube_geom].copy() if cube else None
+        self.cube_friction = m.geom_friction[self.cube_geoms].copy() if cube else None
 
     def apply(self, m: mujoco.MjModel, d: mujoco.MjData, s: dict[str, float]) -> None:
         """Applies the multipliers `s` to the model fields, always from the nominal (they never pile up)."""
@@ -93,7 +97,7 @@ class ModelFields:
             # The mass together with the inertia: it is the same object, only heavier.
             m.body_mass[self.cube_body] = self.cube_mass * s["cube_mass"]
             m.body_inertia[self.cube_body] = self.cube_inertia * s["cube_mass"]
-            m.geom_friction[self.cube_geom] = self.cube_friction * np.array([s["cube_friction"], 1.0, 1.0])
+            m.geom_friction[self.cube_geoms] = self.cube_friction * np.array([s["cube_friction"], 1.0, 1.0])
         # Mass and armature enter constants computed at compile time (body_invweight0,
         # dof_invweight0), and the softness of contacts depends on them. Without recomputing them a
         # cube with a changed mass gets the contacts of another cube, and when it jams between the
@@ -143,6 +147,8 @@ class ArmEnv(gym.Env):
         self._cube_delay, self._cube_period = 0, 1
         self._cube_hist: list[tuple[np.ndarray, np.ndarray]] = []
         self._cube_seen = (np.zeros(3), np.eye(3))
+        #: The yaw symmetry the detector cannot see (`task.fold_yaw`).
+        self._yaw_period = tk.yaw_period(self.task)
 
     # ------------------------------------------------------------ state
     def state(self) -> dict[str, np.ndarray]:
@@ -154,6 +160,8 @@ class ArmEnv(gym.Env):
             b = self.fields.cube_body
             out["cube_pos"] = R @ d.xpos[b] + t
             out["cube_rot"] = R @ d.xmat[b].reshape(3, 3)
+            # The height of the lowest point above the table (the legacy cube: centre - cube_half).
+            out["bottom"] = tk.object_bottom(np, self.task, out["cube_pos"][None], out["cube_rot"][None])[0]
             out["jaws"] = np.array([d.sensordata[a] for a in self.jaw_adr])
             if self.task.target:
                 a = self.cube_dadr
@@ -186,7 +194,7 @@ class ArmEnv(gym.Env):
         if self.rand.cube_noise > 0:
             pos[:2] += self.np_random.normal(0.0, self.rand.cube_noise, 2)
         if self.rand.fold_yaw:
-            rot = tk.fold_yaw(np, rot)
+            rot = tk.fold_yaw(np, rot, self._yaw_period)
         self._cube_seen = (pos, rot)
 
     # ------------------------------------------------------------ gym
@@ -272,10 +280,13 @@ class ArmEnv(gym.Env):
 
         s = self.state()
         kw = {}
+        if self.task.cube:
+            kw["bottom"] = s["bottom"][None]
         if self.task.target:
-            carried = tk.carry_latch(np, self.task, np.array([self._carried]), s["jaws"][None], s["cube_pos"][None])
+            carried = tk.carry_latch(np, self.task, np.array([self._carried]), s["jaws"][None], s["cube_pos"][None],
+                                     bottom=kw["bottom"])
             self._carried = bool(carried[0])
-            kw = dict(target=self.target[None], cube_vel=s["cube_vel"][None], carried=carried,
+            kw.update(target=self.target[None], cube_vel=s["cube_vel"][None], carried=carried,
                       grip_open=tk.grip_is_open(np, self.limits, self.q_cmd[None]))
         r, success, failure = tk.reward(np, self.task, s["tcp"][None], action[None], self.prev_action[None],
                                         goal=self.goal[None], cube_pos=s.get("cube_pos", np.zeros(3))[None],
@@ -288,7 +299,7 @@ class ArmEnv(gym.Env):
         if self.task.name == "reach":
             info["distance"] = float(np.linalg.norm(self.goal - s["tcp"]))
         else:
-            info["height"] = float(s["cube_pos"][2] - self.task.cube_half)
+            info["height"] = float(s["bottom"])
             info["grasped"] = bool(s["jaws"].min() > 0.5)
         if self.task.target:
             d_t = float(np.linalg.norm(s["cube_pos"][:2] - self.target[:2]))

@@ -37,6 +37,27 @@ uv run --package soarm-lab --extra train soarm-lab train --task reach
 Tasks are `reach`, `lift` and `pickplace`. Use `--init lift-v3` to fine-tune the
 bundled lift policy. Training ends with CPU evaluation; `--help` lists training options.
 
+### Lift a block
+
+One lift policy can learn several wooden blocks (Classic World, maple, 2.5 cm unit):
+`cube`, `cuboid5`, `cuboid85` and `cylinder`. Their sizes and masses are placeholders
+until measured. The table is in [rl/objects.py](soarm_lab/rl/objects.py), and its
+`MEASURED` flag says whether the numbers are measured. With `--kinds`, the policy also
+sees the block's kind and half sizes, 7 inputs after the 33 of the cube policy. Each
+kind gets an equal share of the worlds, so `--envs` must divide by the number of kinds:
+
+```bash
+uv run --package soarm-lab --extra train soarm-lab train --init lift-v3 --kinds cube,cuboid5,cuboid85,cylinder
+```
+
+`--init lift-v3` widens the bundled cube policy to the new inputs with zero weights,
+so training starts from a policy that already grasps a cube. Success counts the
+block's lowest point above the table, so a block stood on its end is not lifted.
+After training, the CPU evaluation runs once per kind, and `soarm-lab policies` shows
+the mean and the worst kind. `soarm-lab eval <policy> --kind cylinder` evaluates one
+kind. In the twin, the `policy` strategy's `object_kind` setting names the block the
+detector sees; the block's size comes from the table, not from the detector.
+
 Trained policies are saved under `workspace/policies/<name>/` in a checkout.
 Set `SOARM_LAB_POLICIES` to choose another directory. Commands accept a policy
 name or a path to `policy.npz`; local names take precedence over bundled ones.

@@ -19,8 +19,9 @@ pytest.importorskip("mujoco_warp", reason="mujoco-warp is not installed (the `tr
 import jax.numpy as jnp  # noqa: E402
 
 from soarm_lab.rl import task as tk  # noqa: E402
-from soarm_lab.rl.batch import BatchEnv  # noqa: E402
+from soarm_lab.rl.batch import BLOCK_CONTACTS, CONTACTS, BatchEnv, contact_budget  # noqa: E402
 from soarm_lab.rl.env import ArmEnv  # noqa: E402
+from soarm_lab.rl.objects import DESCRIPTOR_DIM, descriptor  # noqa: E402
 from soarm_lab.rl.policy import Policy  # noqa: E402
 from soarm_lab.rl.randomize import Randomization  # noqa: E402
 from soarm_lab.station import Station  # noqa: E402
@@ -91,6 +92,26 @@ def test_the_batch_steps_on_the_cpu_device(task, station):
     assert all(isinstance(v, jax.Array) and v.shape == (4,) for v in info.values())
     assert jnp.isfinite(obs).all() and jnp.isfinite(rew).all()
     assert not info["broken"].any()
+
+
+def test_a_shape_conditioned_block_steps_on_the_cpu_device(station):
+    """The cylinder (another collision function than the boxes), with its descriptor after the action."""
+    task = replace(tk.make_task("lift", spec=station.spec()), object_kind="cylinder", shape_conditioned=True)
+    env = BatchEnv(task, num_envs=4, station=station, device="cpu")
+    assert env.obs_dim == tk.OBS_DIMS["lift"] + DESCRIPTOR_DIM == 40
+    assert contact_budget(task, "so101") == BLOCK_CONTACTS["so101"]                # one part
+    assert contact_budget(tk.make_task("lift"), "so101") == CONTACTS["so101"]       # the legacy cube
+    assert env.yaw_period == pytest.approx(np.pi)
+    env.reset()
+    _, _, _, info = env.step(jnp.zeros((4, env.act_dim)))
+    # The cylinder lies on its side: its lowest point on the table, its centre one radius above it.
+    np.testing.assert_allclose(np.asarray(info["height"]), 0.0, atol=2e-3)
+    obs, rew, done, info = random_steps(env, 20)
+    assert obs.shape == (4, 40) and obs.dtype == jnp.float32 and rew.shape == (4,)
+    assert jnp.isfinite(obs).all() and jnp.isfinite(rew).all() and not info["broken"].any()
+    assert set(info) == {"success", "time_outs", "broken", "finished"} | INFO["lift"]
+    want = np.tile(descriptor("cylinder"), (4, 1))
+    np.testing.assert_array_equal(np.asarray(obs[:, -DESCRIPTOR_DIM:]), want)
 
 
 def test_a_reset_observes_the_joints_it_wrote(station):
