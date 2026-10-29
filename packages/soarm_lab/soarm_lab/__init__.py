@@ -10,8 +10,9 @@
   policy (entry point `machinekind_twin.strategies`: `policy`).
 * `cli`: the `soarm-lab` command (`train`, `eval`, `policies`, `convert`).
 
-Running a policy needs numpy only. torch is the optional extra `soarm-lab[torch]`: the legacy PPO trainer
-(`rl.ppo`, `rl.batch`) and the converter of torch checkpoints (`rl.torch_policy`).
+Running a policy needs numpy only. Training needs the extra `soarm-lab[train]`: PPO in JAX and optax
+(`rl.ppo`, `rl.jax_policy`) on MuJoCo Warp (`rl.batch`). torch is the optional extra `soarm-lab[torch]`,
+only for the converter of old torch checkpoints (`rl.torch_policy`).
 
 Nothing here imports the twin (`machinekind_twin`). The twin hands the station over as data and runs the
 strategy through its own `StrategyRunner`. The strategy follows the twin's plugin contracts,

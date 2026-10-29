@@ -55,9 +55,10 @@ Evaluation uses the bundled MuJoCo station by default. To use a measured setup,
 export it from the twin with `twin export ~/stations/desk1`, then pass
 `--station ~/stations/desk1` to the lab's training or evaluation command.
 
-GPU training uses MuJoCo Warp and PyTorch PPO and requires CUDA. See the
+GPU training is PPO in JAX on MuJoCo Warp and requires CUDA. See the
 [lab documentation](packages/soarm_lab/README.md) for training dependencies,
-fine-tuning and policy formats. Policy inference uses NumPy and does not require PyTorch.
+fine-tuning and policy formats. Policy inference uses NumPy and requires neither JAX
+nor PyTorch. PyTorch is needed only to convert checkpoints of the old PyTorch trainer.
 
 ### Run Dream-1 on the arm
 
@@ -81,7 +82,8 @@ uv run ruff check .
 uv run pyright
 ```
 
-Optional dependencies: `uv sync --group torch` installs PyTorch;
+Optional dependencies: `uv sync --extra train` installs JAX and MuJoCo Warp for training;
+`uv sync --group torch` installs PyTorch for converting old checkpoints;
 `uv sync --group twin` installs the twin for integration tests;
 `uv sync --extra dream` installs the Dream Labs client for `soarm-lab dream`.
 Tests requiring unavailable optional dependencies, GPU support or rendering skip automatically.

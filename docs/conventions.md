@@ -21,12 +21,16 @@ The test also collects the package's tests with `-m "not twin"` where `machineki
 The lab's test also imports every lab module in a fresh interpreter. It checks that `machinekind_twin_api` got
 loaded and no `machinekind_twin` module did.
 
-Running a policy needs no torch.
+Running a policy needs neither jax nor torch.
 The strategies, the policy file, evaluation and the `soarm-lab` commands other than `train` and `convert`
-import numpy, never torch.
-torch is the optional extra `soarm-lab[torch]` for the legacy torch trainer and `soarm-lab convert`.
+import numpy, never jax, optax or torch.
+Training needs the optional extra `soarm-lab[train]`: PPO in JAX and optax on MuJoCo Warp, with the CUDA 12
+build of jax on Linux. Only the trainer's modules import jax themselves: `rl.ppo`, `rl.jax_policy` and `rl.batch`.
+torch is the optional extra `soarm-lab[torch]`, only for `soarm-lab convert`, which turns a checkpoint of
+the old torch trainer (`policy.pt`) into `policy.npz`. Neither extra is a default dependency.
 `packages/soarm_lab/tests/test_dependency_rule.py` runs the bundled policies in a fresh interpreter and
-checks that no torch module got loaded, also with torch made unimportable.
+checks that no jax, optax or torch module got loaded, also with them made unimportable.
+Without them `train` names `soarm-lab[train]` and `convert` names `soarm-lab[torch]`.
 
 The twin holds no robot and no training. It keeps the scene, cameras, calibration, perception primitives,
 runtime, safety, sysid, `StrategyRunner` and `EpisodeLog`.

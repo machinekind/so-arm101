@@ -1,7 +1,7 @@
 """`soarm_lab` imports no twin (`machinekind_twin`), also not at runtime; it imports the twin's contracts,
-`machinekind_twin_api`. Running a policy needs no torch (`soarm-lab[torch]` is the legacy trainer's extra).
-A test that imports the twin is marked `twin`; the others run without it, also one that imports the
-contracts."""
+`machinekind_twin_api`. Running a policy needs neither jax nor torch: jax is the trainer's extra
+(`soarm-lab[train]`), torch the converter's (`soarm-lab[torch]`). A test that imports the twin is marked
+`twin`; the others run without it, also one that imports the contracts."""
 
 from __future__ import annotations
 
@@ -77,8 +77,10 @@ def test_the_lab_imports_nothing_from_the_twin_at_runtime() -> None:
         "import soarm_lab.cli, soarm_lab.sim, soarm_lab.strategies, soarm_lab.strategies.policy\n"
         "import soarm_lab.strategies.ik, soarm_lab.strategies.dream, soarm_lab.dream_run\n"
         "import soarm_lab.rl, soarm_lab.rl.env, soarm_lab.rl.evaluate\n"
+        "if all(importlib.util.find_spec(m) for m in ('jax', 'optax', 'mujoco_warp')):\n"
+        "    import soarm_lab.rl.ppo, soarm_lab.rl.jax_policy, soarm_lab.rl.batch\n"
         "if importlib.util.find_spec('torch'):\n"
-        "    import soarm_lab.rl.ppo, soarm_lab.rl.torch_policy\n"
+        "    import soarm_lab.rl.torch_policy\n"
         "print(sorted(m for m in sys.modules if m.split('.')[0] == 'machinekind_twin'))\n"
         "print('machinekind_twin_api.strategy' in sys.modules)\n"
         "print('dream' in sys.modules)\n"
@@ -117,33 +119,36 @@ assert s.act(obs).target
 assert main(["policies"]) == 0
 assert main(["eval", "reach-v3", "--episodes", "1"]) == 0
 """
-#: Without torch, the trainer and the converter name the extra.
-TORCH_COMMANDS = """
-for argv in (["train", "--iters", "1"], ["convert", "policy.pt"]):
+#: The training and conversion stacks: running a policy loads none of them.
+HEAVY = ("jax", "jaxlib", "optax", "torch")
+#: Without jax the trainer names its extra, without torch the converter names its own.
+EXTRA_COMMANDS = """
+for argv, extra in ((["train", "--iters", "1"], "train"), (["convert", "policy.pt"], "torch")):
     try:
         main(argv)
     except ImportError as exc:
-        assert "install soarm-lab[torch]" in str(exc), exc
+        assert f"install soarm-lab[{extra}]" in str(exc), exc
     else:
-        raise AssertionError(f"soarm-lab {argv[0]} ran without torch")
+        raise AssertionError(f"soarm-lab {argv[0]} ran without soarm-lab[{extra}]")
 """
 
 
-@pytest.mark.parametrize("torch_missing", [False, True], ids=["torch-installed", "torch-missing"])
-def test_running_a_policy_needs_no_torch(tmp_path: Path, torch_missing: bool) -> None:
-    """The runtime loads no torch module, and works where torch cannot be imported at all.
+@pytest.mark.parametrize("missing", [False, True], ids=["extras-installed", "extras-missing"])
+def test_running_a_policy_needs_no_jax_and_no_torch(tmp_path: Path, missing: bool) -> None:
+    """The runtime loads no jax, optax or torch module, and works where they cannot be imported at all.
 
-    `sys.modules["torch"] = None` makes `import torch` fail as if torch were not installed.
+    `sys.modules["jax"] = None` makes `import jax` fail as if jax were not installed; the same for
+    optax and torch.
     """
-    script = RUN_POLICIES + (TORCH_COMMANDS if torch_missing else "")
-    if torch_missing:
-        script = 'import sys\nsys.modules["torch"] = None\n' + script
-    script += "print('TORCH', sorted(m for m, v in sys.modules.items() if v and m.split('.')[0] == 'torch'))"
+    script = RUN_POLICIES + (EXTRA_COMMANDS if missing else "")
+    if missing:
+        script = "import sys\n" + "".join(f"sys.modules[{m!r}] = None\n" for m in HEAVY) + script
+    script += f"print('HEAVY', sorted(m for m, v in sys.modules.items() if v and m.split('.')[0] in {HEAVY}))"
     env = {**os.environ, "SOARM_LAB_POLICIES": str(tmp_path / "policies")}
     out = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, env=env,
                          cwd=tmp_path)
     assert out.returncode == 0, out.stderr
-    assert out.stdout.splitlines()[-1] == "TORCH []", out.stdout
+    assert out.stdout.splitlines()[-1] == "HEAVY []", out.stdout
 
 
 def twin_imports(path: Path) -> list[str]:

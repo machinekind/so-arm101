@@ -20,17 +20,18 @@ uv run soarm-lab eval lift-v3 --rand
 ```
 
 Bundled policies are `reach-v3` and `lift-v3`. Evaluation runs on CPU using MuJoCo;
-policy inference uses NumPy. Neither requires PyTorch or a GPU.
+policy inference uses NumPy. Neither requires JAX, PyTorch or a GPU.
 See [policy provenance](soarm_lab/policies/README.md) for their upstream
 checkpoints, training history and conversion to NumPy.
 
 ## Train a policy
 
-GPU training uses MuJoCo Warp and PyTorch PPO. It requires a CUDA-capable GPU,
-a CUDA-enabled PyTorch installation, and both the `train` and `torch` extras:
+GPU training is PPO in JAX on MuJoCo Warp. It requires a CUDA-capable GPU and the
+`train` extra, which installs JAX (with CUDA 12 on Linux), optax and MuJoCo Warp.
+It does not use PyTorch:
 
 ```bash
-uv run --package soarm-lab --extra train --extra torch soarm-lab train --task reach
+uv run --package soarm-lab --extra train soarm-lab train --task reach
 ```
 
 Tasks are `reach`, `lift` and `pickplace`. Use `--init lift-v3` to fine-tune the
@@ -59,7 +60,8 @@ the bundled `sim` station. [Station](soarm_lab/station.py) also exposes a Python
 Each policy folder contains `policy.npz` (weights and observation normalization)
 and `meta.json` (task, network configuration and evaluation results). The
 [Policy API](soarm_lab/rl/policy.py) loads and runs these files with NumPy.
-To convert an older PyTorch checkpoint:
+PyTorch is needed only to convert a checkpoint of the old PyTorch trainer (`policy.pt`)
+to `policy.npz`. It comes with the `torch` extra:
 
 ```bash
 uv run --package soarm-lab --extra torch soarm-lab convert path/to/policy.pt

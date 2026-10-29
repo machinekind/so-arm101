@@ -28,7 +28,7 @@ presence in that file does not mean a package is part of every installation.
 | `soarm[panel]` | pyserial: BSD-3-Clause; PyYAML: MIT. |
 | `soarm[lerobot]` | LeRobot: Apache-2.0; its `feetech` extra adds Feetech Servo SDK: Unlicense, deepdiff: MIT, and pyserial. Requires Python 3.12 or newer. |
 | `soarm-lab` | `soarm` and `machinekind-twin-api`: Apache-2.0; NumPy: BSD-3-Clause; PyYAML: MIT; MuJoCo: Apache-2.0; Gymnasium: MIT. |
-| `soarm-lab[train]` | MuJoCo Warp and JAX: Apache-2.0; includes Warp and JAX's own dependencies. |
+| `soarm-lab[train]` | MuJoCo Warp, JAX and optax: Apache-2.0; includes Warp and JAX's own dependencies. On Linux it installs JAX's CUDA 12 build, which pulls in NVIDIA CUDA libraries. |
 | `soarm-lab[torch]` | PyTorch: BSD-3-Clause; platform-specific binary dependencies have additional terms. |
 | Workspace `twin` group | `machinekind-twin` and its example cube detector `machinekind-twin-cube`: Apache-2.0; adds NumPy, PyYAML, OpenCV contrib, and the API package. |
 
@@ -78,7 +78,8 @@ Some optional dependency paths require particular attention:
   source and relinking requirements when shipping these binaries.
   See the [OpenCV packaging guidance](https://github.com/opencv/opencv-python#licensing).
 - Prebuilt Warp packages include libmathdx under separate NVIDIA terms, and
-  Linux PyTorch installations can pull in CUDA and other NVIDIA libraries.
+  the Linux CUDA builds of JAX (`soarm-lab[train]`) and PyTorch pull in CUDA and
+  other NVIDIA libraries.
   Preserve applicable notices and verify redistribution permissions for the
   exact components shipped. See [Warp's licensing notes](https://github.com/NVIDIA/warp#license)
   and the [CUDA license agreement](https://docs.nvidia.com/cuda/eula/index.html).

@@ -1,0 +1,22 @@
+# Dispatch configuration for the gpu-ops tool (out of tree): copy to .gpu-ops at this repository's
+# root and fill in the personal values. .gpu-ops is gitignored and never committed. Running a
+# payload needs none of this: these values are read by the dispatcher, never by jobs/*.sh.
+#
+# Plain KEY=VALUE lines, no quotes, no trailing comment on a value line. Any key of the
+# dispatcher's own .env may be overridden here for this project.
+#
+#   cp .gpu-ops.example .gpu-ops
+
+# Where this repository keeps its payloads (jobs/train.sh).
+OPS_PAYLOAD_DIR=jobs
+# The Python project the remote venv is synced from: the workspace root (pyproject.toml, uv.lock).
+OPS_PROJECT_DIR=.
+# The checkout directory name on the remote side, whatever the local clone is called.
+OPS_REPO_NAME=so-arm101
+# What never leaves this machine, on top of the dispatcher's own list: venvs, trained policies,
+# logs, caches, the session folders.
+OPS_RSYNC_EXTRA=.venv/ workspace/ logs/ .jax_cache/ .pytest_cache/ .ruff_cache/ __pycache__/ .claude/
+# What comes back while a job runs and when it ends: the trained policies and the job logs.
+OPS_WATCH_PULL=workspace/policies logs
+# Default job name. Empty: derived from the payload being run.
+OPS_JOB_NAME=

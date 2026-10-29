@@ -1,8 +1,9 @@
-"""The policy in torch: the actor of the legacy PPO trainer (`ppo.py`) and the `policy.pt` converter.
+"""The policy in torch, as the torch trainer saved it: the converter of `policy.pt` to `policy.npz`.
 
-Needs `soarm-lab[torch]`. Running a policy needs numpy only (`policy.Policy`). This module turns the
-trainer's torch modules into that policy and back (fine-tuning starts from a `policy.npz`), and
-converts a torch checkpoint (`policy.pt`, the format before `policy.npz`) to the numpy file:
+Needs `soarm-lab[torch]`, and only `soarm-lab convert` uses it: running a policy needs numpy only
+(`policy.Policy`), and training is JAX (`ppo`, `jax_policy`). This module reads a torch checkpoint
+(`policy.pt`, the format before `policy.npz`) into torch modules, turns them into that policy and
+back, and writes the numpy file:
 
     soarm-lab convert workspace/policies/reach-x/policy.pt      # policy.npz and meta.json next to it
 
@@ -55,7 +56,7 @@ class Normalizer(nn.Module):
 
 
 class TorchPolicy(nn.Module):
-    """`policy.Policy` as a torch module: what the PPO trainer optimizes."""
+    """`policy.Policy` as a torch module: what the torch trainer optimized and saved in `policy.pt`."""
 
     def __init__(self, meta: PolicyMeta):
         super().__init__()
