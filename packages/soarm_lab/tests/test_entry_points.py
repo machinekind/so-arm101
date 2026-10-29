@@ -16,6 +16,7 @@ EXPECTED = {
         (STRATEGIES, "policy"): "soarm_lab.strategies.policy:PolicyStrategy",
         (STRATEGIES, "ik"): "soarm_lab.strategies.ik:IKStrategy",
         (STRATEGIES, "dream"): "soarm_lab.strategies.dream:DreamStrategy",
+        (STRATEGIES, "touch"): "soarm_lab.strategies.touch:TouchStrategy",
         ("console_scripts", "soarm-lab"): "soarm_lab.cli:main",
     },
 }

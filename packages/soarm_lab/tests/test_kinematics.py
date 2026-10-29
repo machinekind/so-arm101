@@ -1,4 +1,4 @@
-"""The arm's kinematics on the station's robot description: units, the TCP and IK."""
+"""The arm's kinematics on the station's robot description: units, the TCP, IK and self-contacts."""
 
 from __future__ import annotations
 
@@ -62,3 +62,23 @@ def test_ik_keeps_the_seed_gripper_whichever_start_wins(station):
     assert sol.ok
     assert sol.joints["shoulder_pan"] == pytest.approx(spec.home["shoulder_pan"], abs=1e-3)
     assert sol.joints["gripper"] == pytest.approx(5.0)
+
+
+def test_self_contacts_find_the_hand_in_the_shoulder_near_the_base(station):
+    spec = station.spec()
+    kin = RobotKinematics(spec)
+    near_base = kin.ik(np.array([0.15, 0.0, 0.03]), seed=spec.home)
+    below_table = kin.ik(np.array([0.25, 0.0, -0.01]), seed=spec.home)
+    assert near_base.ok and below_table.ok
+
+    assert kin.self_contacts(spec.home) == set()
+    assert ("gripper", "shoulder") in kin.self_contacts(near_base.joints)
+
+    # Inside the station's scene (prefix robot/) the same pairs, without the prefix; the table does not count.
+    scene = sim.build(sim.SceneConfig(station))
+    try:
+        assert scene.kin.self_contacts(near_base.joints) == kin.self_contacts(near_base.joints)
+        assert scene.kin.self_contacts(below_table.joints) == set()
+        assert scene.kin.data.ncon > 0                                    # the hand is in the table
+    finally:
+        scene.close()

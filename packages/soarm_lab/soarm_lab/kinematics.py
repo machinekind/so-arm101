@@ -86,6 +86,8 @@ class RobotKinematics:
         self.arm = np.array([name != spec.gripper for name in spec.joints])
         self.site_id = m.site(prefix + spec.tcp_site).id
         self.base_id = m.body(prefix + spec.base_body).id
+        #: The arm's bodies: the base and every body under it.
+        self.arm_bodies = frozenset(i for i in range(m.nbody) if self._under_base(i))
         self._approach = np.asarray(spec.tcp_approach, float)
         self._closing = np.asarray(spec.tcp_closing, float)
         #: Coupled joints (`spec.mirror_joints`): (index of the description's joint, qpos address, ratio).
@@ -199,6 +201,32 @@ class RobotKinematics:
         """(approach direction, jaw closing axis) in the base frame."""
         R = self.tcp(joints)[:3, :3]
         return R @ self._approach, R @ self._closing
+
+    def self_contacts(self, joints: Mapping[str, float]) -> set[tuple[str, str]]:
+        """Pairs of the arm's own bodies whose collision geoms meet in pose `joints`, by body name.
+
+        Near the base, for example, the hand reaches a point low over the table only through the shoulder.
+        MuJoCo leaves out a body touching its parent, and bodies outside the arm (a table, objects in a
+        scene model) do not count. About 0.02 ms, the forward kinematics included.
+        """
+        self._apply(self.to_q(joints))
+        m, d = self.model, self.data
+        mujoco.mj_collision(m, d)
+        pairs: set[tuple[str, str]] = set()
+        for geom1, geom2 in zip(d.contact.geom1, d.contact.geom2, strict=True):
+            body1, body2 = int(m.geom_bodyid[geom1]), int(m.geom_bodyid[geom2])
+            if body1 in self.arm_bodies and body2 in self.arm_bodies:
+                name1, name2 = sorted((self._body_name(body1), self._body_name(body2)))
+                pairs.add((name1, name2))
+        return pairs
+
+    def _body_name(self, body: int) -> str:
+        return self.model.body(body).name.removeprefix(self.prefix)
+
+    def _under_base(self, body: int) -> bool:
+        while body not in (0, self.base_id):
+            body = int(self.model.body_parentid[body])
+        return body == self.base_id
 
     # -------------------------------------------------------------------- IK
     def ik(
