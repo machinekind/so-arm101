@@ -8,6 +8,8 @@
 #
 #   TASKS="reach lift" bash jobs/train.sh      # the bundled policies' training sizes, one after the other
 #   TASKS=lift ITERS=50 bash jobs/train.sh      # a short run
+#   TASKS=lift KINDS=cube,cuboid5,cuboid85,cylinder INIT=lift-v3 ITERS=300 bash jobs/train.sh
+#                                               # one policy for four wooden blocks, widened from lift-v3
 #
 : "${TASKS:=reach}"               # space-separated: reach, lift, pickplace
 : "${ITERS:=}"                    # iterations per task; empty: reach 150, lift 300, pickplace 300 (the bundled policies' sizes)
@@ -15,6 +17,8 @@
 : "${EVAL_EPISODES:=50}"          # CPU episodes per evaluation after training
 : "${NAME_PREFIX:=poc}"           # policies are saved as workspace/policies/<NAME_PREFIX>-<task>
 : "${INIT:=}"                     # fine-tune from this policy (name or policy.npz); empty: from scratch
+: "${KINDS:=}"                    # wooden blocks, comma-separated (see rl/objects.py); empty: the one cube
+: "${EPISODE_STEPS:=}"            # episode length in policy ticks; empty: the task's (lift 200)
 : "${GPUS:=1}"
 : "${ON_FAILURE:=stops at the first task that fails; the finished tasks keep their policies}"
 # JAX would reserve 75 % of the GPU's memory at start; MuJoCo Warp's worlds live in the rest.
@@ -38,10 +42,12 @@ for task in $TASKS; do
         esac
     fi
     echo "== $task: $ENVS worlds x $iters iterations"
-    init_arg=()
-    [ -n "$INIT" ] && init_arg=(--init "$INIT")
+    extra=()
+    [ -n "$INIT" ] && extra+=(--init "$INIT")
+    [ -n "$KINDS" ] && extra+=(--kinds "$KINDS")
+    [ -n "$EPISODE_STEPS" ] && extra+=(--episode-steps "$EPISODE_STEPS")
     uv run --extra train soarm-lab train --task "$task" --envs "$ENVS" --iters "$iters" \
-        --eval-episodes "$EVAL_EPISODES" --name "$NAME_PREFIX-$task" "${init_arg[@]}"
+        --eval-episodes "$EVAL_EPISODES" --name "$NAME_PREFIX-$task" ${extra[@]+"${extra[@]}"}
 done
 
 echo "== policies (the bundled ones are the baseline)"

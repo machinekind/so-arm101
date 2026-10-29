@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -10,6 +11,7 @@ import pytest
 mujoco = pytest.importorskip("mujoco")
 gym = pytest.importorskip("gymnasium")
 
+from soarm_lab.rl import objects as ob  # noqa: E402
 from soarm_lab.rl import task as tk  # noqa: E402
 from soarm_lab.rl.env import VIEW, ArmEnv  # noqa: E402
 from soarm_lab.rl.randomize import Randomization  # noqa: E402
@@ -64,6 +66,127 @@ def test_observation_and_reward_are_the_same_in_numpy_and_torch():
         assert np.allclose(x, y, atol=1e-9)
     assert a[0].shape == (n, task.obs_dim)
     assert 0 < a[2].sum() < n                                  # success in some worlds: both branches run
+
+
+#: The legacy cube on the code before the wooden blocks: ArmEnv(name, randomization=...), reset(seed=3),
+#: 20 ticks of default_rng(7).uniform(-1, 1, 6). The default randomization covers the mass and friction
+#: path of `ModelFields`. The ticks do not reach the cube; `test_task_backends.py` pins the grasp terms.
+LEGACY = {
+    ("lift", "none"): [-0.038308, -0.060959, -0.080185, -0.107616, -0.110462, -0.088215, -0.110117, -0.098122,
+                       -0.00753, -0.133068, -0.061522, -0.035424, -0.163084, -0.082276, -0.06315, -0.083793,
+                       -0.083023, -0.085155, -0.043604, -0.065165],
+    ("lift", "default"): [-0.040315, -0.064228, -0.083141, -0.109993, -0.113994, -0.089289, -0.111033,
+                          -0.100593, -0.009758, -0.135502, -0.064, -0.038297, -0.165972, -0.083678, -0.065125,
+                          -0.086361, -0.083931, -0.086851, -0.047217, -0.068642],
+}
+#: Entries 12..26 of the first lift observation (TCP, cube, cube - TCP, rotation), and the cube's
+#: centre in the last one, per randomization.
+LEGACY_OBS0 = {"none": [0.321912, 0.000313, 0.145093, 0.191204, 0.026726, 0.015, -0.130708, 0.026413, -0.130093,
+                        0.076343, 0.997082, 0.0, -0.997082, 0.076343, 0.0],
+               "default": [0.323696, -0.019901, 0.158223, 0.166277, 0.151155, 0.015, -0.157419, 0.171056,
+                           -0.143223, 0.976999, 0.213242, 0.0, -0.213242, 0.976999, 0.0]}
+LEGACY_CUBE20 = {"none": [0.191204, 0.026726, 0.014892], "default": [0.168353, 0.148136, 0.014892]}
+#: pickplace with `Randomization.none()`: the target and target - cube in the first observation.
+LEGACY_TARGET0 = [0.23113, -0.083134, 0.0, 0.039926, -0.10986, -0.015]
+
+
+@pytest.mark.parametrize("rand", ["none", "default"])
+def test_the_legacy_cube_env_is_unchanged(rand):
+    """The base policies' task gives the numbers it gave before the wooden blocks: the same scene,
+    observation and reward. Only what both versions have is used, so it runs against either."""
+    task = tk.make_task("lift")             # the defaults: object_kind="cube", shape_conditioned=False
+    assert task.obs_dim == tk.OBS_DIMS["lift"] == 33
+    env = ArmEnv(task, randomization=Randomization.none() if rand == "none" else Randomization())
+    try:
+        obs, _ = env.reset(seed=3)
+        np.testing.assert_allclose(obs[12:27], LEGACY_OBS0[rand], atol=2e-6)
+        rng = np.random.default_rng(7)
+        rewards = []
+        for _ in range(20):
+            obs, r, _, _, info = env.step(rng.uniform(-1, 1, task.act_dim))
+            rewards.append(r)
+        np.testing.assert_allclose(rewards, LEGACY[("lift", rand)], atol=2e-6)
+        np.testing.assert_allclose(obs[15:18], LEGACY_CUBE20[rand], atol=2e-6)
+        assert info["height"] == pytest.approx(-0.0001078, abs=1e-7)
+        m = env.scene.model
+        assert np.flatnonzero(m.geom_bodyid == m.body("cube").id).tolist() == [m.geom("cube").id]
+        assert m.geom_size[m.geom("cube").id] == pytest.approx([0.015] * 3)       # one plain box
+        assert m.opt.ccd_tolerance == pytest.approx(1e-6)
+    finally:
+        env.close()
+
+    env = ArmEnv("pickplace", randomization=Randomization.none())
+    try:
+        obs, _ = env.reset(seed=3)
+        np.testing.assert_allclose(obs[27:33], LEGACY_TARGET0, atol=2e-6)
+    finally:
+        env.close()
+
+
+def test_the_default_task_is_the_legacy_cube():
+    task = tk.make_task("lift")
+    assert (task.object_kind, task.shape_conditioned) == ("cube", False) and tk.legacy_cube(task)
+    spec = tk.task_object(task)
+    assert (spec.half_size, spec.mass, spec.yaw_period) == ((0.015,) * 3, 0.03, np.pi / 2)
+    assert not tk.legacy_cube(tk.make_task("lift", shape_conditioned=True))       # the 25 mm block
+    assert not tk.legacy_cube(tk.make_task("lift", object_kind="cuboid5"))
+    with pytest.raises(ValueError, match="unknown object kind 'arch'"):
+        tk.make_task("lift", object_kind="arch")
+    with pytest.raises(ValueError, match="reach has no object"):
+        tk.make_task("reach", shape_conditioned=True)
+
+
+def _plain_observation(env: ArmEnv) -> np.ndarray:
+    """The unconditioned observation of the env's current state, as `ArmEnv._obs` builds it."""
+    s = env.state()
+    pos, rot = env._cube_seen
+    plain = replace(env.task, shape_conditioned=False)
+    return tk.observe(np, plain, env.limits, s["q"][None], env.q_cmd[None], s["tcp"][None], env.prev_action[None],
+                      goal=env.goal[None], cube_pos=pos[None], cube_rot=rot[None],
+                      target=env.target[None])[0].astype(np.float32)
+
+
+@pytest.mark.parametrize("kind", ob.KINDS)
+def test_a_shape_conditioned_lift_env_for_every_kind(kind):
+    """40 numbers for the SO-101: the unconditioned lift observation of the same state, then the
+    block's descriptor. The block lies at rest at the start: its lowest point on the table."""
+    task = tk.make_task("lift", object_kind=kind, shape_conditioned=True)
+    env = ArmEnv(task, randomization=Randomization.none())
+    try:
+        assert env.observation_space.shape == (40,)
+        obs, _ = env.reset(seed=0)
+        assert abs(env.state()["bottom"]) < 1e-12
+        rng = np.random.default_rng(1)
+        for t in range(21):
+            assert obs.shape == (40,) and np.isfinite(obs).all()
+            assert np.array_equal(obs[:33], _plain_observation(env)), t
+            assert np.array_equal(obs[33:], ob.descriptor(kind))
+            obs, r, _, _, info = env.step(rng.uniform(-1, 1, task.act_dim))
+            assert np.isfinite(r) and np.isfinite(info["height"])
+            assert info["height"] == env.state()["bottom"]
+        geoms = np.flatnonzero(env.scene.model.geom_bodyid == env.fields.cube_body)
+        assert env.fields.cube_geoms.tolist() == geoms.tolist()
+        assert env.scene.model.body_mass[env.fields.cube_body] == pytest.approx(ob.object_spec(kind).mass)
+    finally:
+        env.close()
+
+
+def test_the_block_randomizes_on_every_part_and_folds_its_own_symmetry():
+    """Friction multiplies every geom of the block and the mass its body; a cuboid's yaw folds to +-90 deg."""
+    task = tk.make_task("lift", object_kind="cuboid85", shape_conditioned=True)
+    env = ArmEnv(task, randomization=Randomization(cube_friction=(1.2, 1.2), cube_mass=(1.5, 1.5)))
+    try:
+        m = env.scene.model
+        env.reset(seed=0)
+        assert m.geom_friction[env.fields.cube_geoms, 0] == pytest.approx(1.2)
+        assert m.body_mass[env.fields.cube_body] == pytest.approx(1.5 * ob.object_spec("cuboid85").mass)
+        assert env._yaw_period == np.pi
+        yaw = np.radians(130.0)
+        R = np.array([[np.cos(yaw), -np.sin(yaw), 0.0], [np.sin(yaw), np.cos(yaw), 0.0], [0.0, 0.0, 1.0]])
+        folded = tk.fold_yaw(np, R[None], env._yaw_period)[0]
+        assert np.degrees(np.arctan2(folded[1, 0], folded[0, 0])) == pytest.approx(-50.0)
+    finally:
+        env.close()
 
 
 def test_gymnasium_ids_of_the_lab():

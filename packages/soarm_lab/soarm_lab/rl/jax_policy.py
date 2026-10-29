@@ -12,6 +12,11 @@ The layers keep the layout of `policy.npz` (`x @ weight.T + bias`, ELU after eve
 so `Policy.act` in numpy gives this actor's mean to float32 precision. The weights start as torch's
 `nn.Linear` does (uniform in +-1/sqrt(n_in), weights and biases), and the normalizer merges a batch
 exactly as `torch_policy.Normalizer.update`: training behaves as with the torch trainer it replaces.
+
+A policy can start training on a wider observation than it was trained on (`widen_inputs`,
+`widen_norm`): new inputs appended at the end, with zero weights and the statistics of nothing seen.
+The widened network gives the same action as before for any value of the new inputs. `ppo.train`
+uses it to warm-start a shape-conditioned lift policy from `lift-v3`.
 """
 
 from __future__ import annotations
@@ -114,6 +119,34 @@ def mlp(layers: JaxLayers, x: jax.Array) -> jax.Array:
         if i < len(layers) - 1:
             x = jax.nn.elu(x)
     return x
+
+
+def widen_inputs(layers: JaxLayers, n_in: int) -> JaxLayers:
+    """`layers` for `n_in` inputs: the first weight gets zero columns for the new inputs, appended last.
+
+    The other layers and every bias stay as they are, so the layers compute the same for any value
+    of the new inputs until training moves their weights.
+    """
+    (weight, bias), rest = layers[0], layers[1:]
+    extra = n_in - weight.shape[1]
+    if extra < 0:
+        raise ValueError(f"the layers take {weight.shape[1]} inputs, more than {n_in}")
+    weight = jnp.concatenate([weight, jnp.zeros((weight.shape[0], extra), weight.dtype)], axis=1)
+    return [(weight, bias), *rest]
+
+
+def widen_norm(norm: Norm, dim: int) -> Norm:
+    """The normalizer for `dim` inputs: the new entries appended last with mean 0 and variance 1.
+
+    That is `Norm.new` for the new entries; the count stays. It weighs what was seen against each new
+    batch, so after a long training (lift-v3: 118 million observations) the new entries' statistics
+    hardly move, and they go into the network about as they come.
+    """
+    extra = dim - norm.mean.shape[0]
+    if extra < 0:
+        raise ValueError(f"the normalizer has {norm.mean.shape[0]} entries, more than {dim}")
+    return Norm(jnp.concatenate([norm.mean, jnp.zeros(extra, norm.mean.dtype)]),
+                jnp.concatenate([norm.var, jnp.ones(extra, norm.var.dtype)]), norm.count, norm.clip)
 
 
 def to_policy(meta: PolicyMeta, norm: Norm, actor: JaxLayers, critic: JaxLayers | None = None) -> Policy:
