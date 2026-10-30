@@ -27,6 +27,12 @@ Tasks: `reach` (the TCP to a point), `lift` (grasp and lift the cube) and `pickp
 onto a target on the table and release it). In pickplace only a CARRIED cube counts (the
 `carry_latch`: grasped and lifted above `lift_height`), then lying on the target, released and
 still; pushing it along the table does not count.
+
+The object ("the cube" in names) is the legacy 3 cm cube of the base policies, or a wooden block of
+`objects.KINDS` (`TaskConfig.object_kind`, see `task_object`). Its height above the table is that
+of its LOWEST point (`object_bottom`): for a block stood on its end the centre says "lifted", the
+lowest point does not. A shape-conditioned task (`TaskConfig.shape_conditioned`) also shows the
+policy the block's kind and dimensions (`objects.descriptor`).
 """
 
 from __future__ import annotations
@@ -37,6 +43,8 @@ import numpy as np
 
 from ..kinematics import RobotKinematics
 from ..robot import RobotSpec
+from ..station import Box, Part
+from . import objects as ob
 
 TASKS = ("reach", "lift", "pickplace")
 
@@ -102,10 +110,23 @@ class TaskConfig:
     #: the cube's ring from `spec.desk`).
     target_radius: tuple[float, float] = (0.15, 0.25)
     target_bearing: tuple[float, float] = (-0.8, 0.8)
+    #: lift and pickplace: the object, one of `objects.KINDS`. "cube" without `shape_conditioned` is
+    #: the legacy cube of `cube_half` and `cube_mass` (the base policies'); any other kind, and every
+    #: kind with `shape_conditioned`, is the wooden block of `objects.object_spec` (`task_object`).
+    object_kind: str = "cube"
+    #: Whether the policy also sees the object's kind and dimensions: `objects.descriptor`,
+    #: `objects.DESCRIPTOR_DIM` more numbers after the action (`observe`).
+    shape_conditioned: bool = False
+
+    def __post_init__(self) -> None:
+        if self.object_kind not in ob.KINDS:
+            raise ValueError(f"unknown object kind {self.object_kind!r}; known: {', '.join(ob.KINDS)}")
+        if self.shape_conditioned and self.name == "reach":
+            raise ValueError("reach has no object to condition on (shape_conditioned)")
 
     @property
     def obs_dim(self) -> int:
-        return obs_dim(self.name, self.n_joints)
+        return obs_dim(self.name, self.n_joints, self.shape_conditioned)
 
     @property
     def act_dim(self) -> int:
@@ -125,14 +146,18 @@ class TaskConfig:
         return "target" if self.name == "pickplace" else None
 
 
-def obs_dim(name: str, n: int) -> int:
+def obs_dim(name: str, n: int, shape_conditioned: bool = False) -> int:
     """The observation size of task `name` with `n` joints.
 
     q(n) + joint targets(n) + TCP(3) + [reach: goal(3) + goal-TCP(3)]
     + [lift, pickplace: cube(3) + cube-TCP(3) + rotation(6)]
-    + [pickplace: place target(3) + target-cube(3)] + action(n).
+    + [pickplace: place target(3) + target-cube(3)] + action(n)
+    + [shape_conditioned: the object's descriptor (`objects.DESCRIPTOR_DIM`)].
     """
-    return 2 * n + 3 + (6 if name == "reach" else 12) + (6 if name == "pickplace" else 0) + n
+    if shape_conditioned and name == "reach":
+        raise ValueError("reach has no object to condition on (shape_conditioned)")
+    return (2 * n + 3 + (6 if name == "reach" else 12) + (6 if name == "pickplace" else 0) + n
+            + (ob.DESCRIPTOR_DIM if shape_conditioned else 0))
 
 
 #: Observation sizes for the SO-101 (6 joints): the layout of the base policies.
@@ -156,6 +181,70 @@ def make_task(name: str = "reach", spec: RobotSpec | None = None, **overrides) -
                        cube_radius=d.cube_radius, cube_bearing=d.cube_bearing,
                        target_radius=d.cube_radius, target_bearing=d.cube_bearing)
     return replace(base, **overrides)
+
+
+# --------------------------------------------------------------- the object
+#: The legacy cube's colour (red; the pickplace target pad is blue).
+CUBE_RGBA = (0.85, 0.25, 0.2, 1.0)
+
+
+def legacy_cube(task: TaskConfig) -> bool:
+    """Whether the task's object is the legacy cube (`cube_half`, `cube_mass`), not a wooden block."""
+    return task.object_kind == "cube" and not task.shape_conditioned
+
+
+def task_object(task: TaskConfig) -> ob.ObjectSpec | None:
+    """The task's object, None for reach. The legacy cube gets a spec of its own: one box part,
+    `cube_half` and `cube_mass`, a 90 deg yaw symmetry."""
+    if task.cube is None:
+        return None
+    if legacy_cube(task):
+        h = task.cube_half
+        return ob.ObjectSpec("cube", (h, h, h), task.cube_mass, (Part("box", (h, h, h)),), np.pi / 2)
+    return ob.object_spec(task.object_kind)
+
+
+def scene_box(task: TaskConfig, name: str, xy: tuple[float, float]) -> Box:
+    """The task's object as a free body of the scene, lying at `xy` (base frame) on the table.
+
+    The legacy cube is the one plain box geom it always was, so its scene does not change.
+    """
+    if task.cube is None:
+        raise ValueError(f"{task.name} has no object")
+    if legacy_cube(task):
+        h = task.cube_half
+        return Box(name, (h, h, h), xy, rgba=CUBE_RGBA, mass=task.cube_mass)
+    return ob.scene_object(task.object_kind, name, xy)
+
+
+def rest_height(task: TaskConfig) -> float:
+    """The height of the object's origin above the table when it lies at rest [m]: where
+    `sample_cubes` puts it. `cube_half` for the legacy cube, and for reach, which has no object."""
+    spec = task_object(task)
+    return task.cube_half if spec is None else float(spec.half_size[2])
+
+
+def yaw_period(task: TaskConfig) -> float:
+    """The yaw symmetry of the task's object [rad] (`fold_yaw`); 90 deg without an object."""
+    spec = task_object(task)
+    return np.pi / 2 if spec is None else spec.yaw_period
+
+
+def object_bottom(xp, task: TaskConfig, cube_pos, cube_rot):
+    """(N,) the height of the object's lowest point above the table [m]: `bottom` for `reward`.
+
+    The legacy cube keeps its old measure, the centre minus `cube_half` (a tilted cube is "higher"
+    by its corner, as it always was); a block's is `objects.bottom_height` of its parts.
+    """
+    if legacy_cube(task):
+        return cube_pos[..., 2] - task.cube_half
+    return ob.bottom_height(xp, task.object_kind, cube_pos, cube_rot)
+
+
+def _height(task: TaskConfig, cube_pos, bottom):
+    """The object's height above the table: `bottom` when given, else its centre minus the resting
+    half height (for the legacy cube exactly the old `cube_pos[..., 2] - cube_half`)."""
+    return cube_pos[..., 2] - rest_height(task) if bottom is None else bottom
 
 
 # --------------------------------------------------------------- limits
@@ -245,6 +334,8 @@ def observe(xp, task: TaskConfig, limits: Limits, q, q_cmd, tcp, prev_action, go
     """The observation vector (N, obs_dim). `cube_rot` are rotation matrices (N, 3, 3).
 
     `target` (N, 3), pickplace: the place target on the table top (z = 0) in the base frame.
+    A shape-conditioned task appends the object's descriptor AFTER the action, so the entries before
+    it are exactly the unconditioned observation (a conditioned policy warm-starts from one).
     """
     parts = [normalize_q(xp, limits, q), normalize_q(xp, limits, q_cmd), tcp]
     if task.name == "reach":
@@ -255,14 +346,20 @@ def observe(xp, task: TaskConfig, limits: Limits, q, q_cmd, tcp, prev_action, go
         if task.name == "pickplace":
             parts += [target, target - cube_pos]
     parts.append(prev_action)
+    if task.shape_conditioned:
+        parts.append(_as(xp, ob.descriptor(task.object_kind), q) + xp.zeros_like(q[..., :1]))
     return _cat(xp, parts)
 
 
-def fold_yaw(xp, R):
-    """The rotation about z folded to +-45 deg: how the detector sees the cube (a 90 deg symmetry)."""
+def fold_yaw(xp, R, period=np.pi / 2):
+    """The rotation about z folded to +-period/2: how the detector sees the object.
+
+    `period` is the yaw symmetry it cannot see (`yaw_period`): 90 deg for a cube (+-45 deg), 180 deg
+    for a cuboid or a cylinder on its side (+-90 deg).
+    """
     atan2 = xp.arctan2 if hasattr(xp, "arctan2") else xp.atan2
     yaw = atan2(R[..., 1, 0], R[..., 0, 0])
-    yaw = (yaw + np.pi / 4) % (np.pi / 2) - np.pi / 4
+    yaw = (yaw + period / 2) % period - period / 2
     c, s = xp.cos(yaw), xp.sin(yaw)
     z, o = xp.zeros_like(c), xp.ones_like(c)
     rows = [xp.stack([c, -s, z], -1), xp.stack([s, c, z], -1), xp.stack([z, z, o], -1)]
@@ -284,14 +381,15 @@ def grasped(xp, jaw_contacts):
     return (jaw_contacts[..., 0] > 0.5) & (jaw_contacts[..., 1] > 0.5)
 
 
-def carry_latch(xp, task: TaskConfig, carried, jaw_contacts, cube_pos):
+def carry_latch(xp, task: TaskConfig, carried, jaw_contacts, cube_pos, bottom=None):
     """(N,) the "cube was carried" latch: grasped by both jaws higher above the table than `lift_height`.
 
     Once set it holds until a reset (the caller clears it at the start of an episode). It is computed
     BEFORE the reward and passed to it: without it a cube pushed along the table onto the target would
-    count as "placed", and with it `reward` stays a function without state.
+    count as "placed", and with it `reward` stays a function without state. `bottom` (N,): the
+    object's lowest point (`object_bottom`), as in `reward`.
     """
-    height = cube_pos[..., 2] - task.cube_half
+    height = _height(task, cube_pos, bottom)
     return carried | (grasped(xp, jaw_contacts) & (height > task.lift_height))
 
 
@@ -304,10 +402,12 @@ def grip_is_open(xp, limits: Limits, q_cmd):
 
 def reward(xp, task: TaskConfig, tcp, action, prev_action, goal=None, cube_pos=None, jaw_contacts=None,
            q_cmd=None, limits: Limits | None = None, target=None, cube_vel=None, carried=None,
-           grip_open=None):
+           grip_open=None, bottom=None):
     """(reward, success, failure) for every world.
 
     `jaw_contacts` (N, 2): whether the cube touches the fixed and the moving jaw.
+    `bottom` (N,): the height of the object's lowest point above the table (`object_bottom`); lifted,
+    success, placed and failure all use it. Without it: the centre minus the resting half height.
     Failure = the cube fell off the table; the episode then ends.
     `q_cmd` (N, n_joints) and `limits` are for the limit and roll penalties (`limit_penalty`,
     `roll_penalty`); without them there are none.
@@ -330,13 +430,13 @@ def reward(xp, task: TaskConfig, tcp, action, prev_action, goal=None, cube_pos=N
         success = d < task.success_dist
         failure = d < -1.0                                  # reach has no failure
         return r - cost, success, failure
+    height = _height(task, cube_pos, bottom)
     if task.name == "pickplace":
-        return _reward_pickplace(xp, task, tcp, action, cost, cube_pos, jaw_contacts, limits, target,
+        return _reward_pickplace(xp, task, tcp, action, cost, cube_pos, height, jaw_contacts, limits, target,
                                  cube_vel, carried,
                                  grip_open if grip_open is not None else grip_is_open(xp, limits, q_cmd))
     d = _norm(cube_pos - tcp)
     grasped = (jaw_contacts[..., 0] > 0.5) & (jaw_contacts[..., 1] > 0.5)
-    height = cube_pos[..., 2] - task.cube_half
     lifted = _clip(xp, height / task.lift_height, 0.0, 1.0)
     success = grasped & (height > task.lift_height)
     g, s = _cast(xp, grasped, tcp), _cast(xp, success, tcp)
@@ -348,7 +448,7 @@ def reward(xp, task: TaskConfig, tcp, action, prev_action, goal=None, cube_pos=N
     return r - cost, success, failure
 
 
-def _reward_pickplace(xp, task: TaskConfig, tcp, action, cost, cube_pos, jaw_contacts, limits, target,
+def _reward_pickplace(xp, task: TaskConfig, tcp, action, cost, cube_pos, height, jaw_contacts, limits, target,
                       cube_vel, carried, opened):
     """pickplace: approach, grasp, lift, carry over the target, put down, release.
 
@@ -358,7 +458,6 @@ def _reward_pickplace(xp, task: TaskConfig, tcp, action, cost, cube_pos, jaw_con
     """
     d = _norm(cube_pos - tcp)
     g = grasped(xp, jaw_contacts)
-    height = cube_pos[..., 2] - task.cube_half
     lifted = _clip(xp, height / task.lift_height, 0.0, 1.0)
     d_t = _norm(cube_pos[..., :2] - target[..., :2])
     placed = (d_t < task.place_radius) & (height < task.place_height)
@@ -423,10 +522,11 @@ def sample_start(task: TaskConfig, limits: Limits, rng: np.random.Generator, n: 
 
 
 def sample_cubes(task: TaskConfig, rng: np.random.Generator, n: int) -> tuple[np.ndarray, np.ndarray]:
-    """Cubes on the table: positions (n, 3) in the base frame and quaternions (n, 4) of a turn about z."""
+    """Objects lying on the table: positions (n, 3) in the base frame, the origin at `rest_height`, and
+    quaternions (n, 4) of a turn about z drawn uniformly from the whole circle."""
     r = rng.uniform(*task.cube_radius, n)
     b = rng.uniform(*task.cube_bearing, n)
-    pos = np.stack([r * np.cos(b), r * np.sin(b), np.full(n, task.cube_half)], axis=1)
+    pos = np.stack([r * np.cos(b), r * np.sin(b), np.full(n, rest_height(task))], axis=1)
     yaw = rng.uniform(-np.pi, np.pi, n)
     quat = np.stack([np.cos(yaw / 2), np.zeros(n), np.zeros(n), np.sin(yaw / 2)], axis=1)
     return pos, quat

@@ -22,6 +22,8 @@ import jax.numpy as jnp  # noqa: E402
 
 from soarm_lab.rl import jax_policy as jp  # noqa: E402
 from soarm_lab.rl import ppo  # noqa: E402
+from soarm_lab.rl import task as tk  # noqa: E402
+from soarm_lab.rl.objects import DESCRIPTOR_DIM, descriptor  # noqa: E402
 from soarm_lab.rl.policy import POLICY_FILE, Policy  # noqa: E402
 from soarm_lab.station import Station  # noqa: E402
 
@@ -301,6 +303,121 @@ def test_a_policy_for_another_environment_is_refused(station, trained):
     other.actor = [(np.zeros((32, 5), np.float32), np.zeros(32, np.float32)), *pol.actor[1:]]
     with pytest.raises(ValueError, match="the actor of the init policy"):
         run(station, replace(CFG, iterations=1), init=other)
+
+
+# ----------------------------------------------------------------------- the warm start to the blocks
+def test_widening_to_the_descriptor_keeps_the_actions():
+    """lift-v3's 33 inputs widened to 40: old columns copied, new ones zero, the normalizer extended.
+
+    The widened actor gives the old action for any value of the new inputs.
+    """
+    obs_dim, wide, act_dim, hidden = 33, 33 + DESCRIPTOR_DIM, 6, [32, 16]
+    k = jax.random.split(jax.random.PRNGKey(7), 5)
+    actor = jp.init_mlp(k[0], [obs_dim, *hidden, act_dim])
+    critic = jp.init_mlp(k[1], [obs_dim, *hidden, 1])
+    norm = jp.norm_update(jp.Norm.new(obs_dim), jax.random.normal(k[2], (300, obs_dim)) * 2 + 0.3)
+    like_actor = jp.init_mlp(k[3], [wide, *hidden, act_dim])
+    like_critic = jp.init_mlp(k[3], [wide, *hidden, 1])
+    w_actor = ppo._widen_layers("actor", actor, like_actor, DESCRIPTOR_DIM)
+    w_critic = ppo._widen_layers("critic", critic, like_critic, DESCRIPTOR_DIM)
+    w_norm = jp.widen_norm(norm, wide)
+    for old, new in ((actor, w_actor), (critic, w_critic)):
+        assert [w.shape for w, _ in new] == [(hidden[0], wide), *(w.shape for w, _ in old[1:])]
+        np.testing.assert_array_equal(new[0][0][:, :obs_dim], old[0][0])
+        np.testing.assert_array_equal(new[0][0][:, obs_dim:], 0.0)
+        for (w0, _), (w1, _) in zip(old[1:], new[1:], strict=True):
+            np.testing.assert_array_equal(w0, w1)
+        for (_, b0), (_, b1) in zip(old, new, strict=True):
+            np.testing.assert_array_equal(b0, b1)
+    np.testing.assert_array_equal(w_norm.mean[:obs_dim], norm.mean)
+    np.testing.assert_array_equal(w_norm.var[:obs_dim], norm.var)
+    np.testing.assert_array_equal(w_norm.mean[obs_dim:], 0.0)
+    np.testing.assert_array_equal(w_norm.var[obs_dim:], 1.0)
+    assert float(w_norm.count) == float(norm.count) and float(w_norm.clip) == float(norm.clip)
+
+    old_pol = jp.to_policy(_meta(obs_dim, act_dim, hidden), norm, actor)
+    new_pol = jp.to_policy(_meta(wide, act_dim, hidden), w_norm, w_actor)
+    obs = np.asarray(jax.random.normal(k[4], (50, obs_dim)) * 2, np.float32)
+    zeros = np.concatenate([obs, np.zeros((50, DESCRIPTOR_DIM), np.float32)], 1)
+    blocks = np.concatenate([obs, np.tile(descriptor("cylinder"), (50, 1))], 1)
+    want = old_pol.act(obs)
+    assert want.dtype == np.float32 and np.abs(want).max() > 0.05             # the actions are not all zero
+    np.testing.assert_allclose(new_pol.act(zeros), want, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(new_pol.act(blocks), want, rtol=0, atol=1e-6)
+
+    # Wider by anything but the descriptor, or narrower, is still refused.
+    with pytest.raises(ValueError, match="the actor of the init policy"):
+        ppo._widen_layers("actor", actor, jp.init_mlp(k[3], [obs_dim + 5, *hidden, act_dim]), DESCRIPTOR_DIM)
+    with pytest.raises(ValueError, match="the actor of the init policy"):
+        ppo._widen_layers("actor", actor, like_actor, 0)
+
+
+#: The toy environment's object kinds: the first half of the worlds is a cube, the second a cylinder.
+TOY_KINDS = ("cube", "cylinder")
+
+
+class DescribedPointEnv(PointEnv):
+    """`PointEnv` with an object descriptor after its observation and the kind of every world in `info`.
+
+    It stands in for `mixed.MixedBatchEnv`: the descriptor does not change the task, so a policy of
+    `PointEnv` widened to it keeps reaching its goals.
+    """
+
+    kinds = TOY_KINDS
+
+    def __init__(self, task, num_envs, **kw):
+        super().__init__(task, num_envs, **kw)
+        half = self.num_envs // 2
+        self.kind = jnp.repeat(jnp.arange(2, dtype=jnp.int32), half)
+        self.desc = jnp.asarray(np.repeat(np.stack([descriptor(k) for k in TOY_KINDS]), half, axis=0))
+
+    @property
+    def obs_dim(self) -> int:
+        return 4 + DESCRIPTOR_DIM
+
+    def reset(self):
+        return jnp.concatenate([super().reset(), self.desc], 1)
+
+    def step(self, action):
+        obs, rew, done, info = super().step(action)
+        return jnp.concatenate([obs, self.desc], 1), rew, done, {**info, "kind": self.kind}
+
+
+def test_a_policy_is_widened_to_a_shape_conditioned_task(station, trained, tmp_path):
+    """`train` widens a policy without the descriptor, starts where it was, and reports success per kind."""
+    pol, history, _ = trained
+    lift_pol = _with_critic(pol, pol.critic)                    # the toy policy, as if trained on lift
+    lift_pol.meta.task = {"name": "lift"}
+    task = replace(tk.make_task("lift"), shape_conditioned=True)
+    seen = []
+    tuned = ppo.train(task, replace(CFG, iterations=2, init_std=0.25), station=station, device="cpu",
+                      make_env=DescribedPointEnv, init=lift_pol, init_name="toy-v1", out_dir=tmp_path,
+                      on_progress=lambda p: seen.append(replace(p, success_by_kind=dict(p.success_by_kind))))
+    wide = 4 + DESCRIPTOR_DIM
+    assert tuned.sizes == [wide, 32, 32, 2] and tuned.critic[0][0].shape == (32, wide)
+    assert tuned.task.shape_conditioned and tuned.meta.obs_dim == wide
+    assert "(toy-v1, " in tuned.meta.notes and f"z 4 do {wide} wejsc" in tuned.meta.notes
+    # It starts where the toy run ended: the zero columns change nothing.
+    assert seen[0].success > 0.7 > history[0]["success"], seen
+    assert set(seen[0].success_by_kind) == set(TOY_KINDS)
+    assert all(v > 0.5 for v in seen[0].success_by_kind.values()), seen[0].success_by_kind
+    prog = json.loads((tmp_path / "progress.json").read_text(encoding="utf-8"))
+    assert set(prog["success_by_kind"]) == set(TOY_KINDS) and "success_cylinder" in prog["history"][-1]
+    assert json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))["kinds"] == list(TOY_KINDS)
+    # Without `shape_conditioned` the wider environment is a mismatch.
+    with pytest.raises(ValueError, match="the actor of the init policy"):
+        ppo.train(tk.make_task("lift"), replace(CFG, iterations=1), station=station, device="cpu",
+                  make_env=DescribedPointEnv, init=lift_pol)
+    # A task of another name than the init policy's is refused.
+    with pytest.raises(ValueError, match="trained on lift, the task is pickplace"):
+        ppo.train(tk.make_task("pickplace"), replace(CFG, iterations=1), station=station, device="cpu",
+                  make_env=DescribedPointEnv, init=lift_pol)
+
+
+def test_success_by_kind_names_the_kinds():
+    assert ppo._success_by_kind([1.0, 0.0, 1.0, 1.0], [0, 0, 1, 1], ("cube", "cylinder")) == \
+        {"cube": 0.5, "cylinder": 1.0}
+    assert ppo._success_by_kind([1.0, 0.0], [2, 2], ()) == {"2": 0.5}
 
 
 # ----------------------------------------------------------------------- helpers

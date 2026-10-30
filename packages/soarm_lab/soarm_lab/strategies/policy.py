@@ -39,19 +39,30 @@ Where the inputs come from: the goal is `obs.goal` (the panel's goal); without o
 `goal_x`, `goal_y`, `goal_z` hold it. The cube is `obs.objects["cube"]`: a pose in the base frame and
 its `source` ("kamery", "w dloni", "ostatnie widziane", "symulacja") and `age_s`; an empty source
 counts as simulation truth on a simulated arm and as stale on a real one.
+
+Wooden blocks (`rl.objects`): a shape-conditioned policy (`soarm-lab train --kinds`) also sees which
+block it grasps, the descriptor `objects.descriptor(kind)` at the end of its observation. The kind is
+the setting `object_kind`, by default the policy's own (`meta.task`), and the detector must name it:
+the strategy reads `obs.objects[<kind>]` (e.g. "cylinder"), or `obs.objects["cube"]` when no object
+carries the kind's name. The detector gives the pose only; the block's dimensions come from the
+object table in `rl/objects.py`, never from the image. The kind also sets the yaw fold (the yaw
+symmetry the detector cannot see) and the height success counts: the block's lowest point above the
+table, from the pose's position and rotation (`task.object_bottom`; for the legacy cube of the base
+policies its centre minus `cube_half`, as before).
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 from machinekind_twin_api.strategy import Action, ObjectPose, Observation, RunInfo, Strategy
 
 from ..kinematics import RobotKinematics
 from ..rl import task as tk
+from ..rl.objects import KINDS
 from ..rl.policy import Policy, find_policy
 from ..robot import load_robot
 
@@ -97,6 +108,10 @@ class PolicySettings:
     goal_x: float = 0.22
     goal_y: float = 0.0
     goal_z: float = 0.12
+    #: Which wooden block the detector is looking at, one of `rl.objects.KINDS` (cube, cuboid5, cuboid85,
+    #: cylinder); empty = the policy's own. It sets the descriptor a shape-conditioned policy sees, the
+    #: yaw fold and the object's height (see the module docstring).
+    object_kind: str = ""
 
 
 @dataclass
@@ -162,8 +177,19 @@ class PolicyStrategy(Strategy[PolicySettings]):
             raise ValueError(f"policy: max_tracking_deg must be positive, is {self.config.max_tracking_deg}")
         if not self.config.max_pose_age_s >= 0:
             raise ValueError(f"policy: max_pose_age_s must be zero or more, is {self.config.max_pose_age_s}")
+        kind = self.config.object_kind
+        if kind and kind not in KINDS:
+            raise ValueError(f"policy: unknown object_kind {kind!r}; known: {', '.join(KINDS)}")
         self.policy = policy if policy is not None else Policy.load(find_policy(self.config.policy))
-        self.task = self.policy.task
+        task = self.policy.task
+        if kind:
+            if task.cube is None:
+                raise ValueError(f"policy: object_kind {kind!r} needs a task with an object, not {task.name}")
+            task = replace(task, object_kind=kind)
+        #: The policy's task, with the settings' `object_kind` when one is set.
+        self.task = task
+        #: The yaw symmetry of the object the detector cannot see (`task.fold_yaw`).
+        self._yaw_period = tk.yaw_period(task)
         #: The policy's own rate: the twin's runner ticks at it.
         self.hz = float(self.task.control_hz)
         #: The run ends itself (episode limit, success); the twin needs no time limit of its own.
@@ -189,6 +215,7 @@ class PolicyStrategy(Strategy[PolicySettings]):
         self._hw_lo = self._hw_hi = np.zeros(self.task.act_dim)
         self.simulated = False
         self._cube: np.ndarray | None = None
+        self._cube_rot = np.eye(3)
         self._cube_src: str | None = None
         self._cube_age = 0.0
         self._grip_prev: float | None = None
@@ -330,17 +357,20 @@ class PolicyStrategy(Strategy[PolicySettings]):
         cube_pos, cube_rot = np.zeros(3), np.eye(3)
         target = None
         if self.task.cube:
-            got = (objects or {}).get(self.task.cube)
+            objects = objects or {}
+            # The detector names the block's kind; the cube detector and the twin's simulation say "cube".
+            got = objects.get(self.task.object_kind, objects.get(self.task.cube))
             if got is None:
                 raise NoCube(f"zadanie {self.task.name} potrzebuje polozenia kostki - kamery jej nie widza")
             cube_pos, cube_rot = np.asarray(got.position, float), np.asarray(got.rotation, float)
             self._cube_src = str(got.source or "") or None
             self._cube_age = float(got.age_s)
-            self._cube = cube_pos.copy()
+            self._cube, self._cube_rot = cube_pos.copy(), cube_rot.copy()
             if self.policy.meta.randomization.get("fold_yaw", False):
-                # In training the policy saw the yaw folded to +-45 deg (as the detector gives it); the
-                # "w dloni" pose and simulation truth are not folded, so fold every pose the same way.
-                cube_rot = tk.fold_yaw(np, cube_rot)
+                # In training the policy saw the yaw folded by the object's symmetry (+-45 deg for a
+                # cube, as the detector gives it); the "w dloni" pose and simulation truth are not
+                # folded, so fold every pose the same way.
+                cube_rot = tk.fold_yaw(np, cube_rot, self._yaw_period)
         if self.task.target:
             target = self.target[None]
         obs = tk.observe(np, self.task, self.limits, q[None], self.q_cmd[None], tcp[None],
@@ -398,7 +428,7 @@ class PolicyStrategy(Strategy[PolicySettings]):
             if holding and st.success_streak > 0 and q[self.g] < self._streak_grip - self.grip_creep:
                 holding = False
             st.success = bool(self._cube is not None and self._cube_fresh() and holding
-                              and self._cube[2] - self.task.cube_half > self.task.lift_height)
+                              and self._height(self._cube) > self.task.lift_height)
             if st.success and st.success_streak == 0:
                 self._streak_grip = float(q[self.g])
         st.success_streak = st.success_streak + 1 if st.success else 0
@@ -421,7 +451,7 @@ class PolicyStrategy(Strategy[PolicySettings]):
             return False
         if src is None and self.simulated:
             src = "symulacja"                               # no source in simulation = the scene's truth
-        height = float(cube[2]) - task.cube_half
+        height = self._height(cube)
         tgt = self.target
         d_t = float(np.hypot(*(cube[:2] - tgt[:2])))
         self.status.distance = d_t
@@ -437,6 +467,10 @@ class PolicyStrategy(Strategy[PolicySettings]):
         if ok and (self.status.success_streak == 0 or self._streak_cube is None):
             self._streak_cube = np.asarray(cube, float).copy()
         return ok
+
+    def _height(self, cube: np.ndarray) -> float:
+        """The height above the table [m] of the object's lowest point, at `cube` with the last rotation."""
+        return float(tk.object_bottom(np, self.task, cube[None], self._cube_rot[None])[0])
 
     def _jaw_holding(self, grip_q: float) -> bool:
         """Whether the jaw holds: still since the last tick, wider than commanded and than a closed jaw.
@@ -511,5 +545,5 @@ class PolicyStrategy(Strategy[PolicySettings]):
             return txt + (" - cel przesuniety na obszar z treningu" if st.goal_clamped else "")
         if self._cube is None:
             return ""
-        height = 100 * (float(self._cube[2]) - self.task.cube_half)
+        height = 100 * self._height(self._cube)
         return f"kostka {height:.1f} cm nad blatem ({self._cube_src or 'bez zrodla'})"

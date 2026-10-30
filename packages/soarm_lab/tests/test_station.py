@@ -13,7 +13,16 @@ import soarm
 mujoco = pytest.importorskip("mujoco")
 
 from soarm_lab.kinematics import inverse  # noqa: E402
-from soarm_lab.station import PREFIX, STATIONS_DIR, Box, CameraView, Station, stations  # noqa: E402
+from soarm_lab.station import (  # noqa: E402
+    CYLINDER_CCD_TOLERANCE,
+    PREFIX,
+    STATIONS_DIR,
+    Box,
+    CameraView,
+    Part,
+    Station,
+    stations,
+)
 
 #: Bodies of the SO-101 in its MJCF, world excluded.
 ARM_BODIES = 8
@@ -75,6 +84,48 @@ def test_task_objects_and_jaw_sensors_are_added(station):
     mujoco.mj_forward(model, data)
     lies = inverse(station.T_base2world) @ np.r_[data.xpos[cube.id], 1.0]
     assert lies[:3] == pytest.approx([0.2, 0.0, 0.015], abs=1e-9)
+
+
+def test_an_object_of_parts_gets_one_geom_per_part(station):
+    """A box and a cylinder on one free body: names, types, sizes, the mass split by `mass_fraction`."""
+    axis_x = (np.sqrt(0.5), 0.0, np.sqrt(0.5), 0.0)                 # the cylinder's axis along x
+    parts = (Part("box", (0.0125, 0.0125, 0.0125), pos=(-0.0175, 0.0, 0.0)),
+             Part("cylinder", (0.0125, 0.0175, 0.0), pos=(0.0125, 0.0, 0.0), quat=axis_x, mass_fraction=3.0))
+    block = Box("block", (0.03, 0.0125, 0.0125), (0.2, 0.05), mass=0.04, parts=parts)
+    model = station.build(objects=[block], grasp_sensors=["block"])
+
+    body = model.body("block").id
+    geoms = np.flatnonzero(model.geom_bodyid == body)
+    assert [model.geom(g).name for g in geoms] == ["block", "block/part1"]
+    assert model.geom("block").id == geoms[0]                      # `model.geom(name)` finds the first part
+    assert model.geom_type[geoms].tolist() == [mujoco.mjtGeom.mjGEOM_BOX, mujoco.mjtGeom.mjGEOM_CYLINDER]
+    assert model.geom_size[geoms[0]] == pytest.approx([0.0125] * 3)
+    assert model.geom_size[geoms[1]][:2] == pytest.approx([0.0125, 0.0175])
+    assert model.geom_pos[geoms[1]] == pytest.approx([0.0125, 0.0, 0.0])
+    assert model.geom_quat[geoms[1]] == pytest.approx(axis_x)
+    assert model.body_mass[body] == pytest.approx(0.04)
+    # The geoms' own masses are not in the model; the body's centre of mass shows the 1 : 3 split.
+    assert model.body_ipos[body][0] == pytest.approx(0.25 * -0.0175 + 0.75 * 0.0125)
+    for g in geoms:
+        assert model.geom_condim[g] == 4
+        assert model.geom_friction[g] == pytest.approx([1.0, 0.02, 0.002])
+    assert model.jnt_type[model.body_jntadr[body]] == mujoco.mjtJoint.mjJNT_FREE
+    assert model.opt.ccd_tolerance == CYLINDER_CCD_TOLERANCE      # a cylinder part tightens it
+
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+    lies = inverse(station.T_base2world) @ np.r_[data.xpos[body], 1.0]
+    assert lies[:3] == pytest.approx([0.2, 0.05, 0.0125], abs=1e-9)
+    # Without a cylinder the scene keeps its tolerance (the legacy cube's scene does not change).
+    assert station.build(objects=[CUBE]).opt.ccd_tolerance == pytest.approx(1e-6)
+
+
+def test_parts_are_refused_on_markers_and_of_unknown_kinds(station):
+    with pytest.raises(ValueError, match="takes no parts"):
+        station.build(objects=[Box("pad", (0.03, 0.03, 0.002), (0.3, 0.1), free=False, mocap=True,
+                                   parts=(Part("box", (0.03, 0.03, 0.002)),))])
+    with pytest.raises(ValueError, match="unknown part kind 'sphere'"):
+        station.build(objects=[Box("ball", (0.01,) * 3, (0.2, 0.0), parts=(Part("sphere", (0.01, 0, 0)),))])
 
 
 def test_an_extra_camera_is_added_and_a_duplicate_refused(station):
