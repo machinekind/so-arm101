@@ -110,6 +110,8 @@ With this package installed alongside the twin, its Strategies tab offers:
 - `touch_jev`: `touch` plus a decision step, in which TypeSafe's Jev model says after each descent
   whether the gripper touched the object and where to aim after a miss; see
   [Jev in the touch loop](#jev-in-the-touch-loop).
+- `grasp`: `touch`'s probe on a block of the Classic World set, then rise, open, straddle, close and
+  lift; the jaw rule verifies the hold; see [Grasp a block](#grasp-a-block).
 - `dream`: runs Dream Labs' Dream-1 model from a prompt and the cameras; see [Dream Labs](#dream-labs).
 
 All send joint targets through the twin's safety supervisor. Read the
@@ -134,6 +136,12 @@ touch_jev:
   model: jev-1.14.0
   min_confidence: 0.8
   max_attempts: 3
+grasp:
+  object_kind: cube
+  open_margin_m: 0.008
+  squeeze_m: 0.008
+  grasp_depth: 0.5
+  lift_m: 0.04
 ```
 
 Goals use metres in the robot's base frame. Enable the panel's 3D goal handle
@@ -162,7 +170,8 @@ slows the run but never reads as a touch.
 See [policy settings](soarm_lab/strategies/policy.py),
 [IK settings](soarm_lab/strategies/ik.py),
 [touch settings](soarm_lab/strategies/touch.py),
-[touch_jev settings](soarm_lab/strategies/touch_jev.py) and
+[touch_jev settings](soarm_lab/strategies/touch_jev.py),
+[grasp settings](soarm_lab/strategies/grasp.py) and
 [conventions](../../docs/conventions.md) for the full interfaces.
 
 ## Jev in the touch loop
@@ -231,6 +240,82 @@ input can be put to Claude or to a person to compare accuracy. A Claude judge wo
 process handling of the twin's `machinekind_twin_llm.cli` copied here, not imported (that package is
 only in the `twin` group and loads OpenCV), a fake CLI for its tests, and an `answer_timeout_s` near
 its 60 s limit, because the CLI answers in seconds where Jev answers in about 0.1 s.
+
+## Grasp a block
+
+`grasp` picks up one block of the Classic World set (`rl/objects.py`: `cube`, `cuboid5`, `cuboid85`,
+`cylinder`) that the detector names, lifts it 4 cm and checks that the jaw holds it. It starts as
+`touch`: the closed jaw goes straight down onto the block until the arm stalls. Then:
+
+1. The arm rises to the hover with the jaw closed.
+2. It moves 16 mm sideways and opens the jaw to the block's short side plus twice `open_margin_m`
+   (41 mm for the 25 mm blocks), so the open jaw is centred on the block.
+3. It goes straight down until the tips' centres are `grasp_depth` of the block's height below its top.
+4. It closes the jaw to the short side minus `squeeze_m` (17 mm) and waits until the jaw stands.
+5. When the jaw holds, it lifts `lift_m` straight up and checks the hold for `hold_s`.
+
+Every number comes from the block and the model, not from a table. `rl.objects.object_spec` gives the
+block's size. `RobotKinematics.jaw_gap` turns an opening in metres into a gripper command,
+`jaw_centre` gives where the fingertips' midpoint sits against the TCP (15.6 mm toward the moving jaw
+when closed, centred when open), and `jaw_reach` gives how far the jaw's sole reaches below the TCP
+(6.6 mm). With `touch_z: 0` the probe's bottom lies 10 mm under the block's top plus that reach. The TCP
+height at the stall minus the reach is the block's measured top, and the grasp height follows from it.
+
+The jaw rule (`strategies/jaw.py`) decides whether the jaw holds the block: it stands still, wider than
+commanded and wider than closed by more than `jaw.margin`. A jaw that has not started closing also
+looks like that, so the close counts only after the jaw has left its opening. On the way up and at the
+top the jaw must keep squeezing and must not creep closed. The twin's tracker uses the same thresholds,
+so it reports the block "w dloni" on the tick the strategy counts it held. The SO-101 closes only one
+jaw: the moving jaw pushes the block `open_margin_m` across the table onto the fixed jaw's tip.
+
+Once the pose is taken the hand points straight down, with the jaws across the block's short side (the
+pose's yaw, folded by the block's symmetry) or, when the pose has no rotation, on their current heading.
+The hand turns toward that orientation at 90 deg/s. The SO-101 reaches a top-down hand only in a band:
+a block straight ahead at x 0.14 to 0.27 m with the 4 cm hover, 0.12 to 0.25 m at 10 cm to the side.
+With `touch`'s 6 cm hover the band shrinks to 0.18 to 0.24 m straight ahead, so `hover_m` and `lift_m`
+default to 4 cm. Beyond the band `wrist_flex` stops at its 95 degree limit, and the run ends at once with
+"chwytak nie siega tam pionowo".
+
+When an open jaw tip lands on the block during the straddle, the arm holds where it stopped, rises,
+closes the jaw once its tips are 10 mm clear of the block, and probes again half the short side along
+the jaws, toward the moving jaw first. If that probe misses, the block lies on the other side, and the
+next probe goes half the short side the other way. A tip stall costs one extra probe when the first
+shift picks the right side and two when it does not; `max_attempts` (3) covers both. A close that finds nothing ends the run:
+after a straddle that met nothing, the jaw alone cannot say whether the probe pushed the block away or
+it sits at the jaws' edge.
+
+| How the run ends | Stop reason |
+| --- | --- |
+| the jaw holds for `hold_s` at the top | blok w szczekach, podniesiony o N mm (szczeka G mm) |
+| no top-down hand at the block | punkt (...) m: chwytak nie siega tam pionowo, ... poza zasiegiem ramienia, ...: chwytak nie ustawi sie pionowo (blad N st.), ...: ramie uderzyloby samo w siebie |
+| the probe misses, is blocked or stuck | touch's reasons, such as brak kontaktu w punkcie dotyku - obiektu tam nie ma |
+| tip stalls or misses beyond `max_attempts` | wyczerpane proby chwytu (N): ... |
+| the hand is not top-down at a hover | chwytak nie ustawil sie pionowo nad blokiem (N st.) |
+| the jaw does not open | szczeka nie otworzyla sie w 3 s (A mm zamiast B mm) |
+| the arm does not stand over the block | ramie nie stanelo nad blokiem (N mm od punktu) |
+| the jaw does not start closing | szczeka nie ruszyla po rozkazie zamkniecia (G mm) |
+| the jaw does not stand after the close | szczeka nie staje 3 s po zamknieciu - serwo albo odczyt |
+| the jaw closes on nothing | chwyt pusty - blok przesuniety albo obok szczek |
+| the jaw stops squeezing on the way up or at the top | blok wypadl ze szczeki podczas podnoszenia |
+| the jaw creeps closed | blok zsuwa sie w szczekach |
+| the jaw does not stand at the top | szczeka nie stoi po podniesieniu - blok sie rusza w szczekach |
+
+The lag guard, the time limit (`time_limit_s`, 120 s) and the panel's Stop end a run as in `touch`.
+
+The block stays in the jaws after "zadanie wykonane". The last target squeezes, the twin's runner sends
+the final tick's target before it disengages, and disengaging keeps the supervisor's command. A later
+STOP or Home keeps the squeeze through the twin's `hold_measured`. The operator releases the block.
+
+In the twin, a block at the default contact settings gives way under the arm: the stall torque pressed
+the 11 g cube 9 mm into the table, and the probe never stalled. test_grasp_in_twin.py therefore makes the
+block's contact as stiff as the 5 ms step allows. The cube then still gives about 2.5 mm under the probe,
+so the measured top is that much low. The real pads' sole and the real jaw's opening per unit are not
+measured yet; `touch_z` above zero overrides the probe height.
+
+Later steps of the [grasp plan](../../docs/grasp-plan.md) plug in through these methods: the recovery
+loop through `carrying` and `after_grasp_failed`, wrist-camera centring through `before_descent` and
+`before_straddle`, a Jev judge through `after_touch` and `after_miss`, and the grasp library through
+`grasp_headings`.
 
 ## Dream Labs
 
