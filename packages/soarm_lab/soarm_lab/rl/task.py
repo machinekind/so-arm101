@@ -21,7 +21,9 @@ The action is `n_joints` numbers in [-1, 1] (6 for the SO-101: five arm joints a
   target (not from the measured angles), clipped to the same limits the twin's safety supervisor
   enforces on the real arm;
 * gripper: an ABSOLUTE target (-1 closed, +1 open), rate-limited the way the supervisor limits it
-  (`grip_step` of the range per tick).
+  (`grip_step` of the range per tick). The simulated servo may be slower than that command
+  (`Dynamics.grip_close_s`, `servo_follow`): the envs then drive the jaw's actuator at the servo's
+  own speed, and the command itself, which the policy observes and the arm is sent, is never slowed.
 
 Tasks: `reach` (the TCP to a point), `lift` (grasp and lift the cube) and `pickplace` (carry the cube
 onto a target on the table and release it). In pickplace only a CARRIED cube counts (the
@@ -389,6 +391,27 @@ def occluded(xp, tcp, cube_pos, latch_m: float):
     if latch_m <= 0:
         return xp.zeros(tcp.shape[:-1], dtype=bool)
     return _norm(tcp - cube_pos) < latch_m
+
+
+# ----------------------------------------------------- the gripper servo
+def grip_rate(xp, task: TaskConfig, limits: Limits, close_s):
+    """(N,) the gripper servo's own largest step per tick [rad] for closing times `close_s` (N,) [s].
+
+    The full travel (`limits`' gripper span) in `close_s` seconds; inf for `close_s <= 0`, a servo with
+    no speed of its own (the `maximum` keeps the unused branch away from a division by zero).
+    """
+    g = limits.grip
+    span = float(limits.hi[g] - limits.lo[g])
+    return xp.where(close_s > 0, span / (xp.maximum(close_s, 1e-9) * task.control_hz), xp.inf)
+
+
+def servo_follow(xp, ctrl, target, rate):
+    """The servo's own target after one tick: from `ctrl` toward `target` by at most `rate` [rad].
+
+    Written as a clip of `target` to `ctrl +- rate`, so an infinite `rate` gives `target` exactly
+    (`ctrl + (target - ctrl)` may round off by one ulp): a servo with no speed of its own is today's.
+    """
+    return _clip(xp, target, ctrl - rate, ctrl + rate)
 
 
 # ---------------------------------------------------------------- reward

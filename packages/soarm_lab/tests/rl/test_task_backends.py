@@ -219,14 +219,20 @@ def test_the_legacy_bottom_is_the_old_height(name, station, limits):
 
 
 
-def test_numpy_and_jax_perceive_the_same_pose():
-    """The cameras' pose (offset, noise, fold) and the occlusion latch: one definition for both envs."""
+def test_numpy_and_jax_perceive_the_same_pose(limits):
+    """The cameras' pose (offset, noise, fold), the occlusion latch and the gripper servo's own speed:
+    one definition for both envs."""
     rng = np.random.default_rng(21)
     pos = rng.normal(0, 0.2, (N, 3))
     rot = np.array([np.linalg.qr(rng.normal(size=(3, 3)))[0] for _ in range(N)])
     bias, noise = rng.uniform(-0.03, 0.03, (N, 2)), rng.normal(0, 0.002, (N, 2))
     tcp, cube = rng.normal(0, 0.2, (N, 3)), rng.normal(0, 0.2, (N, 3))
     tcp[::3] = cube[::3] + rng.normal(0, 0.01, (len(tcp[::3]), 3))        # the hand over the object
+    task = tk.make_task("lift")
+    g = limits.grip
+    ctrl, target = rng.uniform(limits.lo[g], limits.hi[g], N), rng.uniform(limits.lo[g], limits.hi[g], N)
+    rate = rng.uniform(0.01, 0.2, N)
+    close_s = np.tile([0.0, 0.33, 1.3, -1.0], N // 4)
 
     def run(xp):
         def f(a):
@@ -238,6 +244,9 @@ def test_numpy_and_jax_perceive_the_same_pose():
             out[f"pos_{fold}"], out[f"rot_{fold}"] = p, r
         out["occluded"] = tk.occluded(xp, f(tcp), f(cube), 0.05)
         out["never"] = tk.occluded(xp, f(tcp), f(cube), 0.0)
+        out["grip_rate"] = tk.grip_rate(xp, task, limits, f(close_s))
+        out["follow"] = tk.servo_follow(xp, f(ctrl), f(target), f(rate))
+        out["follow_inf"] = tk.servo_follow(xp, f(ctrl), f(target), f(np.full(N, np.inf)))
         return {k: np.asarray(v) for k, v in out.items()}
 
     a, b = run(np), run(jnp)
@@ -256,3 +265,14 @@ def test_numpy_and_jax_perceive_the_same_pose():
     # Without an offset and noise the pose is the true one, bit for bit.
     zero = np.zeros((N, 2))
     assert np.array_equal(tk.perceived(np, pos, rot, zero, zero, False, np.pi / 2)[0], pos)
+
+    # The servo: the full span in close_s at 20 Hz, none of its own for close_s <= 0.
+    span = limits.hi[g] - limits.lo[g]
+    np.testing.assert_allclose(a["grip_rate"][1:3], [span / (0.33 * 20), span / 26])
+    assert np.isinf(a["grip_rate"][0]) and np.isinf(a["grip_rate"][3])
+    step = a["follow"] - ctrl
+    assert (np.abs(step) <= rate + 1e-12).all() and (np.abs(step) < np.abs(target - ctrl) - 1e-12).any()
+    np.testing.assert_allclose(step, np.clip(target - ctrl, -rate, rate), atol=1e-15)
+    # No speed of its own: exactly the command, in both backends.
+    assert np.array_equal(a["follow_inf"], target)
+    assert np.array_equal(b["follow_inf"], target.astype(np.float32))

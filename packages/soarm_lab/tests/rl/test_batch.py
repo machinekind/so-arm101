@@ -23,7 +23,7 @@ from soarm_lab.rl.batch import BLOCK_CONTACTS, CONTACTS, BatchEnv, contact_budge
 from soarm_lab.rl.env import ArmEnv  # noqa: E402
 from soarm_lab.rl.objects import DESCRIPTOR_DIM, descriptor  # noqa: E402
 from soarm_lab.rl.policy import Policy  # noqa: E402
-from soarm_lab.rl.randomize import Randomization  # noqa: E402
+from soarm_lab.rl.randomize import Dynamics, Randomization  # noqa: E402
 from soarm_lab.station import Station  # noqa: E402
 
 
@@ -138,9 +138,11 @@ def test_a_reset_observes_the_joints_it_wrote(station):
     np.testing.assert_allclose(np.asarray(obs[:, na:2 * na]), joints_in_physics(), atol=1e-6)   # q_cmd = q0
 
 
-def test_the_cpu_device_perceives_the_biased_delayed_pose(station):
-    """The perception additions in the batch: each world's own offset, the least delay, the latch."""
-    rand = replace(Randomization.none(), pose_bias_m=0.03, cube_min_delay=2, cube_delay=2, latch_m=0.05)
+def test_the_cpu_device_perceives_the_biased_delayed_pose_and_a_slow_jaw(station):
+    """The perception additions in the batch (each world's own offset, the least delay, the latch) and
+    a 1.3 s gripper servo, whose actuator lags the command while the command keeps its own rate."""
+    rand = replace(Randomization.nominal(Dynamics(grip_close_s=1.3)), pose_bias_m=0.03, cube_min_delay=2,
+                   cube_delay=2, latch_m=0.05)
     env = BatchEnv("lift", num_envs=4, station=station, randomization=rand, device="cpu")
     obs = env.reset()
     bias = np.asarray(env.s["bias"])
@@ -150,22 +152,34 @@ def test_the_cpu_device_perceives_the_biased_delayed_pose(station):
     true = (env.d.xpos.numpy()[:, env.cube_body] - env.t_b) @ env.R_b
     np.testing.assert_allclose(np.asarray(obs[:, 15:17]), true[:, :2] + bias, atol=1e-5)
     np.testing.assert_allclose(np.asarray(obs[:, 17]), true[:, 2], atol=1e-5)
+
+    g = env.limits.grip
+    span = float(env.limits.hi[g] - env.limits.lo[g])
+    rate = np.asarray(env.s["grip_rate"])
+    np.testing.assert_allclose(rate, span / 26, rtol=1e-5)                  # S / (1.3 s x 20 Hz)
+    ctrl0, cmd0 = np.asarray(env.s["ctrl"][:, env.act[g]]), np.asarray(env.s["q_cmd"][:, g])
+    close = jnp.zeros((4, env.act_dim)).at[:, g].set(-1.0)
+    env.step(close)
+    np.testing.assert_allclose(ctrl0 - np.asarray(env.s["ctrl"][:, env.act[g]]), rate, rtol=1e-5)
+    np.testing.assert_allclose(cmd0 - np.asarray(env.s["q_cmd"][:, g]), env.task.grip_step * span, rtol=1e-5)
     obs, rew, done, info = random_steps(env, 20)
     assert jnp.isfinite(obs).all() and jnp.isfinite(rew).all() and not info["broken"].any()
 
 
+@pytest.mark.parametrize("jaw", ["free", "slow"])
 @pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=gpu)])
 @pytest.mark.parametrize("task", ["reach", "lift"])
-def test_one_world_follows_cpu_mujoco(task, device, station):
+def test_one_world_follows_cpu_mujoco(task, device, jaw, station):
     """One world stepped with zero actions in BatchEnv and in ArmEnv stays within 0.01 deg per joint.
 
     Both without randomization (`Randomization.none()`), from the same start: the batch env's start
     pose, and in lift its cube, go to `ArmEnv.reset(options=)`. 40 ticks (2 s) of the arm holding its
     targets against gravity while the gripper moves to mid-range. MuJoCo Warp is float32, CPU MuJoCo
     float64; on Warp's CPU device the largest difference is 0.00001 deg (measured), the torch version
-    of the batch env measured 0.001 deg after 2 s on an RTX A4500.
+    of the batch env measured 0.001 deg after 2 s on an RTX A4500. The slow jaw: a 1.3 s gripper servo
+    in both (`Dynamics.grip_close_s`), so the gripper reaches mid-range under the same rate limit.
     """
-    rand = Randomization.none()
+    rand = Randomization.none() if jaw == "free" else Randomization.nominal(Dynamics(grip_close_s=1.3))
     env = BatchEnv(task, num_envs=1, station=station, randomization=rand, device=device)
     env.reset()
     qpos = env.d.qpos.numpy()[0].astype(float)

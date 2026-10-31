@@ -14,7 +14,9 @@ and fields of the compiled model. The station (table, cameras, base pose) comes 
 
 The policy sees the object as the cameras would (`_perceive`): late, refreshed less often, offset by
 this episode's bias, with noise, and frozen while the true TCP is within `Randomization.latch_m` of it
-(the occlusion latch, the same `task.occluded` as `batch.BatchEnv`).
+(the occlusion latch, the same `task.occluded` as `batch.BatchEnv`). The gripper's actuator follows
+the command at the servo's own speed (`Dynamics.grip_close_s`, `task.servo_follow` in `step`); the
+command `q_cmd`, its rate and what the policy observes of it are untouched.
 """
 
 from __future__ import annotations
@@ -153,6 +155,8 @@ class ArmEnv(gym.Env):
         self._cube_seen = (np.zeros(3), np.eye(3))
         #: This episode's constant xy offset of the seen object pose [m] (`Randomization.pose_bias_m`).
         self._bias = np.zeros(2)
+        #: This episode's gripper servo step [rad per tick] (`task.grip_rate`); inf = no speed of its own.
+        self._grip_rate = float("inf")
         #: The yaw symmetry the detector cannot see (`task.fold_yaw`).
         self._yaw_period = tk.yaw_period(self.task)
 
@@ -220,6 +224,7 @@ class ArmEnv(gym.Env):
         self._cube_delay, self._cube_period = int(s["cube_delay"]), int(s["cube_period"])
         self._cube_hist = []
         self._bias = np.array([s["pose_bias_x"], s["pose_bias_y"]])
+        self._grip_rate = float(tk.grip_rate(np, self.task, self.limits, np.array([s["grip_close_s"]]))[0])
 
         mujoco.mj_resetData(m, d)
         q0 = np.asarray(options["q"], float) if "q" in options else tk.sample_start(self.task, self.limits, rng, 1)[0]
@@ -280,7 +285,13 @@ class ArmEnv(gym.Env):
             executed = self._delay.pop(0)
         self.q_cmd = tk.apply_action(np, self.task, self.limits, self.q_cmd[None], executed[None])[0]
         d = self.scene.data
+        g = self.limits.grip
+        ag = self.scene.act_ids[g]
+        prev = float(d.ctrl[ag])
         d.ctrl[self.scene.act_ids] = self.q_cmd
+        # The gripper servo's own speed: its actuator lags the command when the servo is slower. q_cmd,
+        # what the policy observes and what the arm is sent, is unchanged.
+        d.ctrl[ag] = tk.servo_follow(np, prev, self.q_cmd[g], self._grip_rate)
         mujoco.mj_step(self.scene.model, d, nstep=self.task.substeps)
         # After mj_step qpos is already integrated, but site_xpos/xpos/xmat come from the forward
         # pass BEFORE it (5 ms older). In motion that TCP differs from FK(q) by 4-8 mm, while the

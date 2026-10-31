@@ -58,6 +58,11 @@ computed from the truth and is not sticky: a world whose true TCP is within `Ran
 the object skips its refreshes and keeps the last seen pose, and refreshes again once the TCP is
 farther. A block carried in the jaws is always that near, so in training a carry is one long freeze.
 
+The gripper servo may be slower than its command (`Dynamics.grip_close_s`): `_act` moves the jaw
+actuator's control toward `q_cmd` by at most the world's `grip_rate` per tick (`task.servo_follow`),
+in JAX, before the control is written to Warp, so the captured CUDA graph is unchanged. `q_cmd` and
+its own rate (`grip_step`), which the policy observes and the arm is sent, are untouched.
+
 pickplace: the place target is a mocap pad (`d.mocap_pos`, separate in every world) without
 collisions, so the contact budget is the same as in lift. The "cube carried" latch (`carried` in the
 state) is the same `task.carry_latch` that `env.ArmEnv` uses, and target sampling (`_sample_targets`)
@@ -260,6 +265,8 @@ class BatchEnv:
             "seen_rot": eye.copy(),
             # This episode's constant xy offset of the seen object pose [m] (`Randomization.pose_bias_m`).
             "bias": np.zeros((N, 2), f32),
+            # The gripper servo's own step [rad per tick] (`task.grip_rate`); inf = no speed of its own.
+            "grip_rate": np.full(N, np.inf, f32),
             # The JAX copies of what physics never changes: written whole into Warp, never read back.
             "ctrl": self._read_one(self.d.ctrl),
             "fields": fields,
@@ -379,7 +386,11 @@ class BatchEnv:
         executed = hist[(t - delay) % Hd, ar]
         executed = jnp.where((t >= delay)[:, None], executed, 0.0)
         q_cmd = tk.apply_action(jnp, self.task, self.limits, s["q_cmd"], executed)
-        ctrl = s["ctrl"].at[:, self.act].set(q_cmd)
+        # The gripper's actuator at the servo's own speed; q_cmd, what the policy observes, is unchanged.
+        g = self.limits.grip
+        ag = self.act[g]
+        grip = tk.servo_follow(jnp, s["ctrl"][:, ag], q_cmd[:, g], s["grip_rate"])
+        ctrl = s["ctrl"].at[:, self.act].set(q_cmd).at[:, ag].set(grip)
         return {**s, "act_hist": hist, "q_cmd": q_cmd, "ctrl": ctrl}, ctrl, action
 
     def _perceive(self, s: State, st: dict[str, Array], key: Array) -> State:
@@ -511,7 +522,9 @@ class BatchEnv:
                 "delay_n": _sel(done, jnp.clip(smp["delay"], 0, self.Hd - 1), s["delay_n"]),
                 "cube_d": _sel(done, smp["cube_delay"], s["cube_d"]),
                 "cube_p": _sel(done, smp["cube_period"], s["cube_p"]),
-                "bias": _sel(done, jnp.stack([smp["pose_bias_x"], smp["pose_bias_y"]], 1), s["bias"])}
+                "bias": _sel(done, jnp.stack([smp["pose_bias_x"], smp["pose_bias_y"]], 1), s["bias"]),
+                "grip_rate": _sel(done, tk.grip_rate(jnp, self.task, self.limits, smp["grip_close_s"]),
+                                  s["grip_rate"])}
 
     def _restart(self, s: State, old: dict[str, Array], done: Array, smp: dict[str, Array]):
         """The done worlds' new episodes: (state, qpos, qvel, qacc_warmstart), whole arrays for Warp."""

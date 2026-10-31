@@ -13,7 +13,8 @@ ranges around the result, while kp and dry friction, which the motion does not d
 them only thanks to the wider `UNFITTED_RANGES`. An arm with kp 0.5 or friction x3 would be outside.
 
 The twin identifies the dynamics. The result arrives here as data: the `dynamics` field of the
-exported `station.json` (`Dynamics.from_dict(station.dynamics)`).
+exported `station.json` (`Dynamics.from_dict(station.dynamics)`). Its `grip_close_s` key is the
+gripper servo's own closing time measured on the stand; without it the jaw has no speed of its own.
 """
 
 from __future__ import annotations
@@ -41,6 +42,9 @@ MAX_BAND = 0.6
 MAX_DELAY_BAND = 2.0
 #: The multiplier parameters that `around` widens by their band.
 MULTIPLIERS = ("kp", "damping", "armature", "frictionloss")
+#: The multiplier range `around` puts on a measured gripper closing time (`Dynamics.grip_close_s`),
+#: scaled by its `spread`: one stand measurement of a servo whose speed varies with load and supply.
+GRIP_CLOSE_RANGE = (0.8, 1.25)
 
 
 @dataclass
@@ -53,6 +57,11 @@ class Dynamics:
     frictionloss: float = 1.0       # dry friction
     #: Delay from a command to the servo's motion [policy ticks].
     delay: float = 0.0
+    #: The gripper servo's own closing time for its full travel (`gripper_range_q`) [s]. 0 = no speed
+    #: of its own: the jaw follows the command, which crosses the range in 1 / (grip_step x control_hz)
+    #: = 0.33 s, and the simulated jaw settles in about 0.45 s. A stand measurement goes here through
+    #: station.json `dynamics.grip_close_s`; the grasp plan quotes 1.3 s.
+    grip_close_s: float = 0.0
     #: Where these numbers come from: "menagerie" (nominal) or a description of the measurement.
     source: str = "menagerie"
     #: The identification's fit error [deg], if there was one.
@@ -123,6 +132,9 @@ class Randomization:
     #: Occlusion: the seen pose stops refreshing while the true TCP is nearer the object's centre than
     #: this [m], and refreshes again once it is farther. 0 = never: the pose refreshes under the hand.
     latch_m: float = 0.0
+    #: Multipliers of `centre.grip_close_s`, the gripper servo's closing time, drawn per episode when
+    #: the centre has one and the range is open; (1, 1) = exactly the centre's.
+    grip_close: tuple[float, float] = (1.0, 1.0)
 
     @staticmethod
     def none() -> Randomization:
@@ -189,22 +201,27 @@ class Randomization:
             out.min_delay, out.max_delay = 0, hi
         else:
             out.min_delay = out.max_delay = int(round(dyn.delay))
+        if dyn.grip_close_s > 0:
+            out.grip_close = widen(GRIP_CLOSE_RANGE)              # spread 0: (1, 1), the measured time
         return out
 
     @property
     def randomized(self) -> bool:
         """Whether the dynamics are sampled (and not only set to the centre)."""
-        ranges = (self.kp, self.damping, self.armature, self.frictionloss, self.cube_mass, self.cube_friction)
+        ranges = (self.kp, self.damping, self.armature, self.frictionloss, self.cube_mass, self.cube_friction,
+                  self.grip_close)
         return any(hi > lo for lo, hi in ranges) or self.max_delay > self.min_delay
 
     def sample(self, rng: np.random.Generator, n: int) -> dict[str, np.ndarray]:
-        """Draws for `n` worlds: multipliers, delays and the cube's refresh period [ticks], and the
-        seen pose's constant offset `pose_bias_x`, `pose_bias_y` [m].
+        """Draws for `n` worlds: multipliers, delays and the cube's refresh period [ticks], the seen
+        pose's constant offset `pose_bias_x`, `pose_bias_y` [m] and the gripper's closing time
+        `grip_close_s` [s].
 
-        The arm's dynamics multipliers are already multiplied by the centre. The nine draws of the
-        dynamics, the delays and the refresh period come first, always in this order. The offset
-        follows, and it draws from `rng` only when its range is live (`pose_bias_m > 0`): numpy
-        consumes the generator even for `uniform(1, 1)`, `ArmEnv.reset` draws the start pose and
+        The arm's dynamics multipliers are already multiplied by the centre, and so is the closing
+        time. The nine draws of the dynamics, the delays and the refresh period come first, always in
+        this order. The offset and the closing time follow, and each draws from `rng` only when its
+        range is live (`pose_bias_m > 0`; a centre with a closing time and an open `grip_close`):
+        numpy consumes the generator even for `uniform(1, 1)`, `ArmEnv.reset` draws the start pose and
         the cube from the same generator after this, and `tests/rl/test_env.py` pins that stream.
         With the defaults the generator ends where the nine draws leave it.
         """
@@ -227,4 +244,7 @@ class Randomization:
             out["pose_bias_x"], out["pose_bias_y"] = r * np.cos(a), r * np.sin(a)
         else:
             out["pose_bias_x"], out["pose_bias_y"] = np.zeros(n), np.zeros(n)
+        lo, hi = self.grip_close
+        mult = rng.uniform(lo, hi, n) if c.grip_close_s > 0 and hi > lo else np.full(n, lo)
+        out["grip_close_s"] = c.grip_close_s * mult
         return out

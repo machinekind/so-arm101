@@ -14,7 +14,7 @@ gym = pytest.importorskip("gymnasium")
 from soarm_lab.rl import objects as ob  # noqa: E402
 from soarm_lab.rl import task as tk  # noqa: E402
 from soarm_lab.rl.env import VIEW, ArmEnv  # noqa: E402
-from soarm_lab.rl.randomize import Randomization  # noqa: E402
+from soarm_lab.rl.randomize import Dynamics, Randomization  # noqa: E402
 from soarm_lab.station import Station  # noqa: E402
 
 
@@ -255,6 +255,42 @@ def test_the_seen_pose_freezes_while_the_tcp_is_near_the_block():
             assert obs[15] == pytest.approx(CUBE[0] + 0.01 * k, abs=2e-3), k
     finally:
         env.close()
+
+
+def test_the_jaw_closes_at_the_servos_own_speed_and_the_command_at_its_own():
+    """A 1.3 s servo: the command still closes in 7 ticks, the actuator in 26, the jaw follows it.
+
+    Without a closing time of its own (today) the actuator is the command, and the jaw closes in 9
+    ticks (0.45 s).
+    """
+    for rand, ticks in ((Randomization.nominal(Dynamics(grip_close_s=1.3)), 30), (Randomization.none(), 9)):
+        env = ArmEnv("lift", randomization=rand)
+        try:
+            g = env.limits.grip
+            lo, span = env.limits.lo[g], env.limits.hi[g] - env.limits.lo[g]
+            q0 = env.limits.home.copy()
+            q0[g] = env.limits.hi[g]                                       # fully open
+            env.reset(options={"q": q0, "cube": (np.array([0.3, 0.15, 0.015]), UPRIGHT)})   # away from the jaws
+            d, ag = env.scene.data, env.scene.act_ids[g]
+            close = np.zeros(env.task.act_dim)
+            close[g] = -1.0
+            ctrl, jaw = [float(d.ctrl[ag])], []
+            for t in range(1, ticks + 1):
+                env.step(close)
+                ctrl.append(float(d.ctrl[ag]))
+                jaw.append(float(d.qpos[env.kin.qadr[g]]))
+                if t >= 7:
+                    assert env.q_cmd[g] == pytest.approx(lo), t                # the command: its own rate
+                if rand.centre.grip_close_s == 0:
+                    assert ctrl[-1] == env.q_cmd[g], t                         # exactly the command
+            if rand.centre.grip_close_s > 0:
+                assert max(np.diff(-np.array(ctrl))) <= span / 26 + 1e-9         # S / (1.3 s x 20 Hz)
+                assert ctrl[25] > lo + 0.03 and ctrl[26] == pytest.approx(lo, abs=1e-9)
+                assert jaw[10 - 1] > lo + 0.1 and jaw[28 - 1] < lo + 0.02
+            else:
+                assert jaw[9 - 1] < lo + 0.02
+        finally:
+            env.close()
 
 
 def test_gymnasium_ids_of_the_lab():
