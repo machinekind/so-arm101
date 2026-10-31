@@ -83,7 +83,7 @@ import numpy as np
 from machinekind_twin_api.strategy import Action, Observation, RunInfo
 
 from .jev import DEFAULT_MODEL, JevJudge, frame_problem
-from .judges import Decision, Judge, JudgeError, JudgeRunner, Outcome, Reply
+from .judges import Decision, Judge, JudgeError, JudgeRunner, JudgeStatus, Outcome, Reply
 from .touch import APPROACH, DESCEND, LIFT, TouchSettings, TouchStrategy, normalised
 
 logger = logging.getLogger(__name__)
@@ -144,27 +144,6 @@ class JevTouchSettings(TouchSettings):
     answer_timeout_s: float = 5.0
     #: Also send the camera frames of the asking tick as images (Jev's images are not production-ready).
     send_frames: bool = False
-
-
-@dataclass
-class JudgeStatus:
-    """What the decision step did in this run, for the panel's logs and tests."""
-
-    judge: str = ""
-    #: The model that answered last.
-    model: str = ""
-    asks: int = 0
-    answers: int = 0
-    failures: int = 0
-    last_response_s: float = float("nan")
-    last_verdict: str = ""
-    last_correction: str = ""
-    #: The run ended for a person to judge: an unsure answer, a failed call, an impossible correction.
-    needs_review: bool = False
-    #: Answers whose verdict differs from the geometry's.
-    disagreements: int = 0
-    #: Every record of the run, cancelled calls included.
-    decisions: list[Decision] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

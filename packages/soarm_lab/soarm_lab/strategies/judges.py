@@ -15,12 +15,20 @@ data is shared. A cancelled or superseded question's late answer is dropped.
 `machinekind_twin_api.strategy.Decision` (api 0.1.3). The pinned api (0.1.2) has no such class, so this one
 stands in for it until the pin moves.
 
+`Consultation` is one strategy's question at a time on top of the runner: the call, the wait counted on
+the strategy's clock, one retry after a timeout, an overload or a dropped connection, and one `Decision` per
+question of every call, cancelled and failed ones too. It is the flow `touch_jev` wrote for its descents;
+`grasp_jev` asks through it, and `touch_jev` keeps its private copy for now. `JudgeStatus` is the summary
+both keep for the panel's logs and tests.
+
 Nothing here knows Jev: `jev.JevJudge` is one judge. A judge that runs the `claude` CLI headless would be
 another, behind the same `Judge` protocol.
 """
 
 from __future__ import annotations
 
+import json
+import logging
 import math
 import threading
 import time
@@ -30,6 +38,8 @@ from typing import Any, Protocol
 
 import numpy as np
 
+logger = logging.getLogger(__name__)
+
 #: Questions by name, in TypeSafe's JSON shape.
 Questions = Mapping[str, Mapping[str, Any]]
 
@@ -38,6 +48,11 @@ ERROR_KINDS = ("timeout", "unreachable", "key_rejected", "rejected", "overloaded
                "cancelled")
 #: The longest technical detail an error keeps.
 DETAIL_LIMIT = 300
+#: Calls per question (`Consultation`): the first and one retry after a timeout, an overload or a dropped
+#: connection.
+ASKS_PER_QUESTION = 2
+#: The pause before that retry [s].
+RETRY_WAIT_S = 0.5
 
 
 @dataclass(frozen=True)
@@ -279,3 +294,208 @@ class JudgeRunner:
         thread = self._thread
         if thread is not None:
             thread.join(timeout_s)
+
+
+@dataclass
+class JudgeStatus:
+    """What the decision step did in this run, for the panel's logs and tests.
+
+    `touch_jev` keeps one for its descents and `Consultation` one for its questions.
+    """
+
+    judge: str = ""
+    #: The model that answered last.
+    model: str = ""
+    asks: int = 0
+    answers: int = 0
+    failures: int = 0
+    last_response_s: float = float("nan")
+    last_verdict: str = ""
+    last_correction: str = ""
+    #: The run ended for a person to judge: an unsure answer, a failed call, an impossible correction.
+    needs_review: bool = False
+    #: Answers whose verdict differs from the geometry's.
+    disagreements: int = 0
+    #: Every record of the run, cancelled calls included.
+    decisions: list[Decision] = field(default_factory=list)
+
+
+class Consultation:
+    """One question to a judge at a time, for one strategy: the call, the wait, one retry and the records.
+
+    The flow is `touch_jev`'s (its `after_touch`, `_waiting`, `_failed` and `_record`), with the same notes.
+    `begin` asks on `JudgeRunner`'s thread (inline with `threaded=False`) and the strategy calls `step` on
+    every tick with its own clock, holding the arm meanwhile. `step` returns None while the answer is
+    pending, with the tick's note in `note`; then the `Reply`, or the final `JudgeError` after the retry,
+    once. The wait is counted on the strategy's clock from the ask: a call that does not answer within
+    `timeout_s` is given up. A timeout, an overload or a dropped connection is asked again once, after
+    `RETRY_WAIT_S`, with the same state; any other error is final. Every call gives one `Decision` per
+    question in `judging.decisions` and in `drain`, and one log line headed `log_label`.
+
+    `cancel` gives up on a question in flight, recorded as cancelled, and also drops a retry pause, which
+    touch_jev's own `stop` does not; after it `begin` is always accepted.
+    """
+
+    def __init__(self, judge: Judge, *, threaded: bool = True, clock: Callable[[], float] = time.monotonic,
+                 log_label: str = "Ocena"):
+        self.judge = judge
+        self.log_label = log_label
+        self._threaded = threaded
+        self._clock = clock
+        self._runner = JudgeRunner(judge, threaded=threaded, clock=clock)
+        self.judging = JudgeStatus(judge=judge.name)
+        #: The tick's note while a question is pending; empty otherwise.
+        self.note = ""
+        self._outbox: list[Decision] = []
+        self._clear()
+
+    def reset(self) -> None:
+        """A new run: gives up on a pending call without a record and starts the records afresh."""
+        self._runner.cancel()
+        self._runner = JudgeRunner(self.judge, threaded=self._threaded, clock=self._clock)
+        self.judging = JudgeStatus(judge=self.judge.name)
+        self._outbox = []
+        self._clear()
+
+    def _clear(self) -> None:
+        self._state: Mapping[str, Any] = {}
+        self._questions: Questions = {}
+        self._images: Mapping[str, np.ndarray] = {}
+        self._meta: dict[str, Any] = {}
+        self._context = ""
+        self._asks = 0
+        self._asked_t = math.nan
+        self._retry_at: float | None = None
+        self._timeout_s = 0.0
+        self._open = False
+        self.note = ""
+
+    @property
+    def pending(self) -> bool:
+        """Whether a question is open: a call in flight or a retry pause, from `begin` until `step` hands
+        over its final outcome or `cancel` or `reset` runs."""
+        return self._open
+
+    @property
+    def asks(self) -> int:
+        """Calls made for the current question."""
+        return self._asks
+
+    def begin(self, state: Mapping[str, Any], questions: Questions, images: Mapping[str, np.ndarray], *,
+              now_t: float, timeout_s: float, meta: Mapping[str, Any], context: str) -> None:
+        """Asks `questions` about `state`, with `images` by the references `state` names them with.
+
+        `now_t` is the strategy's clock [s], `timeout_s` the longest wait for one answer [s]. `meta` goes
+        into every record's state and log line as it is (JSON values); `context` ends the notes, e.g.
+        "proba 2". Raises RuntimeError while a question is pending.
+        """
+        if self._open:
+            raise RuntimeError("judges: a question is already pending")
+        self._state, self._questions, self._images = state, questions, images
+        self._meta, self._context, self._timeout_s = dict(meta), context, float(timeout_s)
+        self._open, self._asks, self.note = True, 0, ""
+        self._ask(now_t)
+
+    def _ask(self, now_t: float) -> None:
+        self._asks += 1
+        self._asked_t = float(now_t)
+        self._retry_at = None
+        self.judging.asks += 1
+        self._runner.ask(self._state, self._questions, self._images, self._timeout_s)
+
+    def step(self, now_t: float) -> Reply | JudgeError | None:
+        """The pending question on this tick: None while it waits (the note says why), else its reply or
+        its final error, handed over once."""
+        if not self._open:
+            self.note = ""
+            return None
+        name, context = self.judge.name, self._context
+        if self._retry_at is not None:
+            if now_t >= self._retry_at:
+                self._ask(now_t)
+                self.note = f"{name}: pytam ponownie ({context})"
+            else:
+                self.note = f"{name}: pytam ponownie za chwile ({context})"
+            return None
+        outcome = self._runner.poll()
+        if outcome is None:
+            waited = float(now_t) - self._asked_t
+            if waited < self._timeout_s:
+                self.note = f"{name}: czekam na odpowiedz {waited:.1f} s ({context})"
+                return None
+            self._runner.cancel()
+            error = JudgeError(f"{name} nie odpowiedzial w {self._timeout_s:g} s", kind="timeout",
+                               retryable=True)
+            outcome = Outcome(reply=None, error=error, response_s=None)
+        self._record(outcome)
+        if outcome.error is not None:
+            error = outcome.error
+            if error.retryable and self._asks < ASKS_PER_QUESTION:
+                self._retry_at = float(now_t) + RETRY_WAIT_S
+                self.note = f"{error.reason}, pytam ponownie za {RETRY_WAIT_S:g} s"
+                return None
+            self._clear()
+            return error
+        reply = outcome.reply
+        assert reply is not None
+        self._clear()
+        return reply
+
+    def cancel(self, reason: str, *, to_outbox: bool = True) -> None:
+        """Gives up on the pending question, in flight or in its retry pause, recorded as cancelled with
+        `reason`; an answer that came in just now is recorded as it is and never acted on. Without
+        `to_outbox` the records go only to `judging.decisions` (a run's log closed by now). A no-op with
+        nothing pending; never waits and never raises."""
+        if not self._open:
+            self._runner.cancel()
+            return
+        outcome = self._runner.poll()
+        if outcome is None:
+            outcome = Outcome(reply=None, error=JudgeError(reason, kind="cancelled"), response_s=None)
+        self._runner.cancel()
+        self._record(outcome, to_outbox)
+        self._clear()
+
+    def drain(self) -> tuple[Decision, ...]:
+        """The records since the last drain, each once; cancelled calls with `to_outbox` off only in
+        `judging.decisions`."""
+        drained, self._outbox = tuple(self._outbox), []
+        return drained
+
+    def wait(self, timeout_s: float | None = None) -> None:
+        """Waits for the call in flight, if any (tests); the next `step` collects its answer."""
+        self._runner.wait(timeout_s)
+
+    def _record(self, outcome: Outcome, to_outbox: bool = True) -> None:
+        """One `Decision` per question, the answer as received or the error; and a log line."""
+        judging, reply, error = self.judging, outcome.reply, outcome.error
+        state = {"sent": self._state, "questions_sent": self._questions, "judge": self.judge.name,
+                 "ask": self._asks, "frames": sorted(self._state.get("camera_views", {})), **self._meta}
+        entry: dict[str, Any] = {"ask": self._asks, "judge": self.judge.name,
+                                 "response_s": outcome.response_s, **self._meta}
+        if reply is not None:
+            judging.answers += 1
+            judging.model = reply.model
+            judging.last_response_s = math.nan if outcome.response_s is None else outcome.response_s
+            given = list(reply.answers.values())
+            judging.last_verdict = given[0].choice if given else ""
+            judging.last_correction = given[1].choice if len(given) > 1 else ""
+            records = [Decision(question=question, answer=json.dumps({"model": reply.model, **answer.raw},
+                                                                     sort_keys=True),
+                                state=state, confidence=answer.confidence, response_s=outcome.response_s)
+                       for question, answer in reply.answers.items()]
+            answers = {question: {"choice": answer.choice, "confidence": round(answer.confidence, 3)}
+                       for question, answer in reply.answers.items()}
+            entry.update(model=reply.model, usage=dict(reply.usage), answers=answers)
+        else:
+            assert error is not None
+            judging.failures += 1
+            text = json.dumps({"error": error.kind, "status": error.status, "reason": error.reason,
+                               "detail": error.detail}, sort_keys=True)
+            records = [Decision(question=question, answer=text, state=state, response_s=outcome.response_s)
+                       for question in self._questions]
+            entry.update(error={"kind": error.kind, "status": error.status, "reason": error.reason})
+        judging.decisions.extend(records)
+        if to_outbox:
+            self._outbox.extend(records)
+        logger.info("%s: %s", self.log_label, json.dumps(entry, sort_keys=True))
