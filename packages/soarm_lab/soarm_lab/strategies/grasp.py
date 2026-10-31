@@ -58,11 +58,12 @@ Guards (touch's, and):
 * **reach with orientation**: when the pose is taken, the full multi-start IK must reach the probe hover,
   the probe's bottom, the straddle hover, the grasp point and the lift point with the hand within 5
   degrees of top-down, within the limits and off the arm's own body, for one of the candidate headings.
-  On the SO-101 that holds for a cube's centre in a band: x 0.14-0.27 m straight ahead with the 4 cm hover
-  (0.18-0.24 with touch's 6 cm), 0.12-0.25 m at 10 cm to the side. Beyond it wrist_flex stops at its 95
-  degree limit, and the run ends with "chwytak nie siega tam pionowo". The hand turns toward top-down at
-  touch's `TURN_DEG_S`, and the target is checked to be top-down within 8 degrees before the probe and
-  before the straddle;
+  On the SO-101, from the rest pose and for a pose without rotation, that holds for a cube's centre in a
+  band: x 0.14-0.27 m straight ahead with the 4 cm hover (0.18-0.24 with touch's 6 cm); 10 cm to the
+  side x 0.12-0.25 m on the right (y -0.10) and 0.03-0.25 m on the left (y +0.10). Beyond it wrist_flex
+  stops at its 95 degree limit, and the run ends with "chwytak nie siega tam pionowo". The hand turns
+  toward top-down at touch's `TURN_DEG_S`, and the target is checked to be top-down within 8 degrees
+  before the probe and before the straddle;
 * **the lift's time limit**: the measured TCP must reach the lift point `JAW_WAIT_S` after the lift's
   travel (`lift_m` at `speed_mps`, or the ticks the target and the supervisor's command took under the
   speed limits), counted from the phase clock; otherwise the run ends with "ramie nie podnioslo bloku",
