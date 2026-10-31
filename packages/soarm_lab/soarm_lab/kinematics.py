@@ -21,7 +21,8 @@ jaw bodies' collision geoms of the same model, so a strategy's openings and the 
 from the MJCF, not from a table.
 
 All poses are in the arm's BASE frame, not the scene's world frame: a camera calibrated relative to the
-base stays correct wherever the arm stands.
+base stays correct wherever the arm stands. Cameras on the arm (`RobotSpec.cameras`) come out in the same
+frame through `camera`, in OpenCV axes, and the jaws' collision primitives through `collision_points`.
 """
 
 from __future__ import annotations
@@ -219,6 +220,50 @@ class RobotKinematics:
         i = self.model.site(self.prefix + name).id
         d = self.data
         return self._base_inv() @ pose(d.site_xmat[i].reshape(3, 3), d.site_xpos[i])
+
+    def camera(self, name: str, joints: Mapping[str, float]) -> np.ndarray:
+        """The pose of a camera of `spec.cameras` in the base frame (4x4), in OpenCV axes (z forward, y down,
+        x right): the pose of the body it rides on times its `pose` (T_cam2body).
+
+        No model camera is read, so a strategy needs no `mj_camlight`.
+        """
+        cam = self.spec.cameras.get(name)
+        if cam is None:
+            known = ", ".join(self.spec.cameras) or "none"
+            raise ValueError(f"{self.spec.name}: no camera {name!r} in the robot description "
+                             f"(cameras: {known})")
+        return self.body(cam.body, joints) @ np.asarray(cam.pose, float)
+
+    def collision_points(self, body: str, joints: Mapping[str, float]) -> np.ndarray:
+        """The extreme points of the collision primitives of `body` in the base frame, (N, 3).
+
+        A box gives its 8 corners, a sphere its centre +- radius along the three axes, a capsule +- (half
+        length + radius) along its z and +- radius along x and y; mesh geoms give nothing (their hulls are
+        not read). (0, 3) for a body without primitives. Collision means contype or conaffinity non-zero.
+        For the jaw mask of `grasp_wrist`. A wrong body name raises MuJoCo's KeyError.
+        """
+        self._apply(self.to_q(joints))
+        m, d = self.model, self.data
+        i = m.body(self.prefix + body).id
+        Bi = self._base_inv()
+        out = []
+        for g in np.flatnonzero(m.geom_bodyid == i):
+            if not (m.geom_contype[g] or m.geom_conaffinity[g]):
+                continue
+            size, kind = m.geom_size[g], int(m.geom_type[g])
+            if kind == mujoco.mjtGeom.mjGEOM_BOX:
+                local = np.array([[x, y, z] for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)]) * size
+            elif kind == mujoco.mjtGeom.mjGEOM_SPHERE:
+                local = np.vstack([np.eye(3), -np.eye(3)]) * size[0]
+            elif kind == mujoco.mjtGeom.mjGEOM_CAPSULE:
+                r, half = float(size[0]), float(size[1])
+                local = np.array([[r, 0, 0], [-r, 0, 0], [0, r, 0], [0, -r, 0], [0, 0, half + r],
+                                  [0, 0, -half - r]], float)
+            else:
+                continue                                       # meshes and the rest: not read
+            world = local @ d.geom_xmat[g].reshape(3, 3).T + d.geom_xpos[g]
+            out.append(world @ Bi[:3, :3].T + Bi[:3, 3])
+        return np.vstack(out) if out else np.zeros((0, 3))
 
     def tool_axes(self, joints: Mapping[str, float]) -> tuple[np.ndarray, np.ndarray]:
         """(approach direction, jaw closing axis) in the base frame."""

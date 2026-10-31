@@ -2,8 +2,8 @@
 
 `robot.yaml` follows the twin's robot schema. The lab reads only the fields its kinematics, tasks and
 strategy use, with the schema's names, types and defaults. Keys it does not use (panel labels,
-connections, staged home, onboard cameras) are skipped, so a new field in `robot.yaml` does not break
-the lab. The fields it reads are built strictly by `soarm.settings.from_mapping`.
+connections, staged home) are skipped, so a new field in `robot.yaml` does not break the lab. The fields
+it reads are built strictly by `soarm.settings.from_mapping`, the cameras on the arm included.
 
 App units are LeRobot's: joints in degrees, the gripper 0..100. `kinematics.RobotKinematics` maps
 the gripper linearly onto `RobotSpec.gripper_range_q` (closed, open) in MJCF units.
@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 
+import numpy as np
 import yaml
 
 from soarm import ROBOT_DIR
@@ -58,6 +59,30 @@ class Desk:
     map_side: float = 0.56
 
 
+Row4 = tuple[float, float, float, float]
+Matrix4 = tuple[Row4, Row4, Row4, Row4]
+
+
+@dataclass(frozen=True)
+class RobotCamera:
+    """A camera riding on a body of the arm, e.g. a wrist camera, as the twin's schema has it.
+
+    An ideal pinhole: square pixels and the principal point at the image centre, so `fovy_deg` (the vertical
+    field of view) and the size say everything about the image. The twin renders it from the arm's pose;
+    with a real arm it serves the workspace camera of the same name.
+    """
+
+    #: MJCF body the camera is fixed to.
+    body: str
+    #: T_cam2body, 4x4, in OpenCV camera axes: z forward, y down, x right.
+    pose: Matrix4
+    #: The vertical field of view [deg].
+    fovy_deg: float
+    #: The rendered image's size [px].
+    width: int
+    height: int
+
+
 @dataclass(frozen=True)
 class RobotSpec:
     """The part of the robot description the lab uses."""
@@ -91,6 +116,9 @@ class RobotSpec:
     wave_ranges: dict[str, tuple[float, float]] = field(default_factory=dict)
     #: Bodies of both jaws (fixed, moving): grip contact sensors of the RL tasks.
     jaw_bodies: tuple[str, str] = ("", "")
+    #: Cameras riding on bodies of the arm, by name (`robot.yaml` `cameras:`); what a strategy sees from the
+    #: arm.
+    cameras: dict[str, RobotCamera] = field(default_factory=dict)
     #: Joint limits [app units]: tighter than the mechanical ones in the MJCF.
     limits: dict[str, tuple[float, float]] = field(default_factory=dict)
     #: Highest commanded speed [app units / s].
@@ -155,5 +183,40 @@ def _check(spec: RobotSpec, path: Path) -> None:
             problems.append(f"`{table}` wymienia stawy spoza `joints`: {sorted(names - joints)}")
     if not spec.mjcf_path.is_file():
         problems.append(f"nie ma pliku modelu {spec.mjcf_path}")
+    problems.extend(_camera_problems(spec))
     if problems:
         raise ValueError(f"{path}:\n  " + "\n  ".join(problems))
+
+
+def _camera_problems(spec: RobotSpec) -> list[str]:
+    """What is wrong with the cameras on the arm, with the twin's texts. Whether each camera's body exists
+    is checked by the kinematics when the camera is used."""
+    problems = []
+    for name, camera in spec.cameras.items():
+        where = f"`cameras.{name}`"
+        if not _is_rigid(camera.pose):
+            problems.append(f"{where}: `pose` musi byc przeksztalceniem sztywnym "
+                            "(obrot, przesuniecie, ostatni wiersz 0 0 0 1)")
+        if not 0.0 < camera.fovy_deg < 180.0:
+            problems.append(f"{where}: `fovy_deg` musi lezec miedzy 0 a 180")
+        if not _is_size(camera.width) or not _is_size(camera.height):
+            problems.append(f"{where}: `width` i `height` musza byc dodatnimi liczbami calkowitymi")
+    return problems
+
+
+def _is_rigid(pose: object) -> bool:
+    try:
+        T = np.asarray(pose, float)
+    except (TypeError, ValueError):
+        return False
+    if T.shape != (4, 4) or not np.all(np.isfinite(T)):
+        return False
+    R = T[:3, :3]
+    orthonormal = np.allclose(R @ R.T, np.eye(3), atol=1e-6)
+    right_handed = bool(np.isclose(np.linalg.det(R), 1.0, atol=1e-6))
+    return bool(orthonormal and right_handed and np.array_equal(T[3], [0.0, 0.0, 0.0, 1.0]))
+
+
+def _is_size(value: object) -> bool:
+    # YAML `true` is a bool, and a bool is an int in Python.
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
