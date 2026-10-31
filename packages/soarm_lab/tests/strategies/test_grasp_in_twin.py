@@ -95,15 +95,17 @@ def drive(twin: Twin, runner: StrategyRunner, seconds: float, clock: Clock,
             break
 
 
-def add_block(twin: Twin, kind: str, xy: tuple[float, float] = BLOCK_XY, yaw_deg: float = 0.0) -> None:
+def add_block(twin: Twin, kind: str, xy: tuple[float, float] = BLOCK_XY, yaw_deg: float = 0.0,
+              stiff: bool = True) -> None:
     """The block `kind` on the table with contact sensors against both jaws, then the simulated arm; the
     block turned by `yaw_deg` about the vertical.
 
-    The block's contacts are made as stiff as the 5 ms step allows (`STIFF_SOLREF`, `STIFF_SOLIMP`, the
-    gripper's priority, so they govern the block against the table and the jaws). Wood on a table does
-    not give, but at the twin's default contact the arm's stall torque pressed the 11 g cube 9 mm into the
-    table and the probe reached its bottom without ever stalling. Stiffened, the cube sinks and gives under
-    the sole by about 2.5 mm together, and under the jaws by about 1 mm each.
+    With `stiff` the block's contacts are made as stiff as the 5 ms step allows (`STIFF_SOLREF`,
+    `STIFF_SOLIMP`, the gripper's priority, so they govern the block against the table and the jaws). Wood
+    on a table does not give, but at the twin's default contact, which is what the panel's simulated block
+    gets (`scene.Box` has no contact settings), the arm's push sinks the 11 g cube 8 mm into the table and
+    the probe reaches its bottom without ever stalling. Stiffened, the cube sinks and gives under the sole
+    by about 2.5 mm together, and under the jaws by about 1 mm each.
     """
     spec = object_spec(kind)
     twin.configure(objects=[twin_scene.Box(kind, spec.half_size, xy, rgba=COLOURS[kind], mass=spec.mass)],
@@ -111,10 +113,11 @@ def add_block(twin: Twin, kind: str, xy: tuple[float, float] = BLOCK_XY, yaw_deg
     twin.connect("sim", threaded=False)
     with twin.lock:
         model, data = twin.scene.model, twin.scene.data
-        g = model.geom(kind).id
-        model.geom_solref[g] = STIFF_SOLREF
-        model.geom_solimp[g][:2] = STIFF_SOLIMP
-        model.geom_priority[g] = 1
+        if stiff:
+            g = model.geom(kind).id
+            model.geom_solref[g] = STIFF_SOLREF
+            model.geom_solimp[g][:2] = STIFF_SOLIMP
+            model.geom_priority[g] = 1
         if yaw_deg:
             yaw = math.radians(yaw_deg)
             adr = model.jnt_qposadr[model.body_jntadr[model.body(kind).id]]
@@ -285,6 +288,40 @@ def test_grasp_lifts_the_cube_and_the_twin_says_w_dloni(twin):
     assert {s for t, s, _ in sources if t >= in_hand[0]} == {"w dloni"}
     assert all(age == 0.0 for _, s, age in sources if s == "w dloni")
     assert twin.owner is None
+
+
+@pytest.mark.parametrize("need_contact", [True, False], ids=["need_contact", "need_contact off"])
+def test_at_the_twins_default_contact_the_probe_misses_and_need_contact_off_lifts_the_cube(twin,
+                                                                                          need_contact: bool):
+    """The block as the panel's simulation builds it today. The arm's push sinks the cube into the table
+    instead of stalling, so the run ends as a miss; with `need_contact` off the probe's bottom counts, the
+    grasp height comes from the block's nominal top, and the cube is lifted. When the twin's blocks get a
+    contact of their own, the miss turns into a lift and the README's note on the panel goes."""
+    add_block(twin, "cube", stiff=False)
+    clock = Clock()
+    strategy = load_strategy(NAME).create({"need_contact": need_contact})
+    assert isinstance(strategy, GraspStrategy)
+    runner = StrategyRunner(twin, strategy, objects=tracked(twin, "cube", clock, []))
+    phases: list[str] = []
+    lowest: list[float] = [1.0]
+
+    def watch() -> None:
+        lowest[0] = min(lowest[0], float(truth(twin, "cube")[0][2]))
+
+    runner.start(threaded=False)
+    drive(twin, runner, 60.0, clock, until=phases_of(strategy, phases), watch=watch)
+
+    # The cube's centre lies 12.5 mm above the table at rest; the probe pressed it 8 mm lower.
+    assert lowest[0] < 0.0125 - 0.006
+    if need_contact:
+        assert runner.status.stopped_because == "strategia skonczyla" and not runner.status.success
+        assert strategy.status.stopped_because == "brak kontaktu w punkcie dotyku - obiektu tam nie ma"
+        assert "rise" not in phases
+    else:
+        assert runner.status.stopped_because == "zadanie wykonane", (strategy.status, strategy.grasp)
+        assert strategy.grasp.top_m == pytest.approx(0.025, abs=1e-9)
+        assert truth(twin, "cube")[0][2] > 0.04
+        assert all(c > 0.5 for c in contact(twin, "cube"))
 
 
 @pytest.mark.parametrize("sign", [-1, 1], ids=["moving tip lands", "fixed tip lands"])
