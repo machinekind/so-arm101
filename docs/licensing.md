@@ -30,10 +30,10 @@ presence in that file does not mean a package is part of every installation.
 | `soarm-lab` | `soarm` and `machinekind-twin-api`: Apache-2.0; NumPy: BSD-3-Clause; PyYAML: MIT; MuJoCo: Apache-2.0; Gymnasium: MIT. |
 | `soarm-lab[train]` | MuJoCo Warp, JAX and optax: Apache-2.0; includes Warp and JAX's own dependencies. On Linux it installs JAX's CUDA 12 build, which pulls in NVIDIA CUDA libraries. |
 | `soarm-lab[torch]` | PyTorch: BSD-3-Clause; platform-specific binary dependencies have additional terms. |
-| Workspace `twin` group | `machinekind-twin` and its example cube detector `machinekind-twin-cube`: Apache-2.0; adds NumPy, PyYAML, OpenCV contrib, and the API package. |
+| Workspace `twin` group | `machinekind-twin`, its example cube detector `machinekind-twin-cube` and its LLM detector `machinekind-twin-llm`: Apache-2.0; adds NumPy, PyYAML, OpenCV contrib, and the API package. The LLM detector calls a locally installed claude or codex CLI, which is not part of the installation. |
 
-The API, the twin application and the example cube detector all declare Apache-2.0 at the
-[pinned twin revision](https://github.com/machinekind/twin/tree/44ab7e33c1482f8804b8037ee53bb7ada8d6b86c).
+The API, the twin application, the example cube detector and the LLM detector all declare Apache-2.0 at the
+[pinned twin revision](https://github.com/machinekind/twin/tree/fb3838f9ab72d6a2bb9cc34d2fdbb113580a4afc).
 The API package includes the license text. The workspace fetches it from this
 public Git repository; it is not currently published on PyPI. Follow the
 [workspace installation instructions](../README.md#get-started) to use that source.

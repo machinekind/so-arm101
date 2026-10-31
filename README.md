@@ -10,7 +10,10 @@ The repository is a [uv](https://docs.astral.sh/uv/) workspace with two Python p
 - **[soarm](packages/soarm/README.md)** provides the robot model, Feetech and LeRobot
   hardware backends, a browser control panel and a serial-to-TCP bridge.
 - **[soarm-lab](packages/soarm_lab/README.md)** provides simulation environments,
-  PPO training, policy evaluation, bundled reach and lift policies, and inverse kinematics.
+  PPO training, policy evaluation, bundled reach and lift policies, inverse kinematics,
+  a strategy that touches an object the twin's perception located, a variant in which
+  TypeSafe's Jev decision model judges each touch and aims again after a miss, and a strategy
+  that picks a Classic World block up after that touch.
 
 Both integrate with the [Machinekind digital twin](https://github.com/machinekind/twin)
 as plugins. The twin measures the physical setup and runs policies and inverse

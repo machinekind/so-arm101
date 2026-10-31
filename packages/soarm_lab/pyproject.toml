@@ -47,6 +47,9 @@ dream = [
 policy = "soarm_lab.strategies.policy:PolicyStrategy"
 ik = "soarm_lab.strategies.ik:IKStrategy"
 dream = "soarm_lab.strategies.dream:DreamStrategy"
+touch = "soarm_lab.strategies.touch:TouchStrategy"
+touch_jev = "soarm_lab.strategies.touch_jev:JevTouchStrategy"
+grasp = "soarm_lab.strategies.grasp:GraspStrategy"
 
 [project.scripts]
 soarm-lab = "soarm_lab.cli:main"

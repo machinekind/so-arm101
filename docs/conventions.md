@@ -111,7 +111,12 @@ The plugin contracts are the package `machinekind-twin-api` (see the root README
   Every strategy here subclasses `Strategy[ItsSettings]`, and `uv run pyright` checks it against the contract.
   `soarm_lab.strategies.policy.PolicyStrategy` takes `RunInfo` and `Observation` and returns an `Action`.
   `soarm_lab.strategies.ik.IKStrategy` does the same.
+  `soarm_lab.strategies.touch.TouchStrategy` does the same and reads `Observation.objects`.
+  `soarm_lab.strategies.touch_jev.JevTouchStrategy` subclasses it and asks a judge (`soarm_lab.strategies.judges.Judge`) after each descent.
+  It asks on a thread of its own and never waits in `act`. Its Jev client uses the standard library's `urllib` and reads `TYPESAFE_API_KEY` in `start`.
+  Its decision records have the five fields of the api 0.1.3 `Decision`, and go to `Action.decisions` once the pin reaches that version.
+  `soarm_lab.strategies.grasp.GraspStrategy` subclasses `TouchStrategy` too: after the probe it opens, straddles, closes and lifts, and verifies the hold with `soarm_lab.strategies.jaw.JawMonitor`, the jaw rule the twin's tracker shares.
 - `packages/soarm_lab/pyproject.toml` registers these strategies under `machinekind_twin.strategies` (`STRATEGIES`)
-  as `policy`, `ik` and `dream`. `soarm_lab.strategies.dream.DreamStrategy` imports the Dream client only in `start`.
+  as `policy`, `ik`, `touch`, `touch_jev`, `grasp` and `dream`. `soarm_lab.strategies.dream.DreamStrategy` imports the Dream client only in `start`.
 - The station export is `Workspace.export` in the twin (`twin export`). `soarm_lab.station.Station` reads it.
   `soarm_lab.robot.RobotSpec` reads only the `robot.yaml` fields the lab uses and skips the others.
