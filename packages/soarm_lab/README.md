@@ -111,7 +111,8 @@ With this package installed alongside the twin, its Strategies tab offers:
   whether the gripper touched the object and where to aim after a miss; see
   [Jev in the touch loop](#jev-in-the-touch-loop).
 - `grasp`: `touch`'s probe on a block of the Classic World set, then rise, open, straddle, close and
-  lift; the jaw rule verifies the hold; see [Grasp a block](#grasp-a-block).
+  lift; the jaw rule verifies the hold, and the strategy grasps the block again when it drops out of
+  the jaws; see [Grasp a block](#grasp-a-block).
 - `dream`: runs Dream Labs' Dream-1 model from a prompt and the cameras; see [Dream Labs](#dream-labs).
 
 All send joint targets through the twin's safety supervisor. Read the
@@ -142,6 +143,9 @@ grasp:
   squeeze_m: 0.008
   grasp_depth: 0.5
   lift_m: 0.04
+  carry_s: 10.0
+  wait_s: 20.0
+  time_limit_s: 120.0
 ```
 
 Goals use metres in the robot's base frame. Enable the panel's 3D goal handle
@@ -253,6 +257,8 @@ its 60 s limit, because the CLI answers in seconds where Jev answers in about 0.
 3. It goes straight down until the tips' centres are `grasp_depth` of the block's height below its top.
 4. It closes the jaw to the short side minus `squeeze_m` (17 mm) and waits until the jaw stands.
 5. When the jaw holds, it lifts `lift_m` straight up and checks the hold for `hold_s`.
+6. It carries the block there for `carry_s` (10 s) while it watches the jaw, then ends with the block
+   held, or with `release: true` opens the jaw.
 
 Every number comes from the block and the model, not from a table. `rl.objects.object_spec` gives the
 block's size. `RobotKinematics.jaw_gap` turns an opening in metres into a gripper command,
@@ -263,8 +269,8 @@ height at the stall minus the reach is the block's measured top, and the grasp h
 
 The jaw rule (`strategies/jaw.py`) decides whether the jaw holds the block: it stands still, wider than
 commanded and wider than closed by more than `jaw.margin`. A jaw that has not started closing also
-looks like that, so the close counts only after the jaw has left its opening. On the way up and at the
-top the jaw must keep squeezing and must not creep closed. The twin's tracker uses the same thresholds,
+looks like that, so the close counts only after the jaw has left its opening. From then on the jaw is
+watched on every tick (see [Recovery](#recovery)). The twin's tracker uses the same thresholds,
 so it reports the block "w dloni" on the tick the strategy counts it held. The SO-101 closes only one
 jaw: the moving jaw pushes the block `open_margin_m` across the table onto the fixed jaw's tip.
 
@@ -287,7 +293,7 @@ pushed the block away or it sits at the jaws' edge.
 
 | How the run ends | Stop reason |
 | --- | --- |
-| the jaw holds for `hold_s` at the top | blok w szczekach, podniesiony o N mm (szczeka G mm) |
+| the jaw holds for `hold_s` at the top and through `carry_s` | blok w szczekach, podniesiony o N mm, niesiony T s (szczeka G mm) |
 | no top-down hand at the block | punkt (...) m: chwytak nie siega tam pionowo, ... poza zasiegiem ramienia, ...: chwytak nie ustawi sie pionowo (blad N st.), ...: ramie uderzyloby samo w siebie |
 | the probe misses, is blocked or stuck | touch's reasons, such as brak kontaktu w punkcie dotyku - obiektu tam nie ma |
 | tip stalls or misses beyond `max_attempts` | wyczerpane proby chwytu (N): ... |
@@ -298,15 +304,16 @@ pushed the block away or it sits at the jaws' edge.
 | the jaw does not stand after the close | szczeka nie staje 3 s po zamknieciu - serwo albo odczyt |
 | the jaw closes on nothing | chwyt pusty - blok przesuniety albo obok szczek |
 | the arm does not reach the lift point 3 s after the lift's travel | ramie nie podnioslo bloku (N mm z 40 mm) |
-| the jaw stops squeezing on the way up or at the top | blok wypadl ze szczeki podczas podnoszenia |
-| the jaw creeps closed | blok zsuwa sie w szczekach |
 | the jaw does not stand at the top | szczeka nie stoi po podniesieniu - blok sie rusza w szczekach |
+| the block drops out of the jaws | see [Recovery](#recovery) |
 
 The lag guard, the time limit (`time_limit_s`, 120 s) and the panel's Stop end a run as in `touch`.
 
 The block stays in the jaws after "zadanie wykonane". The last target squeezes, the twin's runner sends
 the final tick's target before it disengages, and disengaging keeps the supervisor's command. A later
-STOP or Home keeps the squeeze through the twin's `hold_measured`. The operator releases the block.
+STOP or Home keeps the squeeze through the twin's `hold_measured`. The operator releases the block. With
+`release: true` the strategy opens the jaw to the straddle opening after `carry_s` instead and ends with
+"blok oddany" once the jaw stands open; a block nobody takes falls to the table.
 
 A run on the twin panel's simulated block currently ends with "brak kontaktu w punkcie dotyku - obiektu
 tam nie ma". The twin builds the block with MuJoCo's default contact, because its `scene.Box` has no
@@ -320,10 +327,74 @@ make the block's contact as stiff as the 5 ms step allows. The cube then still g
 the probe, so the measured top is that much low. The real pads' sole and the real jaw's opening per unit
 are not measured yet; `touch_z` above zero overrides the probe height.
 
-Later steps of the [grasp plan](../../docs/grasp-plan.md) plug in through these methods: the recovery
-loop through `carrying` and `after_grasp_failed`, wrist-camera centring through `before_descent` and
-`before_straddle`, a Jev judge through `after_touch` and `after_miss`, and the grasp library through
-`grasp_headings`.
+### Recovery
+
+From the close until the release or the end of the run, every tick of the lift, the check and the carry
+compares the jaw rule with the block's pose in `obs.objects`, as step 6 of the
+[grasp plan](../../docs/grasp-plan.md) has it:
+
+| Jaw rule | The block's pose | Meaning | Action |
+| --- | --- | --- | --- |
+| squeezing | any, "w dloni" as a rule | held | carry on |
+| squeezing | "kamery" on the table, more than 6 cm from the fingertips | a second block or a tracker error | carry on; the carry's note says so |
+| squeezing, creeping closed | any | the block turns or slides in the jaws | the check's hold starts again; counted while carrying |
+| empty on two ticks in a row | any | dropped | rise to the safe height and open the jaw |
+| (jaw open) | seen on the table since the drop, within `recover_m` | dropped where the cameras see it | grasp it again there |
+| (jaw open) | seen farther than `recover_m` from where it fell | taken away | stop for a person |
+| (jaw open) | not seen since the drop for `wait_s` | taken away, or the cameras cannot tell | stop for a person |
+
+A sighting is a plain "kamery" or "ostatnie widziane" pose no older than `max_pose_age_s`, lying at rest
+height (the block's largest half size plus 1 cm) and captured 0.3 s or more after the drop. The LLM
+detector's answers arrive seconds old and the twin shows them as "ostatnie widziane", so on that path the
+plain last-seen pose is the sighting. Annotated poses never count: "ostatnie widziane (upuszczona)" is the
+tracker's guess under the hand, and "(1 kamera widzi ja gdzie indziej)" keeps the old position. Neither
+does "w dloni", nor a pose captured before the drop. In simulation the scene's own pose counts when it
+lies at rest height.
+
+After a drop the arm rises straight up to the probe's hover height, the safe height, or stays where it is
+when that is higher, and opens the jaw to 0.50 rad (55 mm between the tips). The twin's tracker accepts a
+single camera's detection next to a standing hand only when three detections within 1.5 s agree and the
+measured jaw stands wider than its `open` threshold, 0.40 rad, without squeezing. The opened jaw passes
+that gate, and a block still hanging in the tips falls where the cameras see it. The seeded detector
+(every 0.2 s) and the cube detector (every 0.1 to 0.33 s) settle within a second. The LLM detector alone
+answers every 10 s, so three answers never fall within 1.5 s: with one camera it never gets a sighting
+next to the hand, and the run stops after `wait_s`. Recovery on that path needs a second camera or the
+seeded detector.
+
+The regrasp goes through `retarget`. The jaw closes at the hover before the probe, the probe measures the
+block's top again, and the grasp repeats. Its descent counts against `max_attempts` together with the
+sideways retries, so a demonstration with two snatches needs `max_attempts` of 4 or more. A snatch is not
+a miss: a block seen farther than `recover_m` (15 cm) from where it fell is never chased. A regrasp whose
+probe meets nothing ends as `touch` does.
+
+| How a run ends after a drop or a release | Stop reason |
+| --- | --- |
+| seen farther than `recover_m` from where it fell | blok zabrany: lezy N cm od miejsca upadku - czekam na czlowieka |
+| nothing seen for `wait_s`; the cube and seeded detectors drop the pose 6 s after the drop | blok zabrany ze szczeki: kamery go nie widza od N s - czekam na czlowieka |
+| the LLM detector alone: its pose lowered under the hand is held 30 s or more | blok zabrany ze szczeki: zrodlo 'ostatnie widziane (upuszczona)' od N s - czekam na czlowieka |
+| a pose above the table, as in a person's hand | blok zabrany ze szczeki: zrodlo 'kamery', N cm nad blatem od N s - czekam na czlowieka |
+| only a pose captured before the drop | blok zabrany ze szczeki: zrodlo 'ostatnie widziane' sprzed upadku od N s - czekam na czlowieka |
+| the block lies out of reach | blok upadl poza zasiegiem: punkt (...) m poza zasiegiem ramienia - czekam na czlowieka |
+| `max_attempts` spent | wyczerpane proby chwytu (N): blok wypadl ze szczeki |
+| the jaw has not closed at the hover | szczeka nie zamknela sie przed zejsciem w 3 s |
+| `release: true`, the jaw opened | blok oddany: szczeka otwarta (G mm) |
+| `release: true`, the jaw did not open | szczeka nie otworzyla sie po oddaniu bloku w 3 s (G mm zamiast O mm) |
+
+A run that stops for a person leaves the arm at the safe height with the jaw open: the twin's runner
+sends the last target and disengages, and the supervisor holds that command.
+
+`carry_s` (10 s) is the window in which a demonstrator can knock the block out or take it; 0 ends the run
+at the verified lift. `wait_s` (20 s) covers two LLM answers when two cameras see the block. The default
+`time_limit_s` (120 s) fits a grasp of about 10 s, its carry, one drop with its wait, a regrasp and a
+second carry, about 65 s in all. `release()` is the seam a place task or the Jev step calls to end the
+watch and open the jaw; it returns the tick's answer, so a `carrying` override can return it.
+test_grasp_from_cameras.py pulls the cube out of the jaws mid-carry in the twin, the cube seen only by
+two simulated cameras, and the strategy grasps it again where it lies.
+
+Later steps of the [grasp plan](../../docs/grasp-plan.md) plug in through these methods: wrist-camera
+centring through `before_descent` and `before_straddle`, a Jev judge through `after_touch`, `after_miss`
+and `after_grasp_failed`, a place task or the Jev step through `carrying` and `release()`, and the grasp
+library through `grasp_headings`.
 
 ## Dream Labs
 

@@ -116,6 +116,7 @@ The plugin contracts are the package `machinekind-twin-api` (see the root README
   It asks on a thread of its own and never waits in `act`. Its Jev client uses the standard library's `urllib` and reads `TYPESAFE_API_KEY` in `start`.
   Its decision records have the five fields of the api 0.1.3 `Decision`, and go to `Action.decisions` once the pin reaches that version.
   `soarm_lab.strategies.grasp.GraspStrategy` subclasses `TouchStrategy` too: after the probe it opens, straddles, closes and lifts, and verifies the hold with `soarm_lab.strategies.jaw.JawMonitor`, the jaw rule the twin's tracker shares.
+  While it carries the block it reconciles the jaw rule with `Observation.objects` every tick and grasps a dropped block again through `retarget`; `release()` ends that watch.
 - `packages/soarm_lab/pyproject.toml` registers these strategies under `machinekind_twin.strategies` (`STRATEGIES`)
   as `policy`, `ik`, `touch`, `touch_jev`, `grasp` and `dream`. `soarm_lab.strategies.dream.DreamStrategy` imports the Dream client only in `start`.
 - The station export is `Workspace.export` in the twin (`twin export`). `soarm_lab.station.Station` reads it.
