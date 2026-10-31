@@ -146,6 +146,22 @@ def test_the_jaw_reaches_below_the_tcp_by_the_fixed_jaws_sole(station):
         RobotKinematics(dataclasses.replace(spec, jaw_bodies=("", ""))).jaw_reach(0.0)
 
 
+def test_tip_swing_grows_as_the_hinged_jaw_opens(station):
+    """The moving tip rides an arc about the hinge: wide open it trails the fixed tip along the approach."""
+    kin = RobotKinematics(station.spec())
+    swing = {g: kin.tip_swing(g) for g in (0.0, 42.0, 75.0, 100.0)}
+
+    assert all(value >= 0.0 for value in swing.values())
+    assert swing[42.0] < 0.001
+    assert swing[75.0] == pytest.approx(0.0099, abs=0.001)
+    assert swing[100.0] == pytest.approx(0.0227, abs=0.001)
+    assert swing[0.0] == pytest.approx(0.0011, abs=3e-4)
+    # The fixed tip is the deeper one wide open.
+    fixed, moving = kin.fingertips(dict(station.spec().home, gripper=100.0))
+    approach, _ = kin.tool_axes(dict(station.spec().home, gripper=100.0))
+    assert float(approach @ (fixed - moving)) == pytest.approx(swing[100.0], abs=1e-9)
+
+
 def test_turn_toward_caps_the_angle_on_the_shortest_way():
     def about_z(deg: float) -> np.ndarray:
         c, s = np.cos(np.radians(deg)), np.sin(np.radians(deg))

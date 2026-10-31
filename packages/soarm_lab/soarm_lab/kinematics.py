@@ -16,9 +16,9 @@ from galaxeo-manipulators, with two changes:
   over most of the A1X workspace. IK starts from the given pose, from the rest pose and from a few random
   ones, and keeps the best.
 
-The jaw helpers (`jaw_gap`, `gripper_for_gap`, `jaw_centre`, `jaw_reach`) read the fingertip geoms and the
-jaw bodies' collision geoms of the same model, so a strategy's openings and the probe's contact height come
-from the MJCF, not from a table.
+The jaw helpers (`jaw_gap`, `gripper_for_gap`, `tip_swing`, `jaw_centre`, `jaw_reach`) read the fingertip
+geoms and the jaw bodies' collision geoms of the same model, so a strategy's openings and the probe's contact
+height come from the MJCF, not from a table.
 
 All poses are in the arm's BASE frame, not the scene's world frame: a camera calibrated relative to the
 base stays correct wherever the arm stands. Cameras on the arm (`RobotSpec.cameras`) come out in the same
@@ -316,6 +316,20 @@ class RobotKinematics:
             else:
                 hi = mid
         return 0.5 * (lo + hi)
+
+    def tip_swing(self, gripper: float) -> float:
+        """How far the shallower fingertip sits behind the deeper one along the approach, the gripper at
+        `gripper` [m]: the fingertip centres in the TCP frame, their difference along `spec.tcp_approach`.
+
+        The hinged jaw swings its tip back along the approach as it opens: on the SO-101 0.1 mm at command
+        42, 9.9 mm at 75, 22.7 mm at 100 (1.1 mm at 0). A grasp whose fingertips' midpoint goes in shallow
+        must keep the shallower tip below the block's top (`grasp.MIN_BITE_M`).
+        """
+        joints = self._jaw_pose(gripper)
+        fixed, moving = self.fingertips(joints)
+        Ti = inverse(self.tcp(joints))
+        a = self._approach / np.linalg.norm(self._approach)
+        return abs(float(a @ (Ti[:3, :3] @ (fixed - moving))))
 
     def jaw_centre(self, gripper: float) -> np.ndarray:
         """The fingertips' midpoint in the TCP (site) frame with the gripper at `gripper` [m].
