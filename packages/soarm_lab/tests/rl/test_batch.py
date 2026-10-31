@@ -138,6 +138,22 @@ def test_a_reset_observes_the_joints_it_wrote(station):
     np.testing.assert_allclose(np.asarray(obs[:, na:2 * na]), joints_in_physics(), atol=1e-6)   # q_cmd = q0
 
 
+def test_the_cpu_device_perceives_the_biased_delayed_pose(station):
+    """The perception additions in the batch: each world's own offset, the least delay, the latch."""
+    rand = replace(Randomization.none(), pose_bias_m=0.03, cube_min_delay=2, cube_delay=2, latch_m=0.05)
+    env = BatchEnv("lift", num_envs=4, station=station, randomization=rand, device="cpu")
+    obs = env.reset()
+    bias = np.asarray(env.s["bias"])
+    assert bias.shape == (4, 2)
+    assert (np.linalg.norm(bias, axis=1) > 1e-4).all() and (np.linalg.norm(bias, axis=1) <= 0.03 + 1e-6).all()
+    assert (np.asarray(env.s["cube_d"]) == 2).all()
+    true = (env.d.xpos.numpy()[:, env.cube_body] - env.t_b) @ env.R_b
+    np.testing.assert_allclose(np.asarray(obs[:, 15:17]), true[:, :2] + bias, atol=1e-5)
+    np.testing.assert_allclose(np.asarray(obs[:, 17]), true[:, 2], atol=1e-5)
+    obs, rew, done, info = random_steps(env, 20)
+    assert jnp.isfinite(obs).all() and jnp.isfinite(rew).all() and not info["broken"].any()
+
+
 @pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=gpu)])
 @pytest.mark.parametrize("task", ["reach", "lift"])
 def test_one_world_follows_cpu_mujoco(task, device, station):

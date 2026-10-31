@@ -366,6 +366,31 @@ def fold_yaw(xp, R, period=np.pi / 2):
     return xp.stack(rows, -2)
 
 
+# ------------------------------------------------------------ perception
+def perceived(xp, pos, rot, bias, noise, fold: bool, period: float):
+    """The object's pose as the cameras report it: (position (N, 3), rotation (N, 3, 3)).
+
+    `pos`, `rot`: the true pose the caller took from its history (already delayed). `bias` (N, 2): this
+    episode's constant xy offset [m] (`Randomization.pose_bias_m`); `noise` (N, 2): this refresh's xy
+    noise [m]. z stays the truth. With `fold` the rotation is folded by the yaw symmetry `period`
+    (`fold_yaw`). With zero bias and noise the position is the true one bit for bit: adding 0.0 is
+    exact, and `(xy + 0.0) + noise` is `xy + noise`.
+    """
+    xy = pos[..., :2] + bias + noise
+    return _cat(xp, [xy, pos[..., 2:]]), (fold_yaw(xp, rot, period) if fold else rot)
+
+
+def occluded(xp, tcp, cube_pos, latch_m: float):
+    """(N,) whether the hand covers the object: the true TCP nearer its centre than `latch_m` [m].
+
+    The seen pose does not refresh then (`Randomization.latch_m`); it refreshes again as soon as the
+    TCP is farther (a failed grasp, a drop). Always False for `latch_m <= 0`.
+    """
+    if latch_m <= 0:
+        return xp.zeros(tcp.shape[:-1], dtype=bool)
+    return _norm(tcp - cube_pos) < latch_m
+
+
 # ---------------------------------------------------------------- reward
 def limit_cost(xp, task: TaskConfig, limits: Limits, q_cmd):
     """(N,) penalty for arm joint targets closer to a limit than `limit_margin` (0 mid-range)."""

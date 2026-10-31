@@ -189,6 +189,74 @@ def test_the_block_randomizes_on_every_part_and_folds_its_own_symmetry():
         env.close()
 
 
+#: A cube lying on the table in front of the arm, its quaternion (w, x, y, z): no turn.
+CUBE = np.array([0.2, 0.0, 0.015])
+UPRIGHT = np.array([1.0, 0.0, 0.0, 0.0])
+
+
+def test_the_pose_bias_is_constant_within_an_episode():
+    """The seen xy is the truth plus one offset per episode, of up to `pose_bias_m`; z is the truth."""
+    env = ArmEnv("lift", randomization=replace(Randomization.none(), pose_bias_m=0.03))
+    try:
+        obs, _ = env.reset(seed=1)
+        s = env.state()
+        off = obs[15:17] - s["cube_pos"][:2]
+        assert 1e-4 < np.linalg.norm(off) <= 0.03 + 1e-6
+        assert obs[17] == pytest.approx(s["cube_pos"][2], abs=1e-6)
+        for _ in range(10):
+            obs, _, _, _, info = env.step(np.zeros(env.task.act_dim))
+        np.testing.assert_allclose(obs[15:17] - env.state()["cube_pos"][:2], off, atol=1e-6)
+        assert abs(info["height"]) < 1e-3                                  # the reward's height: the truth
+        obs, _ = env.reset(seed=2)
+        assert np.linalg.norm(obs[15:17] - env.state()["cube_pos"][:2] - off) > 1e-4    # a new offset
+    finally:
+        env.close()
+
+
+def test_the_pose_delay_is_at_least_the_minimum():
+    """With `cube_min_delay = cube_delay = 3` the policy sees where the cube was exactly 3 ticks ago."""
+    env = ArmEnv("lift", randomization=replace(Randomization.none(), cube_min_delay=3, cube_delay=3))
+    try:
+        env.reset(seed=0, options={"q": env.limits.home, "cube": (CUBE, UPRIGHT)})
+        assert env._cube_delay == 3
+        for k in range(1, 7):
+            env.set_cube(CUBE + [0.01 * k, 0.0, 0.0], UPRIGHT)
+            obs, *_ = env.step(np.zeros(env.task.act_dim))
+            assert obs[15] == pytest.approx(CUBE[0] + 0.01 * max(0, k - 3), abs=1e-3), k
+    finally:
+        env.close()
+
+
+def test_the_seen_pose_freezes_while_the_tcp_is_near_the_block():
+    """The occlusion latch: no refresh while the true TCP is within `latch_m` of the cube, then again."""
+    env = ArmEnv("lift", randomization=replace(Randomization.none(), latch_m=0.08))
+    zero = np.zeros(env.task.act_dim)
+    try:
+        # A hover 4.5 cm above the cube's centre; no jaw geom touches it.
+        hover = env.kin.to_q(env.kin.ik([0.2, 0.0, 0.06]).joints)
+        obs, _ = env.reset(options={"q": hover, "cube": (CUBE, UPRIGHT)})
+        s = env.state()
+        assert np.linalg.norm(s["tcp"] - s["cube_pos"]) < 0.08
+        before = obs[15:18].copy()
+        env.set_cube(np.array([0.22, 0.0, 0.015]), UPRIGHT)                   # along +x, away from the jaws
+        obs, *_ = env.step(zero)
+        assert np.array_equal(obs[15:18], before)                             # frozen
+        assert env.state()["cube_pos"][0] == pytest.approx(0.22, abs=2e-3)    # the cube was not shot away
+        env.set_cube(np.array([0.32, 0.0, 0.015]), UPRIGHT)                   # 12.8 cm from the TCP
+        obs, *_ = env.step(zero)
+        assert obs[15] == pytest.approx(0.32, abs=2e-3)                       # refreshed
+        assert env.state()["cube_pos"][0] == pytest.approx(0.32, abs=2e-3)
+
+        # From home the TCP is 16.5 cm away: the pose refreshes every tick.
+        env.reset(options={"q": env.limits.home, "cube": (CUBE, UPRIGHT)})
+        for k in range(1, 4):
+            env.set_cube(CUBE + [0.01 * k, 0.0, 0.0], UPRIGHT)
+            obs, *_ = env.step(zero)
+            assert obs[15] == pytest.approx(CUBE[0] + 0.01 * k, abs=2e-3), k
+    finally:
+        env.close()
+
+
 def test_gymnasium_ids_of_the_lab():
     """Importing `soarm_lab.rl` registers the lab's environments as `SoArmLab/*-v0`."""
     import soarm_lab.rl  # noqa: F401

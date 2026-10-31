@@ -11,6 +11,10 @@ on MuJoCo Warp; both compute the observation and the reward with the same functi
 The scene is built ONCE (293 ms on a laptop, 111 ms on an RTX A4500); a reset changes only the state
 and fields of the compiled model. The station (table, cameras, base pose) comes from the twin's export
 (`station.Station`, `twin export`); by default it is the `sim` station bundled with the package.
+
+The policy sees the object as the cameras would (`_perceive`): late, refreshed less often, offset by
+this episode's bias, with noise, and frozen while the true TCP is within `Randomization.latch_m` of it
+(the occlusion latch, the same `task.occluded` as `batch.BatchEnv`).
 """
 
 from __future__ import annotations
@@ -147,6 +151,8 @@ class ArmEnv(gym.Env):
         self._cube_delay, self._cube_period = 0, 1
         self._cube_hist: list[tuple[np.ndarray, np.ndarray]] = []
         self._cube_seen = (np.zeros(3), np.eye(3))
+        #: This episode's constant xy offset of the seen object pose [m] (`Randomization.pose_bias_m`).
+        self._bias = np.zeros(2)
         #: The yaw symmetry the detector cannot see (`task.fold_yaw`).
         self._yaw_period = tk.yaw_period(self.task)
 
@@ -178,24 +184,28 @@ class ArmEnv(gym.Env):
         return obs[0].astype(np.float32)
 
     def _perceive(self, s: dict[str, np.ndarray], force: bool = False) -> None:
-        """The cube in the observation as the cameras see it: delayed, less often, with noise.
+        """The cube in the observation as the cameras see it: delayed, less often, offset, with noise.
 
-        The reward is computed from the truth; the policy sees what the twin's camera perception
-        gives it on the desk.
+        The pose from `cube_delay` ticks ago, refreshed every `cube_period` ticks but not while the true
+        TCP is within `latch_m` of the cube (the hand covers it, the last seen pose stays), offset by
+        this episode's bias and a fresh noise draw (`task.perceived`). `force` (the reset) refreshes
+        whatever the tick and the hand. The reward is computed from the truth; the policy sees what the
+        twin's camera perception gives it on the desk.
         """
         if not self.task.cube:
             return
         self._cube_hist.append((s["cube_pos"].copy(), s["cube_rot"].copy()))
         del self._cube_hist[:-(self._cube_delay + 1)]
-        if not force and self.t % self._cube_period:
+        near = bool(tk.occluded(np, s["tcp"][None], s["cube_pos"][None], self.rand.latch_m)[0])
+        if not force and (self.t % self._cube_period or near):
             return
         pos, rot = self._cube_hist[max(0, len(self._cube_hist) - 1 - self._cube_delay)]
-        pos = pos.copy()
-        if self.rand.cube_noise > 0:
-            pos[:2] += self.np_random.normal(0.0, self.rand.cube_noise, 2)
-        if self.rand.fold_yaw:
-            rot = tk.fold_yaw(np, rot, self._yaw_period)
-        self._cube_seen = (pos, rot)
+        # The same single draw as before the bias: the generator's stream (and the pins) stay.
+        n = self.rand.cube_noise
+        noise = self.np_random.normal(0.0, n, 2) if n > 0 else np.zeros(2)
+        pos, rot = tk.perceived(np, pos[None], rot[None], self._bias[None], noise[None], self.rand.fold_yaw,
+                                self._yaw_period)
+        self._cube_seen = (pos[0], rot[0])
 
     # ------------------------------------------------------------ gym
     def reset(self, *, seed: int | None = None, options: dict[str, Any] | None = None):
@@ -209,6 +219,7 @@ class ArmEnv(gym.Env):
         self._delay = [np.zeros(self.task.act_dim)] * int(s["delay"])
         self._cube_delay, self._cube_period = int(s["cube_delay"]), int(s["cube_period"])
         self._cube_hist = []
+        self._bias = np.array([s["pose_bias_x"], s["pose_bias_y"]])
 
         mujoco.mj_resetData(m, d)
         q0 = np.asarray(options["q"], float) if "q" in options else tk.sample_start(self.task, self.limits, rng, 1)[0]

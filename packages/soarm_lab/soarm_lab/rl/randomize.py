@@ -99,10 +99,13 @@ class Randomization:
     obs_noise_deg: float = 0.3
     #: Action delay: drawn from {min_delay .. max_delay} ticks per episode.
     max_delay: int = 1
-    #: The cube as the twin's camera perception gives it, not as physics knows it: the position from
-    #: {0 .. cube_delay} ticks ago, refreshed every {1 .. cube_period} ticks, with noise [m], and the
-    #: rotation folded to +-45 deg (the cube has a 90 deg symmetry). Measured: a policy trained on the
-    #: truth lifted 7 of 20 cubes with a 10 Hz / 150 ms perception.
+    #: The object as the twin's camera perception gives it, not as physics knows it (`task.perceived`):
+    #: the pose from {cube_min_delay .. cube_delay} ticks ago, refreshed every {1 .. cube_period} ticks
+    #: (both drawn per episode), with xy noise of std `cube_noise` [m] drawn at each refresh, plus this
+    #: episode's constant xy offset of up to `pose_bias_m` [m]. While the true TCP is nearer the object
+    #: than `latch_m` the pose does not refresh (the hand covers it). With `fold_yaw` the rotation is
+    #: folded by the object's yaw symmetry (+-45 deg for a cube). z and the reward stay the truth.
+    #: Measured: a policy trained on the truth lifted 7 of 20 cubes with a 10 Hz / 150 ms perception.
     cube_delay: int = 3
     cube_period: int = 3
     cube_noise: float = 0.002
@@ -111,6 +114,15 @@ class Randomization:
     centre: Dynamics = field(default_factory=Dynamics)
     #: The smallest action delay [ticks]; without randomization = max_delay = the measured one.
     min_delay: int = 0
+    #: A constant xy offset of the seen object pose per episode, constant through the carry too: a
+    #: random bearing and a length uniform in [0, pose_bias_m] [m]. The LLM detector lands 1-3 cm off.
+    #: 0 = no offset (and no draw).
+    pose_bias_m: float = 0.0
+    #: The least pose delay: the delay is drawn from {cube_min_delay .. cube_delay} [ticks].
+    cube_min_delay: int = 0
+    #: Occlusion: the seen pose stops refreshing while the true TCP is nearer the object's centre than
+    #: this [m], and refreshes again once it is farther. 0 = never: the pose refreshes under the hand.
+    latch_m: float = 0.0
 
     @staticmethod
     def none() -> Randomization:
@@ -186,12 +198,18 @@ class Randomization:
         return any(hi > lo for lo, hi in ranges) or self.max_delay > self.min_delay
 
     def sample(self, rng: np.random.Generator, n: int) -> dict[str, np.ndarray]:
-        """Draws for `n` worlds: multipliers, delays and the cube's refresh period [ticks].
+        """Draws for `n` worlds: multipliers, delays and the cube's refresh period [ticks], and the
+        seen pose's constant offset `pose_bias_x`, `pose_bias_y` [m].
 
-        The arm's dynamics multipliers are already multiplied by the centre.
+        The arm's dynamics multipliers are already multiplied by the centre. The nine draws of the
+        dynamics, the delays and the refresh period come first, always in this order. The offset
+        follows, and it draws from `rng` only when its range is live (`pose_bias_m > 0`): numpy
+        consumes the generator even for `uniform(1, 1)`, `ArmEnv.reset` draws the start pose and
+        the cube from the same generator after this, and `tests/rl/test_env.py` pins that stream.
+        With the defaults the generator ends where the nine draws leave it.
         """
         c = self.centre
-        return {
+        out = {
             "kp": c.kp * rng.uniform(*self.kp, n),
             "damping": c.damping * rng.uniform(*self.damping, n),
             "armature": c.armature * rng.uniform(*self.armature, n),
@@ -199,6 +217,14 @@ class Randomization:
             "cube_mass": rng.uniform(*self.cube_mass, n),
             "cube_friction": rng.uniform(*self.cube_friction, n),
             "delay": rng.integers(min(self.min_delay, self.max_delay), self.max_delay + 1, n),
-            "cube_delay": rng.integers(0, self.cube_delay + 1, n),
+            "cube_delay": rng.integers(min(self.cube_min_delay, self.cube_delay), self.cube_delay + 1, n),
             "cube_period": rng.integers(1, max(1, self.cube_period) + 1, n),
         }
+        # Only live ranges draw (see above).
+        if self.pose_bias_m > 0:
+            r = rng.uniform(0.0, self.pose_bias_m, n)
+            a = rng.uniform(-np.pi, np.pi, n)
+            out["pose_bias_x"], out["pose_bias_y"] = r * np.cos(a), r * np.sin(a)
+        else:
+            out["pose_bias_x"], out["pose_bias_y"] = np.zeros(n), np.zeros(n)
+        return out

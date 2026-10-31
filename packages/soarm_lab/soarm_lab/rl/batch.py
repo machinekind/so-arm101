@@ -51,6 +51,13 @@ the broken-world guard, done) and `_observe`; the reset of the done worlds is a 
 (`_restart`), run only in steps where some world ended. The formulas are the ones in `task`,
 called with `xp=jax.numpy`.
 
+The object's pose in the observation is the cameras' (`_perceive`, the same `task.perceived` and
+`task.occluded` as `env.ArmEnv`): late by `cube_d` ticks from a history ring, refreshed every `cube_p`
+ticks, offset by the world's constant `bias` for the episode, with noise. The occlusion latch is
+computed from the truth and is not sticky: a world whose true TCP is within `Randomization.latch_m` of
+the object skips its refreshes and keeps the last seen pose, and refreshes again once the TCP is
+farther. A block carried in the jaws is always that near, so in training a carry is one long freeze.
+
 pickplace: the place target is a mocap pad (`d.mocap_pos`, separate in every world) without
 collisions, so the contact budget is the same as in lift. The "cube carried" latch (`carried` in the
 state) is the same `task.carry_latch` that `env.ArmEnv` uses, and target sampling (`_sample_targets`)
@@ -251,6 +258,8 @@ class BatchEnv:
             "cube_p": np.ones(N, np.int32),
             "seen_pos": np.zeros((N, 3), f32),
             "seen_rot": eye.copy(),
+            # This episode's constant xy offset of the seen object pose [m] (`Randomization.pose_bias_m`).
+            "bias": np.zeros((N, 2), f32),
             # The JAX copies of what physics never changes: written whole into Warp, never read back.
             "ctrl": self._read_one(self.d.ctrl),
             "fields": fields,
@@ -374,19 +383,19 @@ class BatchEnv:
         return {**s, "act_hist": hist, "q_cmd": q_cmd, "ctrl": ctrl}, ctrl, action
 
     def _perceive(self, s: State, st: dict[str, Array], key: Array) -> State:
-        """A new entry in the cube history, and a refresh of what the policy sees (every `cube_p` ticks)."""
+        """A new entry in the cube history, and a refresh of what the policy sees: every `cube_p` ticks,
+        except while the true TCP is within `latch_m` of the cube (`task.occluded`)."""
         H = self.H
         i = (s["hist_i"] + 1) % H
         hist_pos = s["hist_pos"].at[i].set(st["cube_pos"])
         hist_rot = s["hist_rot"].at[i].set(st["cube_rot"])
-        upd = (s["t"] % s["cube_p"]) == 0
+        upd = ((s["t"] % s["cube_p"]) == 0) & ~tk.occluded(jnp, st["tcp"], st["cube_pos"], self.rand.latch_m)
         idx = (i - s["cube_d"]) % H
         ar = jnp.arange(self.num_envs)
         pos, rot = hist_pos[idx, ar], hist_rot[idx, ar]
-        if self.rand.cube_noise > 0:
-            pos = pos.at[:, :2].add(self.rand.cube_noise * jax.random.normal(key, (self.num_envs, 2)))
-        if self.rand.fold_yaw:
-            rot = tk.fold_yaw(jnp, rot, self.yaw_period)
+        n, shape = self.rand.cube_noise, (self.num_envs, 2)
+        noise = n * jax.random.normal(key, shape) if n > 0 else jnp.zeros(shape, pos.dtype)
+        pos, rot = tk.perceived(jnp, pos, rot, s["bias"], noise, self.rand.fold_yaw, self.yaw_period)
         return {**s, "hist_i": i, "hist_pos": hist_pos, "hist_rot": hist_rot,
                 "seen_pos": jnp.where(upd[:, None], pos, s["seen_pos"]),
                 "seen_rot": jnp.where(upd[:, None, None], rot, s["seen_rot"])}
@@ -501,7 +510,8 @@ class BatchEnv:
         return {**s, "fields": f,
                 "delay_n": _sel(done, jnp.clip(smp["delay"], 0, self.Hd - 1), s["delay_n"]),
                 "cube_d": _sel(done, smp["cube_delay"], s["cube_d"]),
-                "cube_p": _sel(done, smp["cube_period"], s["cube_p"])}
+                "cube_p": _sel(done, smp["cube_period"], s["cube_p"]),
+                "bias": _sel(done, jnp.stack([smp["pose_bias_x"], smp["pose_bias_y"]], 1), s["bias"])}
 
     def _restart(self, s: State, old: dict[str, Array], done: Array, smp: dict[str, Array]):
         """The done worlds' new episodes: (state, qpos, qvel, qacc_warmstart), whole arrays for Warp."""
@@ -535,13 +545,15 @@ class BatchEnv:
             qpos = qpos.at[:, a:a + 3].set(p @ self.R_b.T + self.t_b)
             qpos = qpos.at[:, a + 3:a + 7].set(quat)
             # The first detection at the start: the cube lies still, so the whole history is one pose.
+            # It is seen with the episode's bias (`_randomize` gave the done worlds theirs), no noise.
             z0, o1 = jnp.zeros_like(yaw), jnp.ones_like(yaw)
             R = jnp.stack([jnp.stack([jnp.cos(yaw), -jnp.sin(yaw), z0], -1),
                            jnp.stack([jnp.sin(yaw), jnp.cos(yaw), z0], -1),
                            jnp.stack([z0, z0, o1], -1)], -2)
             s["hist_pos"] = _sel_hist(done, p, s["hist_pos"])
             s["hist_rot"] = _sel_hist(done, R, s["hist_rot"])
-            s["seen_pos"] = _sel(done, p, s["seen_pos"])
+            p_seen, _ = tk.perceived(jnp, p, R, s["bias"], jnp.zeros_like(s["bias"]), False, self.yaw_period)
+            s["seen_pos"] = _sel(done, p_seen, s["seen_pos"])
             s["seen_rot"] = _sel(done, tk.fold_yaw(jnp, R, self.yaw_period) if self.rand.fold_yaw else R,
                                  s["seen_rot"])
             if tsk.target:
