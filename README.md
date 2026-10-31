@@ -13,7 +13,7 @@ The repository is a [uv](https://docs.astral.sh/uv/) workspace with two Python p
   PPO training, policy evaluation, bundled reach and lift policies, inverse kinematics,
   a strategy that touches an object the twin's perception located, a variant in which
   TypeSafe's Jev decision model judges each touch and aims again after a miss, and a strategy
-  that picks a Classic World block up after that touch.
+  that picks a Classic World block up after that touch and picks it up again when it drops.
 
 Both integrate with the [Machinekind digital twin](https://github.com/machinekind/twin)
 as plugins. The twin measures the physical setup and runs policies and inverse
