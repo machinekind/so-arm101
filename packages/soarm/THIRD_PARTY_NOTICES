@@ -19,3 +19,10 @@ under Apache-2.0. The original model license is retained at soarm/robot/LICENSE.
 https://github.com/google-deepmind/mujoco_menagerie/blob/ac6b2b09983786f3036cab1000221017fa2193b4/robotstudio_so101/LICENSE
 https://github.com/TheRobotStudio/SO-ARM100/blob/aec17bbc256d1a7342d53aaa4950595d4c30b40d/LICENSE
 https://github.com/TheRobotStudio/SO-ARM100/blob/608122e9ac330a753735f2e18aee73338e9ac407/LICENSE
+
+tools/graspgenx/so101/gripper.urdf (in the repository, not in this package)
+is derived from soarm/robot/so101.xml above: the gripper subtree rewritten
+by hand as URDF for GraspGenX, the wrist camera mount and the primitive
+collision geoms left out. It references the same meshes and carries the
+same Apache-2.0 license; the file identifies itself as modified in its
+header, as Apache-2.0 section 4 asks.

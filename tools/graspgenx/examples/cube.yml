@@ -1,0 +1,52 @@
+# A hand-written grasp file for the cube in GraspGenX's own output format (`isaac_grasp`, as
+# `save_to_isaac_grasp_format` writes it, the quaternion w first): poses of the aligned gripper frame
+# (+Z approach, +X closing, origin at the URDF root of so101/gripper.urdf) in the cube's block frame
+# (rl/objects.py: the centre, z up). GraspGenX writes no comments; these name each grasp.
+#
+# Each pose is position = P - R @ pad with R = [closing, approach x closing, approach] (columns), P the pad
+# point in the block frame and pad = sweep_volume.offset of so101/config.json, (0.0344, 0, 0.0736).
+# Deliberately not sorted by confidence: the converter sorts. Its conversion is the bundled
+# packages/soarm_lab/soarm_lab/grasps/cube.json (tests/test_grasp_library.py pins it).
+format: isaac_grasp
+format_version: 1.0
+grasps:
+  # Top-down, closing +y, centred.
+  grasp_0:
+    confidence: 0.92
+    position: [0.0, -0.0344, 0.0736]
+    orientation: {w: 0.0, xyz: [0.70710678, 0.70710678, 0.0]}
+  # Top-down, closing -y, centred.
+  grasp_1:
+    confidence: 0.91
+    position: [0.0, 0.0344, 0.0736]
+    orientation: {w: 0.0, xyz: [-0.70710678, 0.70710678, 0.0]}
+  # Top-down, closing +x, centred.
+  grasp_2:
+    confidence: 0.90
+    position: [-0.0344, 0.0, 0.0736]
+    orientation: {w: 0.0, xyz: [1.0, 0.0, 0.0]}
+  # Top-down, closing -x, centred.
+  grasp_3:
+    confidence: 0.89
+    position: [0.0344, 0.0, 0.0736]
+    orientation: {w: 0.0, xyz: [0.0, 1.0, 0.0]}
+  # Top-down, closing along the diagonal (+x+y)/sqrt(2): 35.4 mm across the cube.
+  grasp_4:
+    confidence: 0.55
+    position: [-0.024324, -0.024324, 0.0736]
+    orientation: {w: 0.0, xyz: [0.92387953, 0.38268343, 0.0]}
+  # From the side: approach -x, closing +y, centred.
+  grasp_5:
+    confidence: 0.80
+    position: [0.0736, -0.0344, 0.0]
+    orientation: {w: 0.5, xyz: [-0.5, -0.5, 0.5]}
+  # Top-down, closing +y, the pad point 10.5 mm below the centre.
+  grasp_6:
+    confidence: 0.70
+    position: [0.0, -0.0344, 0.0631]
+    orientation: {w: 0.0, xyz: [0.70710678, 0.70710678, 0.0]}
+  # Top-down, closing +y, the pad point 5 mm along +x and 4 mm below the top.
+  grasp_7:
+    confidence: 0.85
+    position: [0.005, -0.0344, 0.0821]
+    orientation: {w: 0.0, xyz: [0.70710678, 0.70710678, 0.0]}
