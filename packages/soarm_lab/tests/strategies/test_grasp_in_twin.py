@@ -402,6 +402,39 @@ def test_a_cuboid_is_gripped_across_its_short_side(twin):
     assert truth(twin, "cuboid5")[0][2] > 0.04
 
 
+def test_a_library_grasp_lifts_a_yawed_cube_and_the_twin_says_w_dloni(twin):
+    """The bundled cube library composed with the tracker's pose of a cube turned by 20 degrees: the jaws
+    close across one of its faces, and the twin's tracker says "w dloni" from the close on."""
+    add_block(twin, "cube", BLOCK_XY, yaw_deg=20.0)
+    clock = Clock()
+    sources: list[tuple[float, str, float]] = []
+    strategy = load_strategy(NAME).create({"grasp_source": "library", "carry_s": 1.0})
+    assert isinstance(strategy, GraspStrategy)
+    runner = StrategyRunner(twin, strategy, objects=tracked(twin, "cube", clock, sources))
+    phases: list[str] = []
+    holding: list[float] = []
+
+    def watch() -> None:
+        if strategy.started and strategy.grasp.holding and not holding:
+            holding.append(clock.t)
+
+    runner.start(threaded=False)
+    drive(twin, runner, 60.0, clock, until=phases_of(strategy, phases), watch=watch)
+
+    grasp = strategy.grasp
+    assert runner.status.stopped_because == "zadanie wykonane", (strategy.status, grasp)
+    assert grasp.grasp_source == "library" and grasp.library_index == 0 and grasp.library_score == 0.92
+    # Across a face of the cube: 20 degrees plus a quarter turn, whichever.
+    across = (grasp.heading_deg - 20.0) % 90.0
+    assert min(across, 90.0 - across) < 5.0
+    assert strategy.gap_open_m == pytest.approx(0.041)
+    assert truth(twin, "cube")[0][2] > 0.04
+    assert all(c > 0.5 for c in contact(twin, "cube"))
+    in_hand = [t for t, s, _ in sources if s == "w dloni"]
+    assert holding and in_hand and abs(in_hand[0] - holding[0]) <= 0.5
+    assert {s for t, s, _ in sources if t >= in_hand[0]} == {"w dloni"}
+
+
 def test_a_block_taken_away_after_the_probe_ends_without_success(twin):
     add_block(twin, "cube")
     clock = Clock()
