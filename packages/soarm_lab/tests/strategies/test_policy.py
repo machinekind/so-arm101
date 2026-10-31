@@ -18,6 +18,7 @@ import soarm
 
 pytest.importorskip("mujoco")
 
+from soarm_lab.kinematics import RobotKinematics  # noqa: E402
 from soarm_lab.rl import task as tk  # noqa: E402
 from soarm_lab.rl.objects import DESCRIPTOR_DIM, descriptor  # noqa: E402
 from soarm_lab.rl.policy import Policy, PolicyMeta  # noqa: E402
@@ -168,7 +169,9 @@ def test_lift_success_needs_a_fresh_cube_and_a_holding_jaw():
     lifted = [0.2, 0.0, s.task.cube_half + s.task.lift_height + 0.02]
     for k in range(10):
         s.act(obs(held, t=0.05 * k, objects=cube(lifted, "ostatnie widziane")))
-    assert not s.status.success                          # a stale pose
+    # A stale pose: judged by the jaw and the TCP's height above its top, 1.3 cm here, under lift_height.
+    assert s._pose_live and not s._cube_fresh()
+    assert not s.status.success
     streak = []
     for k in range(10, 30):
         a = s.act(obs(held, t=0.05 * k, objects=cube(lifted, "w dloni")))
@@ -200,6 +203,7 @@ def lift_success(s: PolicyStrategy, objects: dict[str, ObjectPose], ticks: int =
 def test_lift_success_needs_a_young_cube_pose():
     """A pose older than `max_pose_age_s` never counts, whatever its source says."""
     s = strategy("lift", {5: -1.0})
+    # The rejected old poses go to the verdict by forward kinematics, which is 1.3 cm at `lifted` from home.
     lifted = [0.2, 0.0, s.task.cube_half + s.task.lift_height + 0.02]
     assert s.config.max_pose_age_s == 1.0
     # The default keeps today's camera path: the twin says "kamery" only up to 1 s after capture.
@@ -300,3 +304,108 @@ def test_lift_success_counts_the_blocks_lowest_point():
     assert lift_success(s, block("cuboid85", centre))
     assert not lift_success(s, block("cuboid85", centre, rotation=standing))
     assert "3.8 cm nad blatem" in s._note()
+
+
+# ------------------------------------------------------------ the latch
+def latched_policy(action: dict[int, float] | None = None) -> Policy:
+    """A constant lift policy trained with the occlusion latch (`latch_m` 5 cm in its randomization)."""
+    pol = constant_policy(tk.make_task("lift"), action)
+    pol.meta.randomization = {"fold_yaw": True, "latch_m": 0.05}
+    return pol
+
+
+def test_a_lost_pose_is_kept_for_latch_s_then_the_run_ends():
+    s = strategy("lift", latch_s=1.0)
+    s.start(run_info(), obs(dict(SPEC.home)))
+    a = s.act(obs(dict(SPEC.home), t=0.0, objects=cube([0.2, 0.0, 0.015])))
+    assert not a.done and s._pose_live
+    a = s.act(obs(dict(SPEC.home), t=0.5))                              # gone: kept
+    assert not a.done and not s._pose_live
+    assert s._cube is not None and s._cube.tolist() == [0.2, 0.0, 0.015]
+    assert "zatrzask" in a.note
+    a = s.act(obs(dict(SPEC.home), t=1.6))                              # 1.6 s after the last sighting
+    assert a.done and not a.success and "kamery jej nie widza" in a.note
+    # The default (0): the first tick without the object ends the run, as before.
+    s = strategy("lift")
+    s.start(run_info(), obs(dict(SPEC.home)))
+    assert not s.act(obs(dict(SPEC.home), t=0.0, objects=cube([0.2, 0.0, 0.015]))).done
+    assert s.act(obs(dict(SPEC.home), t=0.05)).done
+
+
+def test_the_latch_clock_runs_from_the_last_young_sighting():
+    s = strategy("lift", latch_s=1.0, max_pose_age_s=1.0)
+    s.start(run_info(), obs(dict(SPEC.home)))
+    s.act(obs(dict(SPEC.home), t=2.0, objects=cube([0.2, 0.0, 0.015], "ostatnie widziane", age_s=0.5)))
+    s.act(obs(dict(SPEC.home), t=2.5, objects=cube([0.2, 0.0, 0.015], "ostatnie widziane", age_s=3.0)))
+    assert s._pose_live                                                 # taken, but too old to count
+    assert not s.act(obs(dict(SPEC.home), t=2.9)).done                  # 0.9 s after the young one
+    assert s.act(obs(dict(SPEC.home), t=3.1)).done                      # 1.1 s
+    # A dropped object is never seen well: nothing to keep.
+    s.start(run_info(), obs(dict(SPEC.home)))
+    s.act(obs(dict(SPEC.home), t=0.0, objects=cube([0.2, 0.0, 0.015], "ostatnie widziane (upuszczona)")))
+    assert s.act(obs(dict(SPEC.home), t=0.1)).done
+
+
+def test_lift_success_from_a_stale_pose_needs_the_jaw_and_the_tcp_height():
+    """Not live and fresh: the jaw holds and the TCP is more than `lift_height` above the block's top."""
+    s = strategy("lift", {5: -1.0})
+    stale = "ostatnie widziane"
+    # The legacy cube on the table: its top 3 cm up, the TCP at home 12.3 cm, 9.3 cm above it.
+    assert lift_success(s, cube([0.2, 0.0, 0.015], stale, age_s=3.0))
+    assert "nad klockiem" in s._note() and "nieswieza" in s._note()
+    # The pose says 8 cm: its top 9.5 cm up, the TCP only 2.8 cm above it.
+    assert not lift_success(s, cube([0.2, 0.0, 0.08], stale, age_s=3.0))
+    # The jaw commanded open, wider than measured: not holding.
+    s = strategy("lift", {5: 1.0})
+    s.start(run_info(), obs(dict(SPEC.home)))
+    for k in range(5):
+        s.act(obs(dict(SPEC.home), t=0.05 * k, objects=cube([0.2, 0.0, 0.015], stale, age_s=3.0)))
+    assert not s.status.success
+
+    # The block's top from its rotation: a cuboid85 stood on its end is 8.5 cm tall.
+    s = PolicyStrategy(PolicySettings(object_kind="cuboid85"), policy=block_policy("cube", {5: -1.0}))
+    standing = np.array([[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]])  # body x (the long side) up
+    assert not lift_success(s, block("cuboid85", [0.2, 0.0, 0.0425], rotation=standing, source=stale))
+    assert lift_success(s, block("cuboid85", [0.2, 0.0, 0.0125], source=stale))   # lying: top 2.5 cm
+
+
+def test_a_latched_policy_keeps_the_pose_under_the_hand():
+    """Trained with `latch_m`: the pose freezes near the TCP, while the jaw holds and for "w dloni"."""
+    a_pos, b_pos = [0.2, 0.0, 0.015], [0.25, 0.0, 0.015]
+    near = dict(RobotKinematics(SPEC).ik([0.2, 0.0, 0.05]).joints, gripper=25.0)   # the TCP 3.5 cm above A
+    held = dict(SPEC.home, gripper=25.0)                                     # lifted: the TCP 16.5 cm from A
+    # The lag guard stays out of the way: the test jumps between poses 53 deg apart.
+    settings = PolicySettings(max_tracking_deg=90.0)
+    s = PolicyStrategy(settings, policy=latched_policy({5: -1.0}))           # the jaw closes on the block
+    s.start(run_info(), obs(near))
+    s.act(obs(near, t=0.0, objects=cube(a_pos)))
+    assert s._cube is not None and s._cube.tolist() == a_pos and s._pose_live   # the first sighting
+    s.act(obs(near, t=0.05, objects=cube(b_pos)))
+    assert s._cube.tolist() == a_pos and not s._pose_live                     # near: frozen
+    s.act(obs(near, t=0.1, objects=cube([0.3, 0.1, 0.2], "w dloni")))
+    assert s._cube.tolist() == a_pos
+    # The carry: far from A, a camera sighting at B; the jaw is still and squeezes, so it holds.
+    for k in range(3):
+        s.act(obs(held, t=0.15 + 0.05 * k, objects=cube(b_pos)))
+        assert s._cube.tolist() == a_pos and not s._pose_live, k
+
+    # The jaw commanded open, wider than measured, so it does not hold: far from A, B is taken.
+    s2 = PolicyStrategy(settings, policy=latched_policy({5: 1.0}))
+    s2.start(run_info(), obs(dict(near, gripper=35.0)))
+    s2.act(obs(dict(near, gripper=35.0), t=0.0, objects=cube(a_pos)))
+    s2.act(obs(dict(SPEC.home), t=0.05, objects=cube(b_pos)))
+    assert s2._cube is not None and s2._cube.tolist() == b_pos and s2._pose_live
+
+    # Without `latch_m` (lift-v3 and every policy before) B is taken at once, even from near.
+    s3 = PolicyStrategy(settings, policy=constant_policy(tk.make_task("lift")))
+    s3.start(run_info(), obs(near))
+    s3.act(obs(near, t=0.0, objects=cube(a_pos)))
+    s3.act(obs(near, t=0.05, objects=cube(b_pos)))
+    assert s3._cube is not None and s3._cube.tolist() == b_pos and s3._pose_live
+
+
+def test_latch_s_must_not_be_negative():
+    with pytest.raises(ValueError, match="latch_s must be zero or more"):
+        strategy("lift", latch_s=-1.0)
+    with pytest.raises(ValueError, match="latch_s must be zero or more"):
+        strategy("lift", latch_s=float("nan"))

@@ -89,12 +89,14 @@ def test_its_settings_become_the_panel_form():
     fields = {field.name: field for field in load_strategy(NAME).fields}
 
     assert list(fields) == ["policy", "max_tracking_deg", "episode_limit", "wait_for_cube_s",
-                            "max_pose_age_s", "allow_last_seen", "goal_x", "goal_y", "goal_z", "object_kind"]
+                            "max_pose_age_s", "allow_last_seen", "goal_x", "goal_y", "goal_z", "object_kind",
+                            "latch_s"]
     assert fields["policy"].kind is str and fields["policy"].default == "reach-v3"
     assert fields["object_kind"].kind is str and fields["object_kind"].default == ""
     assert fields["episode_limit"].kind is bool and fields["episode_limit"].default is True
-    floats = ("max_tracking_deg", "wait_for_cube_s", "max_pose_age_s", "goal_x")
+    floats = ("max_tracking_deg", "wait_for_cube_s", "max_pose_age_s", "goal_x", "latch_s")
     assert all(fields[name].kind is float for name in floats)
+    assert fields["latch_s"].default == 0.0
     assert fields["allow_last_seen"].kind is bool and fields["allow_last_seen"].default is False
     assert not any(field.required for field in fields.values())
 

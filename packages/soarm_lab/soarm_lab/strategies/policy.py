@@ -13,6 +13,14 @@ simulation and on hardware alike. Nothing here imports the twin. `Strategy`, `Ru
     policy:
       policy: lift-v3              # a bundled policy, one trained here (workspace/policies) or a path
 
+or, for the backup lift from the LLM or seeded detector's pose (a policy trained with `--latch-m`):
+
+    policy:
+      policy: lift-blocks-late
+      object_kind: cube            # the block the detector names
+      max_pose_age_s: 30.0         # [s] above the age of the detector's poses
+      latch_s: 10.0                # [s] keep acting on a lost pose this long
+
 The policy runs in numpy (`rl.policy.Policy`); the strategy needs no torch.
 
 The loop does exactly what the training environment does - the observation from `task.observe`, the
@@ -25,15 +33,31 @@ arm needs and the training environment does not have:
   MEASURES - the twin's own tracking guard (STOP) comes on top, for every owner;
 * **time limit**: a run on the arm lasts as many ticks as a training episode (`episode_limit`);
 * **end on success**: `end_on_success` success ticks in a row end the run (lift: the cube above the
-  table). Lift success counts only from a fresh cube pose (cameras, "in the hand", or simulation
-  truth, and no older than `max_pose_age_s`), never from "last seen" unless `allow_last_seen` says
-  so, and only while the jaw holds (still, commanded tighter, not creeping closed during the streak);
+  table). Lift success counts only while the jaw holds (still, commanded tighter, not creeping closed
+  during the streak). The height comes from the object's own pose when that pose is live and fresh
+  (cameras, "in the hand", or simulation truth, no older than `max_pose_age_s`; "last seen" only
+  with `allow_last_seen`), otherwise from forward kinematics (see Latch);
 * **reach goal in the training area**: a goal outside it (under the table, behind the base) is
   projected onto the area training goals were drawn from;
 * **pickplace**: the place target is the goal projected onto the table (z = 0) and onto the training
   ring of targets. Success counts only for a cube SEEN lying (cameras, not "in the hand", not "last
   seen") on the target, released (the jaw does not hold it, the gripper command is open), still
   during the streak, and only after it was carried (the same latch as in training).
+
+Latch: the twin's tracker forgets an object a few seconds after the cameras lose it, and a block
+under the hand or in the jaws is easily lost. With `latch_s` > 0 an object that leaves `obs.objects`
+does not end the run at once: the strategy keeps acting on its last pose for up to `latch_s` after
+its last good sighting (fresh, or a plain "ostatnie widziane" no older than `max_pose_age_s`). A
+policy trained with an occlusion latch (`latch_m` in its meta.json randomization, `soarm-lab train
+--latch-m`) also freezes its pose as it did in training: while the jaw holds, while the TCP is
+within `latch_m` of the pose, and for "w dloni" poses. In the simulation a block in the jaws is
+always that near the TCP, while on the arm a lifted TCP leaves a table pose behind, so the holding
+jaw keeps the freeze through the carry; a policy without `latch_m` (lift-v3) takes every pose, as
+before. A lift whose pose is not live and fresh (kept, frozen, stale, or without a source on a real
+arm) is judged by the jaw rule and forward kinematics: the TCP more than `lift_height` above the
+block's top, the top being the pose's centre plus the support its lowest point subtracts (exact for
+the centrally symmetric blocks and the legacy cube, whatever the rotation). The fingertips sit at or
+below the top, so the block is lifted at least that far.
 
 Where the inputs come from: the goal is `obs.goal` (the panel's goal); without one the settings'
 `goal_x`, `goal_y`, `goal_z` hold it. The cube is `obs.objects["cube"]`: a pose in the base frame and
@@ -54,6 +78,7 @@ policies its centre minus `cube_half`, as before).
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 
@@ -74,6 +99,9 @@ FRESH_CUBE_SOURCES = ("kamery", "w dloni", "symulacja")
 #: The source of a pose the cameras did not just confirm; lift success counts from it only with
 #: `PolicySettings.allow_last_seen`.
 LAST_SEEN = "ostatnie widziane"
+#: The source of the pose the twin's tracker derives from the TCP while the jaw holds the object: a
+#: policy trained with an occlusion latch keeps its frozen pose instead (see the module docstring).
+IN_HAND = "w dloni"
 #: Sources pickplace success may be counted from: the cube SEEN lying (not "w dloni": that pose follows
 #: the jaws) or simulation truth.
 RESTING_CUBE_SOURCES = ("kamery", "symulacja")
@@ -95,13 +123,14 @@ class PolicySettings:
     episode_limit: bool = True
     #: How long the arm waits for the first cube pose [s] (lift, pickplace).
     wait_for_cube_s: float = 3.0
-    #: Lift success counts only from an object pose at most this old (`ObjectPose.age_s`) [s]. The twin
-    #: publishes "kamery" only up to 1 s after capture, so the default never rejects one of those. Raise
-    #: it, with `allow_last_seen`, for a slow detector (a language model answers in seconds).
+    #: Lift success counts from an object's own pose only when it is at most this old (`ObjectPose.age_s`)
+    #: [s]. The twin publishes "kamery" only up to 1 s after capture, so the default never rejects one
+    #: of those. Raise it for a slow detector (a language model answers in seconds). It is also the age
+    #: up to which a sighting restarts the `latch_s` clock.
     max_pose_age_s: float = 1.0
     #: Lift success may also count from a plain "ostatnie widziane" pose no older than `max_pose_age_s`.
     #: Off by default: that source also means the latest detection did not find the object. A dropped
-    #: object ("ostatnie widziane (upuszczona)") never counts.
+    #: object ("ostatnie widziane (upuszczona)") never counts. It plays no part in the latch.
     allow_last_seen: bool = False
     #: The goal when the observation has none [m, base frame]: reach drives the TCP there, pickplace
     #: places the cube under it.
@@ -112,6 +141,10 @@ class PolicySettings:
     #: cylinder); empty = the policy's own. It sets the descriptor a shape-conditioned policy sees, the
     #: yaw fold and the object's height (see the module docstring).
     object_kind: str = ""
+    #: How long the strategy keeps acting on the last object pose after the object leaves `obs.objects`,
+    #: counted from its last good sighting (fresh, or a plain "ostatnie widziane" no older than
+    #: `max_pose_age_s`) [s]. 0 = the run ends at once, as before.
+    latch_s: float = 0.0
 
 
 @dataclass
@@ -177,6 +210,8 @@ class PolicyStrategy(Strategy[PolicySettings]):
             raise ValueError(f"policy: max_tracking_deg must be positive, is {self.config.max_tracking_deg}")
         if not self.config.max_pose_age_s >= 0:
             raise ValueError(f"policy: max_pose_age_s must be zero or more, is {self.config.max_pose_age_s}")
+        if not self.config.latch_s >= 0:
+            raise ValueError(f"policy: latch_s must be zero or more, is {self.config.latch_s}")
         kind = self.config.object_kind
         if kind and kind not in KINDS:
             raise ValueError(f"policy: unknown object_kind {kind!r}; known: {', '.join(KINDS)}")
@@ -224,6 +259,15 @@ class PolicyStrategy(Strategy[PolicySettings]):
         #: success streak began.
         self._carried = False
         self._streak_cube: np.ndarray | None = None
+        #: The occlusion latch the policy trained with [m] (`Randomization.latch_m` in meta.json); > 0 =
+        #: the pose freezes under the hand and in the jaws here too.
+        self._latch_m = float(self.policy.meta.randomization.get("latch_m", 0.0) or 0.0)
+        #: When [s, `obs.t`] the object was last seen well (`_good_sighting`): the `latch_s` clock.
+        self._last_good_t = -math.inf
+        #: Whether the pose in use was taken this tick (not kept after a loss, not frozen).
+        self._pose_live = False
+        #: The TCP of the last observation [m, base frame], for the lift verdict by forward kinematics.
+        self._tcp = np.zeros(3)
 
     @property
     def started(self) -> bool:
@@ -302,6 +346,7 @@ class PolicyStrategy(Strategy[PolicySettings]):
         self.prev_action = np.zeros(self.task.act_dim)
         self.status = PolicyStatus(goal_clamped=self.status.goal_clamped)
         self._cube, self._cube_src, self._cube_age = None, None, 0.0
+        self._last_good_t, self._pose_live, self._tcp = -math.inf, False, np.zeros(3)
         self._grip_prev = None
         self._carried, self._streak_cube = False, None
         self._take_goal(obs)
@@ -349,23 +394,22 @@ class PolicyStrategy(Strategy[PolicySettings]):
 
     # -------------------------------------------------------------- observation
 
-    def observation(self, measured: Mapping[str, float],
-                    objects: Mapping[str, ObjectPose] | None = None) -> np.ndarray:
-        """The policy's observation vector, as `task.observe` builds it in training."""
+    def observation(self, measured: Mapping[str, float], objects: Mapping[str, ObjectPose] | None = None, *,
+                    now: float = 0.0, holding: bool = False) -> np.ndarray:
+        """The policy's observation vector, as `task.observe` builds it in training.
+
+        `now` [s] (`obs.t`) runs the `latch_s` clock; `holding`, the jaw rule this tick, freezes the
+        pose of a policy trained with an occlusion latch (`_sight`).
+        """
         q = self.kin.to_q(measured)
         tcp = self.kin.tcp(measured)[:3, 3]
+        self._tcp = tcp
         cube_pos, cube_rot = np.zeros(3), np.eye(3)
         target = None
         if self.task.cube:
-            objects = objects or {}
-            # The detector names the block's kind; the cube detector and the twin's simulation say "cube".
-            got = objects.get(self.task.object_kind, objects.get(self.task.cube))
-            if got is None:
-                raise NoCube(f"zadanie {self.task.name} potrzebuje polozenia kostki - kamery jej nie widza")
-            cube_pos, cube_rot = np.asarray(got.position, float), np.asarray(got.rotation, float)
-            self._cube_src = str(got.source or "") or None
-            self._cube_age = float(got.age_s)
-            self._cube, self._cube_rot = cube_pos.copy(), cube_rot.copy()
+            self._sight(objects or {}, tcp, now, holding)
+            assert self._cube is not None                    # `_sight` raises NoCube otherwise
+            cube_pos, cube_rot = self._cube.copy(), self._cube_rot.copy()
             if self.policy.meta.randomization.get("fold_yaw", False):
                 # In training the policy saw the yaw folded by the object's symmetry (+-45 deg for a
                 # cube, as the detector gives it); the "w dloni" pose and simulation truth are not
@@ -377,6 +421,49 @@ class PolicyStrategy(Strategy[PolicySettings]):
                          self.prev_action[None], goal=self.goal[None], cube_pos=cube_pos[None],
                          cube_rot=cube_rot[None], target=target)
         return obs[0].astype(np.float32)
+
+    def _good_sighting(self, got: ObjectPose) -> bool:
+        """Whether `got` restarts the `latch_s` clock: no older than `max_pose_age_s` (an unknown age,
+        NaN, never is) and fresh (`FRESH_CUBE_SOURCES`, or no source in simulation) or exactly a plain
+        "ostatnie widziane". A dropped object ("ostatnie widziane (upuszczona)") is not seen well."""
+        if not float(got.age_s) <= self.config.max_pose_age_s:
+            return False
+        src = str(got.source or "") or None
+        if src is None:
+            return self.simulated
+        return src in FRESH_CUBE_SOURCES or src == LAST_SEEN
+
+    def _sight(self, objects: Mapping[str, ObjectPose], tcp: np.ndarray, now: float, holding: bool) -> None:
+        """Updates the object pose in use from this tick's `objects`; raises NoCube when there is none.
+
+        A sighting is taken as it is (any source, any age, as the observation always did), except that
+        a policy trained with an occlusion latch keeps its pose while the jaw holds, while the TCP is
+        within `latch_m` of the pose, or when the sighting is "w dloni": in training a block in the
+        jaws is always that near the TCP, while on the arm the tracker's pose follows the hand (and
+        says "kamery" again when the jaw rule flickers). Without a sighting the last pose is kept for
+        `latch_s` after the last good one (`_good_sighting`). A frozen or kept pose is not live.
+        """
+        # The detector names the block's kind; the cube detector and the twin's simulation say "cube".
+        got = objects.get(self.task.object_kind, objects.get(self.task.cube or "cube"))
+        if got is not None:
+            if self._good_sighting(got):
+                self._last_good_t = now                      # the object is there, maybe only covered
+            if self._latch_m > 0 and self._cube is not None:
+                near = float(np.linalg.norm(tcp - self._cube)) < self._latch_m
+                if holding or got.source == IN_HAND or near:
+                    self._pose_live = False                  # frozen, as under the hand in training
+                    return
+            self._cube = np.asarray(got.position, float).copy()
+            self._cube_rot = np.asarray(got.rotation, float).copy()
+            self._cube_src = str(got.source or "") or None
+            self._cube_age = float(got.age_s)
+            self._pose_live = True
+            return
+        latch_s = self.config.latch_s
+        if self._cube is not None and latch_s > 0 and now - self._last_good_t <= latch_s:
+            self._pose_live = False                          # kept: the object left `obs.objects`
+            return
+        raise NoCube(f"zadanie {self.task.name} potrzebuje polozenia kostki - kamery jej nie widza")
 
     # --------------------------------------------------------------------- tick
 
@@ -395,7 +482,7 @@ class PolicyStrategy(Strategy[PolicySettings]):
                               target=self._hold_pose(measured, q))
         holding = self._jaw_holding(q[self.g])
         try:
-            vec = self.observation(measured, obs.objects)
+            vec = self.observation(measured, obs.objects, now=float(obs.t), holding=holding)
         except NoCube as exc:
             # At the start perception may not have its first detection yet: the arm stands and
             # waits. A cube lost DURING the episode stops the policy.
@@ -418,17 +505,16 @@ class PolicyStrategy(Strategy[PolicySettings]):
             st.success = self._placed(holding)
             st.carried = self._carried
         else:
-            # The arm has no jaw contact sensors: success is the cube, from a fresh pose
-            # (`_cube_fresh`), higher above the table than `lift_height`, and only while the jaw
-            # HOLDS it (still, commanded tighter than it is). Measured in the twin (1 of 18
+            # The arm has no jaw contact sensors: success is the cube higher above the table than
+            # `lift_height` (`_lifted`: from its live, fresh pose, else from the TCP), and only while
+            # the jaw HOLDS it (still, commanded tighter than it is). Measured in the twin (1 of 18
             # successes): a 1 s streak at 10.9 cm while the cube turned in the jaws; the jaw closed
             # from 31.8 to 0 over 3.5 s, and the cube fell 4 s after "zadanie wykonane".
             # A jaw closing slowly still "stands" from tick to tick (9 units/s is 0.005 rad per
             # tick), so in addition the jaw may not close by more than `grip_creep` during a streak.
             if holding and st.success_streak > 0 and q[self.g] < self._streak_grip - self.grip_creep:
                 holding = False
-            st.success = bool(self._cube is not None and self._cube_fresh() and holding
-                              and self._height(self._cube) > self.task.lift_height)
+            st.success = bool(self._cube is not None and holding and self._lifted())
             if st.success and st.success_streak == 0:
                 self._streak_grip = float(q[self.g])
         st.success_streak = st.success_streak + 1 if st.success else 0
@@ -472,12 +558,33 @@ class PolicyStrategy(Strategy[PolicySettings]):
         """The height above the table [m] of the object's lowest point, at `cube` with the last rotation."""
         return float(tk.object_bottom(np, self.task, cube[None], self._cube_rot[None])[0])
 
+    def _top(self, cube: np.ndarray) -> float:
+        """The height above the table [m] of the object's highest point, at `cube` with the last rotation.
+
+        The centre plus the same support its lowest point lies below it: exact for the centrally
+        symmetric blocks and the legacy cube (its centre + `cube_half`), whatever the rotation.
+        """
+        return 2.0 * float(cube[2]) - self._height(cube)
+
+    def _lifted(self) -> bool:
+        """lift: whether the object is higher above the table than `lift_height`.
+
+        From the pose itself when it is live and fresh (`_cube_fresh`), today's rule. Otherwise (a pose
+        kept or frozen by the latch, stale, or without a source on a real arm) from forward kinematics:
+        the TCP more than `lift_height` above the object's top (`_top`). The fingertips sit at or below
+        the top, so the object rose at least that far, if the jaw holds it.
+        """
+        assert self._cube is not None
+        if self._pose_live and self._cube_fresh():
+            return self._height(self._cube) > self.task.lift_height
+        return float(self._tcp[2]) - self._top(self._cube) > self.task.lift_height
+
     def _jaw_holding(self, grip_q: float) -> bool:
         """Whether the jaw holds: still since the last tick, wider than commanded and than a closed jaw.
 
         The same thresholds as the twin's `CubeTracker` ("w dloni"). The command is the PREVIOUS tick's:
         the servo is driving towards it now. A jaw that is closing (the cube slips out or turns) is not
-        still.
+        still. The grasp strategy's `JawMonitor` (`strategies/jaw.py`) is to replace this copy.
         """
         prev, self._grip_prev = self._grip_prev, float(grip_q)
         still = prev is not None and abs(grip_q - prev) < self.grip_still
@@ -545,5 +652,9 @@ class PolicyStrategy(Strategy[PolicySettings]):
             return txt + (" - cel przesuniety na obszar z treningu" if st.goal_clamped else "")
         if self._cube is None:
             return ""
-        height = 100 * self._height(self._cube)
-        return f"kostka {height:.1f} cm nad blatem ({self._cube_src or 'bez zrodla'})"
+        src = self._cube_src or "bez zrodla"
+        if self._pose_live and self._cube_fresh():
+            return f"kostka {100 * self._height(self._cube):.1f} cm nad blatem ({src})"
+        # The lift verdict by forward kinematics (`_lifted`).
+        gap = 100 * (float(self._tcp[2]) - self._top(self._cube))
+        return f"chwytak {gap:.1f} cm nad klockiem ({'nieswieza' if self._pose_live else 'zatrzask'}, {src})"
