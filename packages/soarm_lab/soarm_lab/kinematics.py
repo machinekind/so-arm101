@@ -52,6 +52,25 @@ def inverse(T: np.ndarray) -> np.ndarray:
     return out
 
 
+def turn_toward(R_from: np.ndarray, R_to: np.ndarray, max_angle: float) -> np.ndarray:
+    """`R_to`, or the rotation `max_angle` [rad] from `R_from` on the shortest way to it when it is farther.
+
+    The orientation's counterpart of a carrot step: a goal that turns a few degrees per tick keeps the
+    null-space correction of `ik_step` small, where the whole turn at once drives the wrist into its limit.
+    """
+    R_from, R_to = np.asarray(R_from, float), np.asarray(R_to, float)
+    quat, w = np.zeros(4), np.zeros(3)
+    mujoco.mju_mat2Quat(quat, np.ascontiguousarray(R_to @ R_from.T).ravel())
+    mujoco.mju_quat2Vel(w, quat, 1.0)
+    angle = float(np.linalg.norm(w))
+    if angle <= max_angle:
+        return R_to.copy()
+    step, mat = np.zeros(4), np.zeros(9)
+    mujoco.mju_axisAngle2Quat(step, w / angle, max_angle)
+    mujoco.mju_quat2Mat(mat, step)
+    return mat.reshape(3, 3) @ R_from
+
+
 @dataclass
 class IKSolution:
     """An inverse kinematics result in app units."""

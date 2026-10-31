@@ -80,10 +80,10 @@ descend and touched, then done. The "touched" phase is the seam for a decision s
 `after_touch` judges it and is the single method to replace; `hold` keeps the arm where it is while a
 decision is pending; `retarget` aims at a new point within the same run, lifting straight up first;
 `descent_verdict` gives the contact geometry's own verdict. `touch_jev` (`soarm_lab.strategies.touch_jev`)
-is such a step: it asks the Jev decision model after each descent. A decision model's latency counts
-toward `time_limit_s`. Near the hand the twin's tracker rejects single-camera answers and the pose's age
-keeps growing, a repeated answer is not a new look, and a closed jaw on a real arm may be reported as
-"w dloni", which this strategy never takes.
+is such a step: it asks the Jev decision model after each descent. `_drive` takes an optional rotation goal
+for a subclass such as `grasp`. A decision model's latency counts toward `time_limit_s`. Near the hand the
+twin's tracker rejects single-camera answers and the pose's age keeps growing, a repeated answer is not a
+new look, and a closed jaw on a real arm may be reported as "w dloni", which this strategy never takes.
 
 The strategy reads `obs.objects[label]` (x, y, source and age_s), `obs.joints`, `obs.command` and
 `obs.t`. It ignores `obs.goal`.
@@ -98,7 +98,7 @@ from dataclasses import dataclass
 import numpy as np
 from machinekind_twin_api.strategy import Action, ObjectPose, Observation, RunInfo, Strategy
 
-from ..kinematics import RobotKinematics
+from ..kinematics import RobotKinematics, turn_toward
 from ..robot import load_robot
 
 logger = logging.getLogger(__name__)
@@ -126,6 +126,10 @@ SPEED_SHARE = 0.8
 COMMAND_TOL_DEG = 0.2
 #: The longest wait for the command to reach the pose the arm holds after a descent, before the verdict [s].
 HOLD_WAIT_S = 2.0
+#: How fast the orientation goal of `_drive` turns, when a subclass gives one [deg/s]. Asked for a whole turn
+#: at once, `ik_step`'s null-space correction drove the SO-101's wrist into its 95 degree limit from the rest
+#: pose and left the TCP 12 cm short of a top-down hover; at 4.5 degrees a tick it gets there.
+TURN_DEG_S = 90.0
 
 #: Phases of a run (`TouchStatus.phase`).
 WAIT = "wait"
@@ -237,6 +241,8 @@ class TouchStrategy(Strategy[TouchSettings]):
         self.ik_tol = min(1e-3, self.descend_step_m / 4)
         #: The measured TCP stands still when it moves less than this in one tick [m].
         self.still_m = self.descend_step_m / 2
+        #: The farthest the orientation goal of `_drive` turns in one tick [rad] (`TURN_DEG_S`).
+        self.turn_step = np.radians(TURN_DEG_S) / self.hz
         #: Ticks in a row the arm stays arrived before the strategy reads it (`SETTLE_S`).
         self.settle_ticks = max(1, int(np.ceil(SETTLE_S * self.hz)))
         self.command_tol = np.radians(COMMAND_TOL_DEG)
@@ -630,9 +636,15 @@ class TouchStrategy(Strategy[TouchSettings]):
         self._settle_count = self._settle_count + 1 if self._arrived(point) else 0
         return self._settle_count >= self.settle_ticks
 
-    def _drive(self, goal: np.ndarray, step_m: float) -> Action:
+    def _drive(self, goal: np.ndarray, step_m: float, *, rotation: np.ndarray | None = None) -> Action:
         """`ik`'s carrot step toward `goal`: the next target with the gripper unchanged, or the end of the
-        run when that target would bring two of the arm's bodies together."""
+        run when that target would bring two of the arm's bodies together.
+
+        With `rotation` (a 3x3 TCP rotation in the base frame) the step also asks `ik_step` for that
+        orientation, corrected in the position's null space, turning from the last target's orientation by
+        at most `turn_step` per tick; the caller checks the orientation itself, as IK orientation is soft.
+        `touch` never passes one.
+        """
         st = self.status
         kin, arm = self.kin, self.kin.arm
         # Unlike `ik`, the carrot goes on from the last carrot when the last target reached it: IK's
@@ -643,11 +655,13 @@ class TouchStrategy(Strategy[TouchSettings]):
         to_goal = goal - base
         d = float(np.linalg.norm(to_goal))
         step, seed, tries = min(step_m, d), kin.from_q(self.q_cmd), 1
+        if rotation is not None:
+            rotation = turn_toward(kin.tcp(seed)[:3, :3], rotation, self.turn_step)
         # The supervisor's speed limits: a step that would move an arm joint farther than `_max_step` in one
         # tick is shortened, and after three tries the joints' move is scaled down.
         while True:
             carrot = goal.copy() if step >= d else base + to_goal * (step / d)
-            q_new = kin.to_q(kin.ik_step(carrot, seed=seed, tol=self.ik_tol).joints)
+            q_new = kin.to_q(kin.ik_step(carrot, rotation, seed=seed, tol=self.ik_tol).joints)
             q_new[~arm] = self.q_cmd[~arm]                 # the gripper keeps its target
             q_new = np.clip(q_new, self._lo, self._hi)
             over = float(np.max(np.abs(q_new - self.q_cmd)[arm] / self._max_step[arm]))

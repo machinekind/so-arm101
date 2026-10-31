@@ -656,3 +656,34 @@ def test_act_before_start_and_the_stop_reason():
     assert s.status.stopped_because == reason
     s.stop("przerwana: STOP z panelu")
     assert s.status.stopped_because == "przerwana: STOP z panelu" and s.status.phase == "done"
+
+
+# ------------------------------------------------------------ an orientation goal for a subclass
+class PositionOnly(TouchStrategy):
+    """`touch` with the rotation keyword spelled out: what every call of `_drive` in touch means."""
+
+    def _drive(self, goal: np.ndarray, step_m: float, *, rotation: np.ndarray | None = None) -> Action:
+        return super()._drive(goal, step_m, rotation=None)
+
+
+def test_a_rotation_goal_turns_the_approach_vertical_while_touch_stays_position_only():
+    """A subclass such as grasp asks `_drive` for a top-down hand; touch never does, and its targets stay
+    those of the position-only step."""
+    down = np.column_stack([(0.0, 0.0, -1.0), (0.0, 1.0, 0.0), (1.0, 0.0, 0.0)])     # closing along base x
+    goal = np.array([0.22, 0.05, 0.067])
+    s = started()
+    start = s.kin.tool_axes(s.kin.from_q(s.q_cmd))[0]
+    for _ in range(40):
+        a = s._drive(goal, s.approach_step_m, rotation=down)
+
+    approach, closing = s.kin.tool_axes(a.target)
+    assert start[2] > -0.5                                                # the rest pose leans 26 deg
+    assert approach[2] < -np.cos(np.radians(8.0))
+    assert np.degrees(np.arccos(np.clip(closing @ (1.0, 0.0, 0.0), -1.0, 1.0))) < 8.0
+    assert np.linalg.norm(tcp(s, a.target) - goal) <= s.ik_tol
+    assert s.kin.self_contacts(a.target) == set()
+
+    plain, *_ = follow(started(seen()), dict(SPEC.home), seen(), 400)
+    spelled, *_ = follow(started(seen(), strategy=PositionOnly), dict(SPEC.home), seen(), 400)
+    assert len(plain) == len(spelled)
+    assert all(a.target == b.target for a, b in zip(plain, spelled, strict=True))

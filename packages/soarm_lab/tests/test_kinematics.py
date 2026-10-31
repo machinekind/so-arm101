@@ -10,7 +10,7 @@ import pytest
 pytest.importorskip("mujoco")
 
 from soarm_lab import sim  # noqa: E402
-from soarm_lab.kinematics import RobotKinematics  # noqa: E402
+from soarm_lab.kinematics import RobotKinematics, turn_toward  # noqa: E402
 
 
 def test_degrees_and_gripper_units_round_trip(station):
@@ -143,3 +143,13 @@ def test_the_jaw_reaches_below_the_tcp_by_the_fixed_jaws_sole(station):
     assert kin.jaw_reach(0.0) > sphere + 0.002 and kin.jaw_reach(39.0) > sphere + 0.002
     with pytest.raises(ValueError, match="jaw_bodies"):
         RobotKinematics(dataclasses.replace(spec, jaw_bodies=("", ""))).jaw_reach(0.0)
+
+
+def test_turn_toward_caps_the_angle_on_the_shortest_way():
+    def about_z(deg: float) -> np.ndarray:
+        c, s = np.cos(np.radians(deg)), np.sin(np.radians(deg))
+        return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+
+    assert turn_toward(about_z(10.0), about_z(12.0), np.radians(5.0)) == pytest.approx(about_z(12.0))
+    assert turn_toward(about_z(10.0), about_z(50.0), np.radians(5.0)) == pytest.approx(about_z(15.0))
+    assert turn_toward(about_z(170.0), about_z(-170.0), np.radians(5.0)) == pytest.approx(about_z(175.0))
