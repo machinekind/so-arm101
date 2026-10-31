@@ -225,15 +225,19 @@ def test_its_settings_become_the_panel_form():
     fields = {field.name: field for field in load_strategy(NAME).fields}
 
     assert list(fields) == TOUCH_FIELDS + ["object_kind", "open_margin_m", "squeeze_m", "grasp_depth",
-                                           "lift_m", "hold_s", "max_attempts"]
+                                           "lift_m", "hold_s", "max_attempts", "carry_s", "release", "wait_s",
+                                           "recover_m"]
     assert fields["object_kind"].kind is str and fields["object_kind"].default == "cube"
     assert fields["object_kind"].choices == KINDS
     assert fields["label"].default == "" and fields["touch_z"].default == 0.0
     assert fields["hover_m"].default == 0.04 and fields["time_limit_s"].default == 120.0
     assert fields["max_attempts"].kind is int
     assert fields["close_jaw"].kind is bool and fields["need_contact"].kind is bool
+    assert fields["release"].kind is bool and fields["release"].default is False
+    assert fields["carry_s"].default == 10.0 and fields["wait_s"].default == 20.0
+    assert fields["recover_m"].default == 0.15
     floats = [name for name in fields if name not in ("label", "object_kind", "close_jaw", "need_contact",
-                                                      "max_attempts")]
+                                                      "max_attempts", "release")]
     assert all(fields[name].kind is float for name in floats)
     assert not any(field.required for field in fields.values())
 
@@ -257,7 +261,7 @@ def test_grasp_lifts_the_cube_and_the_twin_says_w_dloni(twin):
     add_block(twin, "cube")
     clock = Clock()
     sources: list[tuple[float, str, float]] = []
-    strategy = load_strategy(NAME).create({})
+    strategy = load_strategy(NAME).create({"carry_s": 1.0})
     assert isinstance(strategy, GraspStrategy)
     runner = StrategyRunner(twin, strategy, objects=tracked(twin, "cube", clock, sources))
     phases: list[str] = []
