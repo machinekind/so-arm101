@@ -18,6 +18,7 @@ EXPECTED = {
         (STRATEGIES, "dream"): "soarm_lab.strategies.dream:DreamStrategy",
         (STRATEGIES, "touch"): "soarm_lab.strategies.touch:TouchStrategy",
         (STRATEGIES, "touch_jev"): "soarm_lab.strategies.touch_jev:JevTouchStrategy",
+        (STRATEGIES, "grasp"): "soarm_lab.strategies.grasp:GraspStrategy",
         ("console_scripts", "soarm-lab"): "soarm_lab.cli:main",
     },
 }

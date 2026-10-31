@@ -77,7 +77,7 @@ def test_the_lab_imports_nothing_from_the_twin_at_runtime() -> None:
         "import soarm_lab.cli, soarm_lab.sim, soarm_lab.strategies, soarm_lab.strategies.policy\n"
         "import soarm_lab.strategies.ik, soarm_lab.strategies.touch, soarm_lab.strategies.dream\n"
         "import soarm_lab.strategies.judges, soarm_lab.strategies.jev, soarm_lab.strategies.touch_jev\n"
-        "import soarm_lab.strategies.jaw\n"
+        "import soarm_lab.strategies.jaw, soarm_lab.strategies.grasp\n"
         "import soarm_lab.dream_run\n"
         "import soarm_lab.rl, soarm_lab.rl.env, soarm_lab.rl.evaluate\n"
         "if all(importlib.util.find_spec(m) for m in ('jax', 'optax', 'mujoco_warp')):\n"
@@ -97,8 +97,8 @@ def test_the_lab_imports_nothing_from_the_twin_at_runtime() -> None:
 RUNTIME = ("soarm_lab", "soarm_lab.strategies", "soarm_lab.strategies.policy", "soarm_lab.strategies.ik",
            "soarm_lab.strategies.touch", "soarm_lab.strategies.dream", "soarm_lab.strategies.judges",
            "soarm_lab.strategies.jev", "soarm_lab.strategies.touch_jev", "soarm_lab.strategies.jaw",
-           "soarm_lab.rl.policy", "soarm_lab.station", "soarm_lab.sim", "soarm_lab.cli", "soarm_lab.rl",
-           "soarm_lab.rl.env", "soarm_lab.rl.evaluate")
+           "soarm_lab.strategies.grasp", "soarm_lab.rl.policy", "soarm_lab.station", "soarm_lab.sim",
+           "soarm_lab.cli", "soarm_lab.rl", "soarm_lab.rl.env", "soarm_lab.rl.evaluate")
 #: Imports the runtime, loads both bundled policies, runs a strategy tick, `policies` and `eval`.
 RUN_POLICIES = f"""
 import sys
