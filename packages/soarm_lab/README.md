@@ -62,6 +62,52 @@ Trained policies are saved under `workspace/policies/<name>/` in a checkout.
 Set `SOARM_LAB_POLICIES` to choose another directory. Commands accept a policy
 name or a path to `policy.npz`; local names take precedence over bundled ones.
 
+### Lift from the detector's pose
+
+The LLM detector and its seeded refinement give a block pose that is late, 1 to 3 cm
+off, and lost while the hand covers the block. The backup lift policy trains on such a
+pose. Four training options change the pose the policy sees; all are off by default:
+
+- `--pose-bias-m M`: one xy offset per episode, up to M metres in a random direction,
+  kept through the carry.
+- `--pose-delay MIN,MAX`: the pose is MIN to MAX policy ticks old (a tick is 50 ms),
+  drawn per episode. The default is 0,3.
+- `--pose-period N`: the pose refreshes every 1 to N ticks, drawn per episode. The
+  default is 3.
+- `--latch-m M`: the pose does not refresh while the gripper is within M metres of the
+  block's centre. A block in the jaws is always that close, so the pose stays frozen
+  through the carry.
+
+`--grip-close-s S` sets how long the gripper servo takes to close fully, in seconds.
+Without it the simulated jaw closes as fast as it is commanded, in about 0.45 s. Training
+spreads the time by 0.8 to 1.25. A measured time belongs in the exported `station.json`
+as `dynamics.grip_close_s`; the option overrides it. Only the simulated jaw is slower:
+the command the policy sees and the arm receives keeps its rate.
+
+Copy the exported station to `stations/<name>` at the checkout root. Git ignores that
+folder, and the gpu-ops sync carries it to the GPU machine; it skips `workspace/`. If a
+sync ever carries only tracked files, copy the folder to the machine by hand. Then run
+from the checkout root:
+
+```bash
+uv run --package soarm-lab --extra train soarm-lab train --init lift-v3 \
+  --kinds cube,cuboid5,cuboid85,cylinder --station stations/desk1 \
+  --pose-bias-m 0.03 --pose-delay 4,40 --pose-period 4 --latch-m 0.05 \
+  --grip-close-s 1.3 --iters 300 --name lift-blocks-late
+```
+
+This command has not been run yet. The delay of 0.2 to 2 s and the refresh every 1 to 4
+ticks follow the seeded detector, which updates every 0.2 s. The raw LLM detector answers
+in seconds; for it, use `--pose-delay 20,400 --pose-period 400`, and the twin's tracker
+must keep a lost pose for longer than its default 6 s. The 1.3 s closing time comes from
+the grasp plan, not from a measurement. `jobs/train.sh` runs the same training with
+`STATION`, `POSE_BIAS_M`, `POSE_DELAY`, `POSE_PERIOD`, `LATCH_M` and `GRIP_CLOSE_S`.
+
+A slow CPU test runs these options for 2 iterations on 4 worlds
+(`uv run pytest -q -m slow packages/soarm_lab/tests/test_cli.py`). It checks that
+training starts from `lift-v3`, runs and saves the options in `meta.json`. It does not
+check that the policy learns.
+
 ## Use a measured station
 
 Export the setup from the twin's environment, then evaluate on it from this workspace:
@@ -118,7 +164,11 @@ Settings can be supplied through the panel or the twin's configuration:
 
 ```yaml
 policy:
-  policy: reach-v3
+  policy: lift-v3
+  # the lift from the detector's pose (with a policy trained with --latch-m)
+  object_kind: cube
+  max_pose_age_s: 30.0
+  latch_s: 10.0
 ik:
   goal_x: 0.22
   goal_y: 0.0
@@ -141,11 +191,20 @@ to follow a moving goal; `end_on_reach: false` keeps IK following until stopped.
 Lift, pick-and-place and touch require object poses in `obs.objects`. The Strategies
 panel passes the twin's perception to every run, so they need a running detector;
 without a pose, lift and pick-and-place stop after `wait_for_cube_s` and touch after
-`wait_for_pose_s`. Touch works with the `cube` or the `llm` detector. Lift and
-pick-and-place need `cube`: they count success only from fresh poses, and the LLM
-detector's poses are seconds old ("ostatnie widziane"). Lift accepts those only with
-`allow_last_seen: true` and a `max_pose_age_s` above their age. Pick-and-place never
-does: it counts only a cube the cameras see lying ("kamery") or the simulation's truth.
+`wait_for_pose_s`. Touch works with the `cube` or the `llm` detector. Pick-and-place
+needs `cube`: it counts only a cube the cameras see lying ("kamery") or the
+simulation's truth.
+
+Lift counts success while the jaw holds the block above `lift_height`. A live, fresh
+pose gives the block's height directly. Any other pose (late, kept or frozen) is judged
+by forward kinematics: the gripper must be more than `lift_height` above the block's
+top. A pose that leaves `obs.objects` is kept for `latch_s` seconds after the last good
+sighting; the default 0 ends the run at once. A policy trained with `--latch-m` also
+keeps its pose while the jaw holds or the gripper is within `latch_m` of the block, as
+in training. For the LLM or seeded detector, set `max_pose_age_s` above the age of its
+poses and `latch_s` to a few seconds. `allow_last_seen` belongs to the cube detector
+with lift-v3: it lets a young "ostatnie widziane" pose count by its own height. It plays
+no part in the forward-kinematics verdict.
 
 `touch` takes x and y from the first usable pose of its `label` and touches at
 `touch_z` above the table, because the LLM detector's poses lie on the table top,

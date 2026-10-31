@@ -26,6 +26,9 @@ datasets/
 
 # Station data: trained policies (soarm-lab train)
 workspace/
+# Exported stations copied in for a GPU run (`twin export`), carried by the gpu-ops sync (which skips
+# workspace/), never committed. Anchored: the package's bundled stations are tracked
+/stations/
 
 # Local configuration
 configs/local.yaml
