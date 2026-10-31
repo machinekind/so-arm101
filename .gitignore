@@ -31,7 +31,7 @@ workspace/
 configs/local.yaml
 **/configs/local.yaml
 # API keys: DREAM_API_KEY for `uv run --env-file .env soarm-lab dream ...`, TYPESAFE_API_KEY for touch_jev
-# in `uv run --env-file .env twin ui`
+# and grasp_jev in `uv run --env-file .env twin ui`
 .env
 # The gpu-ops dispatcher's personal values (see .gpu-ops.example), and the job logs it pulls
 .gpu-ops
