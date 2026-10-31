@@ -3,7 +3,8 @@
 Each module wraps one part of the lab and imports from it: `policy` runs an RL policy from `rl`, `ik`
 drives the TCP to a goal with `kinematics`, `touch` touches an object from `obs.objects` with `kinematics`,
 `touch_jev` adds a decision step after each descent, asking TypeSafe's Jev model (`judges`, `jev`) over
-the network, and `dream` runs Dream Labs' Dream-1 model over the network.
+the network, and `dream` runs Dream Labs' Dream-1 model over the network. `jaw` holds the jaw rule the
+strategies share with the twin's tracker.
 `packages/soarm_lab/pyproject.toml` registers each strategy under the `machinekind_twin.strategies` entry
 point group. The twin finds it there and runs it through its
 `StrategyRunner`.
@@ -11,9 +12,11 @@ point group. The twin finds it there and runs it through its
 
 from .dream import DreamSettings, DreamStrategy
 from .ik import IKSettings, IKStrategy
+from .jaw import JawMonitor, JawReading
 from .policy import PolicySettings, PolicyStrategy
 from .touch import TouchSettings, TouchStrategy
 from .touch_jev import JevTouchSettings, JevTouchStrategy
 
-__all__ = ["DreamSettings", "DreamStrategy", "IKSettings", "IKStrategy", "JevTouchSettings",
-           "JevTouchStrategy", "PolicySettings", "PolicyStrategy", "TouchSettings", "TouchStrategy"]
+__all__ = ["DreamSettings", "DreamStrategy", "IKSettings", "IKStrategy", "JawMonitor", "JawReading",
+           "JevTouchSettings", "JevTouchStrategy", "PolicySettings", "PolicyStrategy", "TouchSettings",
+           "TouchStrategy"]
