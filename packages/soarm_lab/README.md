@@ -270,19 +270,20 @@ jaw: the moving jaw pushes the block `open_margin_m` across the table onto the f
 
 Once the pose is taken the hand points straight down, with the jaws across the block's short side (the
 pose's yaw, folded by the block's symmetry) or, when the pose has no rotation, on their current heading.
-The hand turns toward that orientation at 90 deg/s. The SO-101 reaches a top-down hand only in a band:
-a block straight ahead at x 0.14 to 0.27 m with the 4 cm hover, 0.12 to 0.25 m at 10 cm to the side.
-With `touch`'s 6 cm hover the band shrinks to 0.18 to 0.24 m straight ahead, so `hover_m` and `lift_m`
-default to 4 cm. Beyond the band `wrist_flex` stops at its 95 degree limit, and the run ends at once with
-"chwytak nie siega tam pionowo".
+The hand turns toward that orientation at 90 deg/s. The SO-101 reaches a top-down hand only in a band.
+From the rest pose, for a pose without rotation and the 4 cm hover, a block straight ahead must lie at x
+0.14 to 0.27 m. At 10 cm to the right (y -0.10) the band is 0.12 to 0.25 m, and at 10 cm to the left
+(y +0.10) 0.03 to 0.25 m. With `touch`'s 6 cm hover the band shrinks to 0.18 to 0.24 m straight ahead,
+so `hover_m` and `lift_m` default to 4 cm. Beyond the band `wrist_flex` stops at its 95 degree limit,
+and the run ends at once with "chwytak nie siega tam pionowo".
 
 When an open jaw tip lands on the block during the straddle, the arm holds where it stopped, rises,
 closes the jaw once its tips are 10 mm clear of the block, and probes again half the short side along
 the jaws, toward the moving jaw first. If that probe misses, the block lies on the other side, and the
 next probe goes half the short side the other way. A tip stall costs one extra probe when the first
-shift picks the right side and two when it does not; `max_attempts` (3) covers both. A close that finds nothing ends the run:
-after a straddle that met nothing, the jaw alone cannot say whether the probe pushed the block away or
-it sits at the jaws' edge.
+shift picks the right side and two when it does not; `max_attempts` (3) covers both. A close that finds
+nothing ends the run: after a straddle that met nothing, the jaw alone cannot say whether the probe
+pushed the block away or it sits at the jaws' edge.
 
 | How the run ends | Stop reason |
 | --- | --- |
@@ -296,6 +297,7 @@ it sits at the jaws' edge.
 | the jaw does not start closing | szczeka nie ruszyla po rozkazie zamkniecia (G mm) |
 | the jaw does not stand after the close | szczeka nie staje 3 s po zamknieciu - serwo albo odczyt |
 | the jaw closes on nothing | chwyt pusty - blok przesuniety albo obok szczek |
+| the arm does not reach the lift point 3 s after the lift's travel | ramie nie podnioslo bloku (N mm z 40 mm) |
 | the jaw stops squeezing on the way up or at the top | blok wypadl ze szczeki podczas podnoszenia |
 | the jaw creeps closed | blok zsuwa sie w szczekach |
 | the jaw does not stand at the top | szczeka nie stoi po podniesieniu - blok sie rusza w szczekach |
@@ -306,11 +308,17 @@ The block stays in the jaws after "zadanie wykonane". The last target squeezes, 
 the final tick's target before it disengages, and disengaging keeps the supervisor's command. A later
 STOP or Home keeps the squeeze through the twin's `hold_measured`. The operator releases the block.
 
-In the twin, a block at the default contact settings gives way under the arm: the stall torque pressed
-the 11 g cube 9 mm into the table, and the probe never stalled. test_grasp_in_twin.py therefore makes the
-block's contact as stiff as the 5 ms step allows. The cube then still gives about 2.5 mm under the probe,
-so the measured top is that much low. The real pads' sole and the real jaw's opening per unit are not
-measured yet; `touch_z` above zero overrides the probe height.
+A run on the twin panel's simulated block currently ends with "brak kontaktu w punkcie dotyku - obiektu
+tam nie ma". The twin builds the block with MuJoCo's default contact, because its `scene.Box` has no
+contact settings. The arm's push sinks the 11 g cube 8 mm into the table instead of stalling, and the
+probe reaches its bottom as if in free air. Until the twin's blocks get a contact of their own, set
+`need_contact: false` for a simulated block. A probe that reaches its bottom then counts, the grasp
+height comes from the block's nominal top, and the run lifts the cube. A missing block then shows only
+at the close ("chwyt pusty"). Keep `need_contact` on for the real arm, where the stall is the only sign
+that the block is there. test_grasp_in_twin.py runs both cases at the default contact. Its other runs
+make the block's contact as stiff as the 5 ms step allows. The cube then still gives about 2.5 mm under
+the probe, so the measured top is that much low. The real pads' sole and the real jaw's opening per unit
+are not measured yet; `touch_z` above zero overrides the probe height.
 
 Later steps of the [grasp plan](../../docs/grasp-plan.md) plug in through these methods: the recovery
 loop through `carrying` and `after_grasp_failed`, wrist-camera centring through `before_descent` and
