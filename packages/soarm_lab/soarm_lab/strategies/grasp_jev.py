@@ -50,13 +50,15 @@ stall's top. At the close and the lift:
   regrasp on the last of `max_attempts`;
 * lift goes on: the lift's time limit and the check's `hold_s` count from the answer, not from the ask;
 * give_up ends the run with the block where it is: a held block stays held;
-* regrasp_wider opens the jaw one `open_margin_m` wider on each side; regrasp_rotated turns the jaws by 90
-  degrees at the same block centre (only for a guessed heading on a block whose grasp a turn changes).
-  After an empty close or a tip on the block the arm rises (`grasp`'s sideways retry, half the short
-  side, for regrasp_wider); with the block held on the table the jaw first opens there (phase let_go);
-  with the block in the air the arm first lowers it to the grasp point (phase lower: a stall on the way
-  down counts as arrival, so nothing presses into the table). The jaw opens before the arm rises and
-  closes only at the hover, then the run aims at the block centre between the fingertips and probes again.
+* regrasp_wider opens the jaw twice `open_margin_m` wider, all of it on the moving jaw's side: the fixed
+  tip stays where `grasp` puts it, so the closing jaw pushes the block no farther. regrasp_rotated turns
+  the jaws by 90 degrees at the same block centre (only for a guessed heading on a block whose grasp a
+  turn changes). After a tip on the block the arm rises and probes again half the short side along the
+  jaws (`grasp`'s sideways retry, for regrasp_wider), after an empty close at the same block centre. With
+  the block held on the table the jaw first opens there (phase let_go); with the block in the air the arm
+  first lowers it to the grasp point (phase lower: a stall on the way down counts as arrival, so nothing
+  presses into the table). The jaw opens before the arm rises and closes only at the hover, then the run
+  aims at the block centre between the fingertips and probes again.
 
 The held answer never moves the arm by itself: it is a record, and a disagreement with the jaw rule is
 counted and said in a review or a stop reason ("szczeka: trzyma", "szczeka: pusta").
@@ -91,7 +93,7 @@ by the block's colour (0..1), on the tick thread; the state says "unknown" until
 What this module uses of `grasp` (its seams and private names): `after_touch`, `after_grasp_failed`,
 `carrying` (the watch), `_aim` with `_headings`, `_psi`, `_rot`, `_block_xy0`, `_shift_k` and
 `_next_shift`, `_start_rise` with `_retarget_xy` and RETARGET, `_regrasp`, `_sighting`, `_jaw_point`,
-`_set_jaw_goal`, `_ramp_jaw`, `_jaw_ready`, `_centre_open`, `_recover_open_q`, `_q`, `_g`, `reading`,
+`_set_jaw_goal`, `_ramp_jaw`, `_jaw_ready`, `_recover_open_q`, `_q`, `_g`, `reading`,
 `gap_open_m`, `cmd_open`, `cmd_closed`, `block`, `block_rotation`, the `grasp` status, and touch's
 `_phase_t0` as the only phase clock of lift_off and check.
 """
@@ -297,8 +299,9 @@ def source_name(source: str) -> str:
 
 
 def jaw_gap_bucket(gap_m: float, short_m: float, commanded_m: float, margin_gap_m: float) -> str:
-    """The measured jaw gap against the block's short side, in named buckets."""
-    if gap_m <= commanded_m + margin_gap_m:
+    """The measured jaw gap against the block's short side, in named buckets: "closed" only for a jaw
+    commanded tighter than the block that reached its command (a jaw left open on a tip is "open")."""
+    if commanded_m < short_m - EDGE_M and gap_m <= commanded_m + margin_gap_m:
         return "closed"
     if gap_m < short_m - EDGE_M:
         return "narrower_than_block"
@@ -820,12 +823,14 @@ class GraspJevStrategy(GraspStrategy):
             self._turn_rad = math.pi / 2
         self._chosen_by, self._aim_sighting = f"next:{step}", None
         if from_judge:
-            if step == "regrasp_wider":
-                # grasp's sideways retry: half the short side along the jaws, toward the moving jaw first.
+            if step == "regrasp_wider" and self._failed_why == "tip":
+                # grasp's sideways retry after a tip on the block: half the short side along the jaws, toward
+                # the moving jaw first.
                 if self._next_shift() is None:
                     return self._halt(f"{name}: wyczerpane przesuniecia chwytu ({attempt})", target)
             else:
-                # A wrong heading, not a wrong place: the same block centre.
+                # An empty close says nothing about which side the block lies on, and a wrong heading is no
+                # wrong place: the next probe looks at the same block centre.
                 assert self.grasp.block_xy is not None
                 self._retarget_xy = np.array(self.grasp.block_xy, float)
             self._start_rise(RETARGET)
@@ -837,11 +842,18 @@ class GraspJevStrategy(GraspStrategy):
         return self.hold(note)
 
     def _widen(self) -> None:
-        """The straddle's opening one `open_margin_m` wider on each side, for every later straddle."""
+        """The straddle's opening twice `open_margin_m` wider, for every later straddle, all of it on the
+        moving jaw's side.
+
+        The plan keeps the open jaw's centre of the operator's opening (`_centre_open`), so the TCP, the
+        fixed tip and the grasp height stay where `grasp` puts them and only the moving tip stands farther
+        out. The SO-101 closes one jaw: the block always ends against the fixed tip, so a fixed tip one more
+        margin out would push the block twice as far across the table; in the twin a 16 mm push ran the cube
+        up onto the fixed tip.
+        """
         spec = self.kin.spec
         self.gap_open_m += 2 * self.grasp_settings.open_margin_m
         self.cmd_open = self.kin.gripper_for_gap(self.gap_open_m)
-        self._centre_open = self.kin.jaw_centre(self.cmd_open)
         self._recover_open_q = min(float(self._hi[self._g]),
                                    max(self._q(self.cmd_open), spec.jaw.open + 2 * spec.jaw.margin))
 

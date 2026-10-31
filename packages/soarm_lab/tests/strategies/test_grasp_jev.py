@@ -562,14 +562,10 @@ def test_an_arm_that_never_came_down_is_not_asked_about():
 
 
 # ------------------------------------------------------------ the close and the regrasps
-def test_an_empty_close_asks_and_regrasp_wider_opens_one_margin_more_and_shifts_sideways():
+def test_an_empty_close_asks_and_regrasp_wider_probes_again_with_the_moving_jaw_opened_wider():
     judge = Scripted(TOUCHED, reply_grasp("nothing_in_jaws", 0.9, "regrasp_wider", 0.8), TOUCHED, HELD, HELD)
     s = started(judge)
-    aims: list[tuple[float, float]] = []
-    commands: list[dict[str, float]] = []
-    answers, phases, *_ = follow(s, seen(), block=block_at(), grip=lambda attempt: attempt >= 2,
-                                 commands=commands,
-                                 until=lambda s: bool(aims.append(s.grasp.block_xy) or False))
+    answers, phases, *_ = follow(s, seen(), block=block_at(), grip=lambda attempt: attempt >= 2)
 
     assert answers[-1].success, answers[-1].note
     close = judge.states[1]
@@ -578,14 +574,15 @@ def test_an_empty_close_asks_and_regrasp_wider_opens_one_margin_more_and_shifts_
     assert s.gap_open_m == pytest.approx(0.041 + 0.016, abs=1e-6)
     assert s.cmd_open == pytest.approx(KIN.gripper_for_gap(0.057), abs=0.1)
     u = np.array([math.cos(math.radians(s.grasp.heading_deg)), math.sin(math.radians(s.grasp.heading_deg))])
-    assert s.grasp.block_xy == pytest.approx(np.asarray(XY) + 0.0125 * u, abs=1e-6)
+    assert s.grasp.block_xy == pytest.approx(XY, abs=1e-6)              # an empty close: the same centre
     assert contains(runs(phases), ["close", "judge", "rise", "approach", "descend", "touched", "rise", "open",
                                    "straddle", "close", "lift_off", "check"])
     second = [k for k, p in enumerate(phases) if p == "close"][-1]
     fixed, moving = KIN.fingertips(dict(answers[second].target, gripper=s.cmd_open))
     aim = np.asarray(s.grasp.block_xy)
-    along = sorted([(fixed[:2] - aim) @ u, (moving[:2] - aim) @ u])
-    assert along == pytest.approx([-0.0285, 0.0285], abs=1e-3)
+    # The fixed tip where grasp's 41 mm opening puts it, the 16 mm more on the moving jaw's side.
+    assert (fixed[:2] - aim) @ u == pytest.approx(-0.0205, abs=1e-3)
+    assert (moving[:2] - aim) @ u == pytest.approx(0.0365, abs=1.5e-3)
     assert judge.states[3]["earlier_attempts"] == [{"attempt": 1, "probe": "touched", "close": "empty",
                                                     "verdict": "nothing_in_jaws", "next": "regrasp_wider",
                                                     "chosen_by": "first_sighting"}]
@@ -593,6 +590,28 @@ def test_an_empty_close_asks_and_regrasp_wider_opens_one_margin_more_and_shifts_
     decide = phases.index("rise", phases.index("judge"))
     assert answers[decide].note == "jev: szczeka pusta (0.90), chwyt szerzej (0.80) - proba 2"
     assert s.status.attempt == 2 and s.judging.disagreements == 0
+
+
+def test_a_tip_on_the_cube_and_regrasp_wider_probe_half_the_short_side_toward_the_moving_jaw():
+    """The pose 1 cm toward the fixed jaw: the open moving tip lands on the cube. grasp's sideways retry
+    aims 12.5 mm toward the moving jaw, whose tip then stands 16 mm farther out."""
+    psi0 = first_heading()
+    u = np.array([math.cos(psi0), math.sin(psi0)])
+    pose = tuple(np.asarray(XY) - 0.010 * u)
+    judge = Scripted(TOUCHED, reply_grasp("nothing_in_jaws", 0.9, "regrasp_wider", 0.8), TOUCHED, HELD, HELD)
+    s = started(judge)
+    block = block_at()
+    answers, phases, *_ = follow(s, seen(pose), block=block, ticks=3000)
+
+    assert answers[-1].success, answers[-1].note
+    assert judge.states[1]["close"]["ended"] == "jaw_tip_landed_on_block_before_closing"
+    assert judge.states[1]["close"]["jaw_gap"] == "open"
+    assert s.grasp.straddle_stalls == 1 and s.status.attempt == 2
+    assert s.grasp.block_xy == pytest.approx(np.asarray(pose) + 0.0125 * u, abs=1e-6)
+    assert contains(runs(phases), ["straddle", "straddled", "judge", "rise", "approach", "descend", "touched",
+                                   "rise", "open", "straddle", "close", "lift_off", "check"])
+    # The cube is pushed only by the 8 mm grasp's margin leaves, not by the 16 mm more on the moving side.
+    assert float(np.linalg.norm(block.path[-1] - np.asarray(XY))) < 0.012
 
 
 def test_a_tip_stall_on_a_cuboid_with_a_guessed_heading_regrasps_rotated():
@@ -1108,6 +1127,8 @@ def test_the_blob_seam_fills_block_seen_between_jaws():
                                          (0.0275, "block_wide"), (0.03, "open")])
 def test_the_jaw_gap_bucket_is_computed_in_code(gap: float, bucket: str):
     assert jaw_gap_bucket(gap, 0.025, 0.017, 0.004) == bucket
+    # A jaw that stands at an open command (a tip on the block) is never "closed".
+    assert jaw_gap_bucket(0.041, 0.025, 0.041, 0.004) == "open"
 
 
 def test_the_lift_and_blob_buckets_are_computed_in_code():
