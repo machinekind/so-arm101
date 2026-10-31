@@ -226,9 +226,13 @@ def test_its_settings_become_the_panel_form():
 
     assert list(fields) == TOUCH_FIELDS + ["object_kind", "open_margin_m", "squeeze_m", "grasp_depth",
                                            "lift_m", "hold_s", "max_attempts", "carry_s", "release", "wait_s",
-                                           "recover_m"]
+                                           "recover_m", "grasp_source", "library_dir", "min_score"]
     assert fields["object_kind"].kind is str and fields["object_kind"].default == "cube"
     assert fields["object_kind"].choices == KINDS
+    assert fields["grasp_source"].kind is str and fields["grasp_source"].default == "geometry"
+    assert fields["grasp_source"].choices == ("geometry", "library")
+    assert fields["library_dir"].kind is str and fields["library_dir"].default == ""
+    assert fields["min_score"].default == 0.0
     assert fields["label"].default == "" and fields["touch_z"].default == 0.0
     assert fields["hover_m"].default == 0.04 and fields["time_limit_s"].default == 120.0
     assert fields["max_attempts"].kind is int
@@ -237,7 +241,8 @@ def test_its_settings_become_the_panel_form():
     assert fields["carry_s"].default == 10.0 and fields["wait_s"].default == 20.0
     assert fields["recover_m"].default == 0.15
     floats = [name for name in fields if name not in ("label", "object_kind", "close_jaw", "need_contact",
-                                                      "max_attempts", "release")]
+                                                      "max_attempts", "release", "grasp_source",
+                                                      "library_dir")]
     assert all(fields[name].kind is float for name in floats)
     assert not any(field.required for field in fields.values())
 
@@ -249,6 +254,9 @@ def test_the_twin_builds_it_strictly():
         plugin.create({"kind": "cube"})
     with pytest.raises(ValueError, match="grasp: object_kind"):
         plugin.create({"object_kind": "ball"})
+    # A library the kind does not have refuses the run before it starts.
+    with pytest.raises(ValueError, match="grasp: no grasp library for 'cuboid5'"):
+        plugin.create({"object_kind": "cuboid5", "grasp_source": "library"})
     strategy = plugin.create({"object_kind": "cuboid5"})
     assert isinstance(strategy, GraspStrategy) and strategy.block.kind == "cuboid5"
     assert strategy.label == "cuboid5"

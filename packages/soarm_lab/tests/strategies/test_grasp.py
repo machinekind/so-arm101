@@ -25,12 +25,15 @@ import soarm
 
 pytest.importorskip("mujoco")
 
+from soarm_lab.grasp_library import GraspLibrary, save_library  # noqa: E402
 from soarm_lab.kinematics import IKSolution, RobotKinematics  # noqa: E402
 from soarm_lab.rl.objects import object_spec  # noqa: E402
 from soarm_lab.robot import load_robot  # noqa: E402
 from soarm_lab.strategies.grasp import (  # noqa: E402
     IN_HAND,
     JAW_REACH_M,
+    MIN_BITE_M,
+    MIN_GRASP_Z,
     PROBE_BELOW_M,
     SEEN,
     STALE,
@@ -1427,3 +1430,198 @@ def test_the_notes_per_phase():
     assert any(a.note.startswith("w gore znad bloku") for a, p in zip(answers, phases, strict=True)
                if p == "rise")
     assert s.grasp_verdict() == ("lifted", "blok podniesiony")
+
+
+# ------------------------------------------------------------ the grasp library
+#: The cube's pose as the box fit gives it, turned by 90 degrees: the same axis-aligned box for the fake arm
+#: (`Block` has no yaw of its own here), but not the identity, so library mode composes the library.
+YAWED = seen(source="kamery", age_s=0.2, yaw_deg=90.0)
+DOWN = (0.0, 0.0, -1.0)
+ACROSS_Y = (0.0, 1.0, 0.0)
+
+
+def grasp(pad: tuple[float, float, float], approach: tuple[float, float, float] = DOWN,
+          closing: tuple[float, float, float] = ACROSS_Y, width: float = 0.025, score: float = 0.9) -> dict:
+    """One grasp of a library file: the pad point and the axes in the cube's block frame."""
+    return {"position": list(pad), "approach": list(approach), "closing": list(closing), "width_m": width,
+            "score": score}
+
+
+def library_dir(tmp_path, grasps: list[dict]) -> str:
+    """A folder holding a cube library of `grasps`, for `library_dir`."""
+    library = GraspLibrary.from_dict({"format": "soarm-lab-grasps", "version": 1, "kind": "cube",
+                                      "half_size": list(CUBE), "generator": {"name": "hand"},
+                                      "grasps": grasps})
+    save_library(library, tmp_path / "cube.json")
+    return str(tmp_path)
+
+
+def aimed(objects: dict[str, ObjectPose], **settings) -> tuple[GraspStrategy, Action]:
+    """A library strategy started and given one tick with `objects`: the tick that takes the pose and aims."""
+    s = started(objects, grasp_source="library", **settings)
+    return s, s.act(obs(dict(SPEC.home), t=0.05, objects=objects))
+
+
+def test_the_library_source_is_validated_at_construction(tmp_path):
+    with pytest.raises(ValueError, match="grasp: no grasp library for 'cuboid5'"):
+        GraspStrategy(GraspSettings(grasp_source="library", object_kind="cuboid5"))
+    with pytest.raises(ValueError, match="grasp: grasp_source must be one of geometry, library, is 'x'"):
+        GraspStrategy(GraspSettings(grasp_source="x"))
+    with pytest.raises(ValueError, match=r"grasp: min_score must lie within \[0, 1\], is 1.5"):
+        GraspStrategy(GraspSettings(min_score=1.5))
+    (tmp_path / "cube.json").write_text('{"format": "soarm-lab-grasps", "version": 2}')
+    with pytest.raises(ValueError, match="grasp: not a grasp library of version 1"):
+        GraspStrategy(GraspSettings(grasp_source="library", library_dir=str(tmp_path)))
+    # Geometry mode reads no library, whatever the folder says.
+    assert GraspStrategy(GraspSettings(library_dir=str(tmp_path))).library is None
+    assert len(GraspStrategy(GraspSettings(grasp_source="library")).library.grasps) == 8
+
+
+@pytest.mark.parametrize("min_score, rejected", [(0.0, "pochylenie 8"), (0.6, "pochylenie 8, wynik 8")])
+def test_a_library_grasp_is_chosen_by_score_then_heading_and_the_run_succeeds(min_score: float,
+                                                                             rejected: str):
+    s = started(YAWED, grasp_source="library", min_score=min_score, carry_s=0.5)
+    answers, phases, *_ = follow(s, dict(SPEC.home), YAWED, 1500, block=block_at())
+    grasp = s.grasp
+
+    assert answers[-1].success, answers[-1].note
+    assert grasp.grasp_source == "library" and grasp.rejected == rejected
+    # The other centred grasps (0.91, 0.90 and 0.89) are index 0's own headings: one of each is kept.
+    assert grasp.library_index == 0 and grasp.library_score == 0.92
+    assert grasp.candidates == (20 if min_score == 0.0 else 16)
+    # Of index 0's four headings the one nearest the rest pose's.
+    assert grasp.heading_deg == pytest.approx(0.0, abs=0.5)
+    assert min(abs(grasp.heading_deg - k * 90.0) for k in range(-2, 3)) < 0.5
+    assert s.gap_open_m == pytest.approx(0.041) and s.gap_closed_m == pytest.approx(0.017)
+    assert grasp.depth_m == pytest.approx(0.0125) and grasp.offset_xy == pytest.approx((0.0, 0.0))
+    assert grasp.skipped == ""
+    approach = [a.note for a, p in zip(answers, phases, strict=True) if p == "approach"]
+    assert approach and approach[0].endswith("(biblioteka #0, wynik 0.92)")
+
+
+def test_an_identity_rotation_falls_back_to_geometry_in_library_mode():
+    s = started(seen(), grasp_source="library", carry_s=0.5)
+    answers, phases, *_ = follow(s, dict(SPEC.home), seen(), 1500, block=block_at())
+
+    assert answers[-1].success, answers[-1].note
+    assert s.grasp.grasp_source == "geometry (brak obrotu)"
+    assert s.grasp.library_index == -1 and math.isnan(s.grasp.library_score)
+    assert math.radians(s.grasp.heading_deg) == pytest.approx(first_heading(), abs=math.radians(0.5))
+    approach = [a.note for a, p in zip(answers, phases, strict=True) if p == "approach"]
+    assert approach and approach[0].endswith("(geometria: brak obrotu)")
+    # Geometry mode says nothing of a source in its notes.
+    s, answers, phases, *_ = grasped()
+    assert s.grasp.grasp_source == "geometry" and s.library is None
+    assert not any("biblioteka" in a.note or "geometria" in a.note for a in answers)
+
+
+def test_a_library_whose_grasps_all_fail_the_cheap_filters_ends_the_run(tmp_path):
+    side = grasp((0.0, 0.0, 0.0), approach=(-1.0, 0.0, 0.0))
+    s, a = aimed(YAWED, library_dir=library_dir(tmp_path, [side]))
+
+    assert a.done and not a.success
+    assert a.note.startswith("biblioteka chwytow 'cube': zaden z 8 chwytow nie pasuje")
+    assert "pochylenie 8" in a.note
+    assert s.status.phase == "done" and s.grasp.block_xy is None and s.status.touch_point is None
+
+
+def test_a_library_grasp_the_jaw_cannot_open_for_is_rejected_as_szczeka(tmp_path):
+    wide = grasp((0.0, 0.0, 0.0), width=0.080)
+    s = GraspStrategy(GraspSettings(grasp_source="library", library_dir=library_dir(tmp_path, [wide])))
+    s.start(run_info(), obs(dict(SPEC.home), objects=YAWED))
+
+    # The short side still fits, so start does not refuse; the grasp's own opening does not.
+    assert 0.080 + 2 * s.grasp_settings.open_margin_m > s.kin.jaw_gap(100.0)
+    a = s.act(obs(dict(SPEC.home), t=0.05, objects=YAWED))
+    assert a.done and not a.success
+    assert "zaden z 8 chwytow nie pasuje (szczeka 8)" in a.note
+
+
+def test_a_library_grasp_off_centre_moves_the_straddle_point_and_its_depth(tmp_path):
+    folder = library_dir(tmp_path, [grasp((0.005, 0.0, 0.0085))])
+    s = started(YAWED, grasp_source="library", library_dir=folder, carry_s=0.5)
+    s.act(obs(dict(SPEC.home), t=0.05, objects=YAWED))
+    grasp_ = s.grasp
+    psi = math.radians(grasp_.heading_deg)
+    centre = KIN.jaw_centre(s.cmd_open)
+
+    assert math.hypot(*grasp_.offset_xy) == pytest.approx(0.005, abs=1e-6)
+    assert grasp_.depth_m == pytest.approx(0.004, abs=1e-9)
+    u = np.array([math.cos(psi), math.sin(psi)])
+    expected = np.asarray(XY) + np.asarray(grasp_.offset_xy) - centre[2] * u
+    assert s._straddle_xy == pytest.approx(expected, abs=1e-3)
+    # The jaw point lies over the pad point; the probe still goes to the block centre.
+    assert s.status.touch_point is not None
+    assert np.asarray(s.status.touch_point[:2]) == pytest.approx(np.asarray(XY) + along(s, 0.0156), abs=1e-3)
+    assert 0.004 - KIN.tip_swing(s.cmd_open) / 2 >= MIN_BITE_M and grasp_.skipped == ""
+
+    answers, *_ = follow(s, dict(SPEC.home), YAWED, 1500, block=block_at())
+    assert answers[-1].success, answers[-1].note
+    assert grasp_.grasp_point is not None
+    expected_z = max(MIN_GRASP_Z, grasp_.top_m - 0.004 + centre[0])
+    assert grasp_.grasp_point[2] == pytest.approx(expected_z, abs=1e-3)
+
+
+def test_a_shallow_library_grasp_is_skipped_by_the_bite_rule(tmp_path):
+    """The tips' midpoint 1.5 mm below the top: the trailing tip would sit on the top edge. The four headings
+    of the centred grasp are its only executed grasps (fold k flipped is fold k + 2)."""
+    s, a = aimed(YAWED, library_dir=library_dir(tmp_path, [grasp((0.0, 0.0, 0.011))]))
+
+    assert a.done and not a.success
+    assert a.note.startswith("biblioteka chwytow 'cube': zaden chwyt nie pasuje do szczeki")
+    assert "zbyt plytko 4" in a.note and s.grasp.skipped == "zbyt plytko 4"
+
+
+def test_a_deep_library_grasp_is_clamped_to_the_minimum_grasp_height(tmp_path):
+    folder = library_dir(tmp_path, [grasp((0.0, 0.0, -0.0105))])
+    s = started(YAWED, grasp_source="library", library_dir=folder, carry_s=0.5)
+    answers, phases, *_ = follow(s, dict(SPEC.home), YAWED, 1500, block=block_at())
+
+    assert s.grasp.depth_m == pytest.approx(0.023)
+    assert "rise" in phases and s.grasp.grasp_point is not None
+    assert s.grasp.grasp_point[2] == pytest.approx(MIN_GRASP_Z)
+
+
+def test_the_openings_follow_the_library_grasps_width(tmp_path):
+    """The diagonal of the cube is 35.4 mm across: the jaw opens to it plus the margins and closes to it minus
+    the squeeze, and a retarget would move by half of it."""
+    diagonal = grasp((0.0, 0.0, 0.0), closing=(math.sqrt(0.5), math.sqrt(0.5), 0.0), width=0.035355)
+    s, a = aimed(YAWED, library_dir=library_dir(tmp_path, [diagonal]))
+
+    assert not a.done, a.note
+    assert s.gap_open_m == pytest.approx(0.035355 + 0.016)
+    assert s.gap_closed_m == pytest.approx(0.035355 - 0.008)
+    assert KIN.jaw_gap(s.cmd_open) == pytest.approx(0.051355, abs=1e-6)
+    assert KIN.jaw_gap(s.cmd_closed) == pytest.approx(0.027355, abs=1e-6)
+    # Along a diagonal of the cube turned by 90 degrees: 45 degrees plus a quarter turn.
+    assert min(abs(wrap(math.radians(s.grasp.heading_deg - 45.0 - 90.0 * k))) for k in range(4)) < 1e-6
+    xy0 = s._block_xy0
+    assert xy0 is not None
+    shifted = s._next_shift()
+    assert shifted is not None and shifted - xy0 == pytest.approx(along(s, 0.035355 / 2))
+    # The next run starts across the short side again.
+    s.start(run_info(), obs(dict(SPEC.home)))
+    assert s.gap_open_m == pytest.approx(0.041) and s.cmd_open == pytest.approx(KIN.gripper_for_gap(0.041))
+
+
+def test_the_sideways_retarget_keeps_the_library_grasp_and_shifts_by_half_its_width():
+    """The pose 1 cm off toward the fixed jaw: the moving tip lands on the block, the run rises, re-composes
+    the library at the shifted point and takes the same grasp half its width toward the moving jaw."""
+    pose = seen((XY[0] - 0.010, XY[1]), source="kamery", age_s=0.2, yaw_deg=90.0)
+    aims: list[tuple[float, float]] = []
+    indices: list[int] = []
+
+    class Aims(GraspStrategy):
+        def _aim(self, xy: np.ndarray) -> None:
+            super()._aim(xy)
+            aims.append((float(xy[0]), float(xy[1])))
+            indices.append(self.grasp.library_index)
+
+    s = started(pose, strategy=Aims, grasp_source="library", carry_s=0.5)
+    answers, phases, *_ = follow(s, dict(SPEC.home), pose, 3000, block=block_at())
+
+    assert answers[-1].success, answers[-1].note
+    assert s.grasp.heading_deg == pytest.approx(0.0, abs=0.5)
+    assert s.grasp.straddle_stalls == 1 and s.status.attempt == 2
+    assert indices == [0, 0] and s.grasp.library_index == 0
+    assert np.asarray(aims[1]) - np.asarray(aims[0]) == pytest.approx(along(s, 0.0125), abs=1e-6)
