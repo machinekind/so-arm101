@@ -37,9 +37,11 @@ torch = ["soarm-lab[torch]"]
 # The application stays optional; the base packages depend only on its API.
 twin = ["machinekind-twin", "machinekind-twin-cube", "machinekind-twin-llm"]
 
-# The type checker runs on what implements the twin's contracts and on the test panel; the rest is not typed yet.
+# The type checker runs on what implements the twin's contracts, on the grasp library the grasp strategy
+# composes and on the test panel; the rest is not typed yet.
 [tool.pyright]
-include = ["packages/soarm_lab/soarm_lab/strategies", "packages/soarm/soarm/panel.py"]
+include = ["packages/soarm_lab/soarm_lab/strategies", "packages/soarm_lab/soarm_lab/grasp_library.py",
+           "packages/soarm/soarm/panel.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["packages/soarm/tests", "packages/soarm_lab/tests"]
