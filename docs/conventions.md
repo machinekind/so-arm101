@@ -32,6 +32,9 @@ the old torch trainer (`policy.pt`) into `policy.npz`. Neither extra is a defaul
 `packages/soarm_lab/tests/test_dependency_rule.py` runs the bundled policies in a fresh interpreter and
 checks that no jax, optax or torch module got loaded, also with them made unimportable.
 Without them `train` names `soarm-lab[train]` and `convert` names `soarm-lab[torch]`.
+GraspGenX, which computes the grasp libraries, is not a dependency either: it runs in its own clone and venv
+(`tools/graspgenx`), and the lab reads only the files it produced, `soarm_lab/grasps/<kind>.json`, as it reads
+a station export.
 
 The twin holds no robot and no training. It keeps the scene, cameras, calibration, perception primitives,
 runtime, safety, sysid, `StrategyRunner` and `EpisodeLog`.
@@ -120,6 +123,7 @@ The plugin contracts are the package `machinekind-twin-api` (see the root README
   Its decision records have the five fields of the api 0.1.3 `Decision`, and go to `Action.decisions` once the pin reaches that version.
   `soarm_lab.strategies.grasp.GraspStrategy` subclasses `TouchStrategy` too: after the probe it opens, straddles, closes and lifts, and verifies the hold with `soarm_lab.strategies.jaw.JawMonitor`, the jaw rule the twin's tracker shares.
   While it carries the block it reconciles the jaw rule with `Observation.objects` every tick and grasps a dropped block again through `retarget`; `release()` ends that watch.
+  With `grasp_source: library` it composes the block's grasp library (`soarm_lab.grasp_library`) with the pose's rotation.
   `soarm_lab.strategies.wrist.WristGraspStrategy` subclasses it: at each hover it reads the wrist camera from `Observation.frames`, fits the block's known shape to its colour blob and re-aims through `grasp`'s seams `before_descent` and `before_straddle`.
   It needs OpenCV only when a camera is named.
   `soarm_lab.strategies.grasp_jev.GraspJevStrategy` subclasses `GraspStrategy` as `touch_jev` subclasses `touch`: it asks a judge after the probe, the close and the lift through `soarm_lab.strategies.judges.Consultation` (one question at a time on a thread of its own, never waiting in `act`), and leaves a dropped block to `grasp`'s recovery.
