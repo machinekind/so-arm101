@@ -72,7 +72,9 @@ Guards (grasp's, and):
 * **the move guard**: after a move the block must lie within `MOVE_GUARD` of the move plus `centre_tol_m`
   of the new aim. A turned or mirrored frame, or a wrong mount, sends the arm the wrong way and shows up
   here: the aim reverts to where the look found it and the arm goes back there. A focal-length error does
-  not: the area window rejects it beyond x1.2 or below x0.6, and inside that it converges;
+  not show here: 20 % too long or 30 % too short, the blob reads the wrong size and the look is skipped;
+  within that range the fit is biased by up to 6 mm (synthetic frames), so `focal_px` matters on a real
+  camera;
 * **the reach**: a re-aim the arm cannot take top-down (`_aim` raises) keeps the old aim;
 * **the arm**: a look whose arm does not stand still at the hover within `LOOK_STALL_S` of its target
   stopping is skipped;

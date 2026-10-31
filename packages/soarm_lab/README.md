@@ -113,6 +113,9 @@ With this package installed alongside the twin, its Strategies tab offers:
 - `grasp`: `touch`'s probe on a block of the Classic World set, then rise, open, straddle, close and
   lift; the jaw rule verifies the hold, and the strategy grasps the block again when it drops out of
   the jaws; see [Grasp a block](#grasp-a-block).
+- `grasp_wrist`: `grasp` plus a look through the wrist camera at each hover: the block's colour blob is
+  fitted with its known shape, the jaws are centred on it and turned across its short side; see
+  [Wrist camera](#wrist-camera).
 - `dream`: runs Dream Labs' Dream-1 model from a prompt and the cameras; see [Dream Labs](#dream-labs).
 
 All send joint targets through the twin's safety supervisor. Read the
@@ -146,6 +149,12 @@ grasp:
   carry_s: 10.0
   wait_s: 20.0
   time_limit_s: 120.0
+grasp_wrist:
+  object_kind: cuboid5
+  wrist_camera: wrist
+  hue_deg: -1.0
+  centre_tol_m: 0.003
+  look_before_straddle: true
 ```
 
 Goals use metres in the robot's base frame. Enable the panel's 3D goal handle
@@ -175,7 +184,8 @@ See [policy settings](soarm_lab/strategies/policy.py),
 [IK settings](soarm_lab/strategies/ik.py),
 [touch settings](soarm_lab/strategies/touch.py),
 [touch_jev settings](soarm_lab/strategies/touch_jev.py),
-[grasp settings](soarm_lab/strategies/grasp.py) and
+[grasp settings](soarm_lab/strategies/grasp.py),
+[grasp_wrist settings](soarm_lab/strategies/wrist.py) and
 [conventions](../../docs/conventions.md) for the full interfaces.
 
 ## Jev in the touch loop
@@ -392,9 +402,87 @@ test_grasp_from_cameras.py pulls the cube out of the jaws mid-carry in the twin,
 two simulated cameras, and the strategy grasps it again where it lies.
 
 Later steps of the [grasp plan](../../docs/grasp-plan.md) plug in through these methods: wrist-camera
-centring through `before_descent` and `before_straddle`, a Jev judge through `after_touch`, `after_miss`
-and `after_grasp_failed`, a place task or the Jev step through `carrying` and `release()`, and the grasp
-library through `grasp_headings`.
+centring through `before_descent` and `before_straddle` (`grasp_wrist`, below), a Jev judge through
+`after_touch`, `after_miss` and `after_grasp_failed`, a place task or the Jev step through `carrying` and
+`release()`, and the grasp library through `grasp_headings`.
+
+### Wrist camera
+
+`grasp_wrist` is `grasp` with a look through the wrist camera at each hover: at the probe hover before the
+descent, and again at the straddle hover with the jaw open. The LLM detector's pose is 1 to 3 cm off and
+has no yaw. The first look moves the aim onto the block and turns the jaws across its short side before
+the jaw touches it; the second sees where the probe pushed it.
+
+The camera rides on the gripper (robot.yaml `cameras: wrist`, the MJCF's `wrist_cam`): 53 mm behind the
+TCP along the approach, 55 mm to its side and 12 mm across, looking 33 degrees off the approach toward the
+jaws, with image right along the closing axis. At the probe hover the block's top lies 105 mm along the
+camera's axis, 0.26 mm per pixel at 640x360. The twin renders the camera at the MJCF's 1920x1080, and the
+strategy scales a frame down to 640 columns before it measures. A measurement takes 9 to 18 ms on the
+strategy's tick:
+
+1. The camera's pose comes from the measured joints and robot.yaml (`RobotKinematics.camera`), its focal
+   length from the field of view and the frame's height (1200 px at 1080 rows).
+2. The block's colour is cut out by an HSV window. The arm's own jaws are masked out from the model, one
+   convex hull per jaw body of its collision primitives: the twin's jaws are gold, the hue of `cuboid5`.
+3. Blobs whose centroid lies within `max_shift_m` plus 15 mm of the aim count. The gold remnants the
+   mask leaves lie 73 mm (probe hover) and 101 mm (straddle hover) away.
+4. The block's known shape is fitted to each blob by the IoU of its silhouette: a box by its corners, the
+   cylinder by its end circles. The visible side face pulls a plain centroid 6 mm toward the camera; the
+   fit lands within 0.5 mm and 1.5 degrees on the simulation's render, every block at both hovers.
+5. The blob is the block when the fitted block shows at least a fifth of itself outside the jaws and
+   inside the frame, and the blob's area is 0.55 to 1.25 of that visible silhouette. One block reads 0.94
+   to 1.01, two touching blocks of one colour 1.52 to 1.83.
+
+The look then aims at the measured centre through `grasp`'s `_aim`, with the measured yaw as the block's
+rotation, and drives to the new hover with the top-down hand, so the wrist rolls to the new heading under
+its speed limit. It measures again only once every arm joint has stood within 0.5 degrees for 5 ticks:
+`_settled` follows the TCP, which stays put while the wrist rolls. A look ends "centred" when the block
+lies within `centre_tol_m` (3 mm) of the aim and its yaw within 3 degrees of the heading's, or after
+`rounds` (2) moves with the last aim standing. A look never counts an attempt and never ends a run.
+
+After a move the next measurement must find the block within half the move plus `centre_tol_m` of the new
+aim. A frame turned by 180 degrees, a mirrored stream, a mount turned by more than about 40 degrees or a
+frame from another camera sends the arm the wrong way, and the residual grows. The aim then reverts to
+where the look began and the arm goes back there. This move guard does not catch a wrong focal length:
+20 % too long or 30 % too short, the blob reads the wrong size and the look is skipped; within that range
+the fit is biased by up to 6 mm, so set `focal_px` from the real camera's intrinsics.
+
+| Why a look ends without centring | Note |
+| --- | --- |
+| no frame from the camera within `frame_wait_s` (1 s) | centrowanie pominiete: brak klatki z kamery wrist |
+| frames older than `max_frame_age_s` (0.2 s) | centrowanie pominiete: klatka z kamery wrist za stara (N.N s) |
+| no blob near the aim | centrowanie pominiete: brak bloku w kamerze |
+| a blob of the wrong size: two touching blocks of one colour, or in the twin a yellow block more than 3 cm toward the camera, merged with the gold jaws | centrowanie pominiete: plama w kamerze nie pasuje rozmiarem (xN.NN) |
+| two blobs of the block's size | centrowanie pominiete: dwa bloki w kamerze |
+| a fit below `min_fit_iou` | centrowanie pominiete: ksztalt nie pasuje (IoU 0.NN) |
+| the block farther than `max_shift_m` (40 mm) from the aim | centrowanie pominiete: blok w kamerze N mm od celu - nie ufam |
+| the calibrated tip pixel more than a fifth of the width from the model's | centrowanie pominiete: tip_pixel daleko od modelu (N px) |
+| an aim the arm cannot take top-down | centrowanie pominiete: punkt (...) m: chwytak nie ustawi sie pionowo (blad N st.), and `grasp`'s other reach texts |
+| the arm does not stand still at the hover within 3 s | centrowanie pominiete: ramie nie stoi nad blokiem (N mm od zawisu) |
+| the move guard fired and the arm went back | centrowanie cofniete: przesuniecie nie zgadza sie z obrazem (N mm po korekcie M mm) |
+| the move guard fired and the old aim is out of reach | centrowanie pominiete: przesuniecie nie zgadza sie z obrazem, cofniecie niemozliwe: ... |
+
+After any of these the probe goes on as in `grasp`, from the last aim the look stood on.
+
+The colour windows default to the set's colours in `rl.objects`: hue 4.6 degrees for the cube, 45 for
+`cuboid5`, 140 for `cuboid85` and 285 for the cylinder, 20 degrees to each side, with saturation from
+0.35 and value from 0.25. The twin's table (hue 33, saturation 0.2) stays out. On the stand, sample a
+pixel of the block in the panel and set `hue_deg`, `hue_window_deg`, `min_saturation` and `min_value`
+per block when the lighting differs. A real camera needs three more settings. `focal_px` sets the focal
+length when its field of view is not the MJCF's 48.46 degrees. `tip_pixel_x` and `tip_pixel_y` give the
+pixel where the closed tips' midpoint appears in the frame as received; the model puts it at (902.6,
+799.2) of 1920x1080, (300.5, 266.1) of 640x360. A tip seen 10 px to the right of the model's point, in a
+frame 640 px wide, moves every measurement 10 px left: 2.6 mm toward the fixed jaw at the probe hover.
+That corrects a turned mount to first order: 1 degree of mount error is 21 px at a focal length of
+1200 px. `rotate_180` turns the frame of a camera mounted upside down.
+
+OpenCV is needed only with a camera named: `start` refuses a run without it, naming
+`opencv-python-headless`; the twin brings it. `wrist_camera: ""` runs plain `grasp`. In the twin the
+camera is named `wrist` in sim and on the stand alike. On a simulated arm the twin renders it; on a real
+arm it serves the workspace camera record named `wrist`, the physical USB camera on the mount, and never
+triangulates from it. Until the twin's calibration wave skips arm cameras, disable the `wrist` record
+during the wave. test_wrist_in_twin.py lifts a cube seen 15 mm off and a cuboid turned 35 degrees, seen
+without a yaw, from the twin's rendered frames.
 
 ## Dream Labs
 
