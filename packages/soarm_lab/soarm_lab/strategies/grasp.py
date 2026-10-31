@@ -20,6 +20,9 @@ imports the twin.
       release: false               # open the jaw after carry_s; false = the operator takes the block
       wait_s: 20.0                 # after a drop, how long to wait for the cameras to see the block [s]
       recover_m: 0.15              # a block seen farther than this from where it fell was taken [m]
+      grasp_source: geometry       # or library: the kind's GraspGenX grasps, soarm_lab/grasps/<kind>.json
+      library_dir: ""              # another folder of <kind>.json libraries [path]; "" = the bundled ones
+      min_score: 0.0               # library grasps scored below this are skipped [0..1]
       time_limit_s: 120.0          # a safety net for the whole run: a grasp, a drop, a regrasp [s]
 
 The block's dimensions come from `rl.objects.object_spec(object_kind)`, never from the image: the short
@@ -49,6 +52,23 @@ the top before the TCP gets there. Then:
 The gripper command ramps at `SPEED_SHARE` of the supervisor's gripper speed limit, 240 units/s on the
 SO-101, about 10 mm of gap a tick: the open takes 4 ticks, the close 3, and the servo follows later.
 
+Grasp source. With `grasp_source: library` the grasps come from the kind's grasp library (`grasp_library`,
+computed offline by GraspGenX, tools/graspgenx/README.md) instead of the geometry above. When the pose is
+taken the library is composed with its rotation: a cylinder's grasps are rolled about its axis to point
+down, every grasp is folded over the block's yaw symmetry, and each comes with the jaws both ways round.
+Grasps whose approach leans more than `MAX_TILT_DEG` from vertical, scored below `min_score`, wider or
+narrower than the jaw's travel, or whose pad point lies above the top, below the bottom or outside the block
+are dropped; of the grasps the hand would execute alike (heading, offset, depth, width) the best-scored is
+kept; they rank by score in steps of 0.05, then by the smaller turn of the wrist. `_aim` tries them in that
+order as it tries the headings: each gives the heading, the jaw point (the library's pad point, an offset
+from the block centre and a depth below its top) and the openings (the grasp's width plus twice
+`open_margin_m`, minus `squeeze_m`); the probe still goes to the block centre, and the hand stays top-down
+whatever the library's own slight tilt. A grasp whose shallower fingertip would sit less than `MIN_BITE_M`
+below the top is skipped: the hinged jaw's moving tip trails the fixed one by `RobotKinematics.tip_swing`,
+up to 23 mm wide open. A pose without rotation (the LLM detector alone) falls back to the geometry for that
+aim; the approach's note says which grasp was taken. The sideways retarget after a tip stall moves by half
+the chosen grasp's width.
+
 Guards (touch's, and):
 
 * **the jaw rule**: the close counts as held only after the measured jaw dropped by `jaw.margin` below its
@@ -64,7 +84,7 @@ Guards (touch's, and):
   closes only 10 mm higher, so the moving tip does not sweep across the block's top;
 * **reach with orientation**: when the pose is taken, the full multi-start IK must reach the probe hover,
   the probe's bottom, the straddle hover, the grasp point and the lift point with the hand within 5
-  degrees of top-down, within the limits and off the arm's own body, for one of the candidate headings.
+  degrees of top-down, within the limits and off the arm's own body, for one of the candidate grasps.
   On the SO-101, from the rest pose and for a pose without rotation, that holds for a cube's centre in a
   band: x 0.14-0.27 m straight ahead with the 4 cm hover (0.18-0.24 with touch's 6 cm); 10 cm to the
   side x 0.12-0.25 m on the right (y -0.10) and 0.03-0.25 m on the left (y +0.10). Beyond it wrist_flex
@@ -140,8 +160,9 @@ done. Seams for later steps: `after_miss` (a probe that met nothing), `before_de
 descent until it returns None once: wrist centring), `before_straddle` and `_looking` (at the straddle
 hover), `after_grasp_failed` (a tip on the block or an empty close), `carrying` (every tick from the hold
 verdict until the release: the watch above, which a decision step may extend), `release` (ends the watch
-and opens the jaw: a place task or the Jev step calls it), `grasp_headings` (the candidate headings: the
-grasp library) and `grasp_verdict` (for logs and a decision step). `after_touch` stays the seam of `touch`.
+and opens the jaw: a place task or the Jev step calls it), `grasp_headings` (the geometry's candidate
+headings), `candidates` (every grasp `_aim` tries, the geometry's or the library's) and `grasp_verdict` (for
+logs and a decision step). `after_touch` stays the seam of `touch`.
 """
 
 from __future__ import annotations
@@ -150,10 +171,12 @@ import logging
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 
 import numpy as np
 from machinekind_twin_api.strategy import Action, Observation, RunInfo
 
+from ..grasp_library import GraspLibrary, compose, load_library, rejections_text, roll_axis, select, wrap
 from ..kinematics import IKSolution, RobotKinematics
 from ..rl.objects import KINDS, ObjectSpec, object_spec
 from .jaw import JawMonitor, JawReading
@@ -192,9 +215,19 @@ MAX_TILT_DEG = 8.0
 CLEAR_BEFORE_CLOSE_M = 0.010
 #: The SO-101's `jaw_reach(0)` [m]: the probe height before `start` knows the model, replaced there.
 JAW_REACH_M = 0.0066
-#: The sideways retargets after a jaw tip landed on the block, in half short sides along the closing
-#: heading from the first aim (+ toward the moving jaw).
+#: The sideways retargets after a jaw tip landed on the block, in half widths of the grasp (the short side in
+#: the geometry) along the closing heading from the first aim (+ toward the moving jaw).
 SHIFTS = (1, -1, 2, -2)
+#: Where the grasp comes from (`GraspSettings.grasp_source`): the block's geometry or its grasp library.
+GEOMETRY = "geometry"
+LIBRARY = "library"
+GRASP_SOURCES = (GEOMETRY, LIBRARY)
+#: The shallower fingertip must sit at least this far below the block's top at the planned depth [m]; the
+#: hinged jaw's moving tip trails the fixed one by `RobotKinematics.tip_swing` of the opening.
+MIN_BITE_M = 0.003
+#: Why `_aim` skipped a library grasp before the reach check, in this order: the jaw cannot make its openings,
+#: its squeeze would not read as holding, its shallower tip would sit on the block's top edge.
+SKIPS = ("szczeka", "scisk", "zbyt plytko")
 
 #: Phases of a run after touch's (`TouchStatus.phase`).
 RISE = "rise"
@@ -308,6 +341,16 @@ class GraspSettings(TouchSettings):
     #: A block seen after a drop farther than this from where it fell was taken away, not dropped: the run
     #: stops for a person instead of chasing it [m].
     recover_m: float = 0.15
+    #: Where the grasp's heading, jaw point, depth and width come from: "geometry" (across the block's short
+    #: side at its centre, `grasp_depth` of its height down) or "library" (the kind's cached GraspGenX grasps,
+    #: composed with the pose's rotation; a pose without rotation falls back to the geometry)
+    #: [geometry|library].
+    grasp_source: str = field(default=GEOMETRY, metadata={"choices": GRASP_SOURCES})
+    #: The folder of `<kind>.json` grasp libraries; empty = the ones bundled with soarm-lab
+    #: (soarm_lab/grasps/). A missing or invalid library refuses the run [path].
+    library_dir: str = ""
+    #: Library grasps whose generator score lies below this are skipped [0..1].
+    min_score: float = 0.0
 
 
 @dataclass
@@ -352,6 +395,53 @@ class GraspStatus:
     lost_s: float = float("nan")
     #: `release()` was commanded.
     released: bool = False
+    #: Where the last aim's grasps came from: "geometry", "library", or "geometry (brak obrotu)" (library mode
+    #: with a pose without rotation); '' before the first aim.
+    grasp_source: str = ""
+    #: The grasps the last aim could try, and why the library's others were dropped ("pochylenie 8, wynik 8").
+    candidates: int = 0
+    rejected: str = ""
+    #: The library grasps the last aim skipped by the jaw rules before the reach check ("zbyt plytko 4").
+    skipped: str = ""
+    #: The chosen library grasp: its index in the library and its score; -1 and NaN for a geometry grasp.
+    library_index: int = -1
+    library_score: float = float("nan")
+    #: How far below the block's top the fingertips' midpoint goes [m], and its offset from the block centre
+    #: [m, base frame].
+    depth_m: float = float("nan")
+    offset_xy: tuple[float, float] = (0.0, 0.0)
+
+
+@dataclass(frozen=True)
+class GraspCandidate:
+    """One grasp `_aim` may take: the heading, where the fingertips' midpoint goes, the width it closes on."""
+
+    #: The closing heading of the top-down hand [rad, base frame].
+    psi: float
+    #: The fingertips' midpoint minus the block centre, horizontally [m, base frame].
+    offset_xy: tuple[float, float]
+    #: How far below the block's top the fingertips' midpoint goes [m].
+    depth_m: float
+    #: The block's width between the jaws [m]: the openings follow from it.
+    width_m: float
+    #: The library's score; 1 for a geometry grasp.
+    score: float
+    #: "geometry", or "library:<index>" for the library's grasp of that index.
+    origin: str
+
+
+@dataclass(frozen=True)
+class JawPlan:
+    """The jaw of one candidate: the openings [m], their gripper commands [app units], the open jaw's
+    fingertips' midpoint in the TCP frame [m] and how far its moving tip trails the fixed one [m]."""
+
+    gap_open_m: float
+    gap_closed_m: float
+    cmd_open: float
+    cmd_closed: float
+    cmd_block: float
+    centre_open: np.ndarray
+    swing_m: float
 
 
 class GraspStrategy(TouchStrategy):
@@ -380,9 +470,25 @@ class GraspStrategy(TouchStrategy):
             raise ValueError(f"grasp: max_attempts must be at least 1, is {config.max_attempts}")
         if not config.close_jaw:
             raise ValueError("grasp: close_jaw must be on: the probe needs closed tips")
+        if config.grasp_source not in GRASP_SOURCES:
+            raise ValueError(f"grasp: grasp_source must be one of {', '.join(GRASP_SOURCES)}, is "
+                             f"{config.grasp_source!r}")
+        if not 0 <= config.min_score <= 1:
+            raise ValueError(f"grasp: min_score must lie within [0, 1], is {config.min_score}")
         block = object_spec(kind)
         #: The block as the simulation builds it: half sizes (x long, y short, z height), yaw symmetry.
         self.block: ObjectSpec = block
+        #: The kind's grasp library with `grasp_source: library`, checked here so the twin's strict builder
+        #: refuses a missing or invalid one before any run; None in geometry mode.
+        self.library: GraspLibrary | None = None
+        if config.grasp_source == LIBRARY:
+            folder = Path(config.library_dir).expanduser() if config.library_dir else None
+            try:
+                self.library = load_library(kind, folder)
+            except (FileNotFoundError, ValueError) as exc:
+                raise ValueError(f"grasp: {exc}") from exc
+        #: The axis a cylinder's library grasps are rolled about to point down; None for a box.
+        self._axis = roll_axis(block)
         self.short_m = 2 * block.half_size[1]
         self.height_m = 2 * block.half_size[2]
         #: The block's top when it lies on the table [m]; the probe measures the real one.
@@ -416,10 +522,17 @@ class GraspStrategy(TouchStrategy):
         self._grip_step_q = float("inf")
         self._jaw_tol_q = 0.0
         self._jaw_on_command = True
-        #: The openings [m] and their gripper commands [app units], the commands known from `start`.
+        #: The openings [m] and their gripper commands [app units], the commands known from `start`; across
+        #: the short side until a library grasp of another width is chosen (`_take_plan`).
         self.gap_open_m = self.short_m + 2 * config.open_margin_m
         self.gap_closed_m = self.short_m - config.squeeze_m
         self.cmd_open = self.cmd_closed = self.cmd_block = self.cmd_probe = float("nan")
+        #: The chosen grasp (None before the first aim), the width the openings are for and the depth and
+        #: offset of the fingertips' midpoint [m].
+        self._cand: GraspCandidate | None = None
+        self._width_m = self.short_m
+        self._depth_m = config.grasp_depth * self.height_m
+        self._offset_xy = (0.0, 0.0)
         #: The fingertips' midpoint in the TCP frame for the probe's and the open jaw [m].
         self._centre_probe = np.zeros(3)
         self._centre_open = np.zeros(3)
@@ -471,6 +584,12 @@ class GraspStrategy(TouchStrategy):
         kin, spec, cfg = self.kin, self.kin.spec, self.grasp_settings
         if spec.gripper is None or spec.gripper_range_q is None:
             raise RuntimeError("grasp: the arm has no gripper")
+        # The openings across the short side, in both modes: the narrowest sane width, and an earlier run's
+        # library grasp does not carry over.
+        self.gap_open_m = self.short_m + 2 * cfg.open_margin_m
+        self.gap_closed_m = self.short_m - cfg.squeeze_m
+        self._cand, self._width_m, self._offset_xy = None, self.short_m, (0.0, 0.0)
+        self._depth_m = cfg.grasp_depth * self.height_m
         g = self._g = spec.joints.index(spec.gripper)
         closed, opened = spec.gripper_range_q
         try:
@@ -573,34 +692,116 @@ class GraspStrategy(TouchStrategy):
 
     # ------------------------------------------------------------------- aiming
     def _aim(self, xy: np.ndarray) -> None:
-        """Aims the run at the block centre `xy`: the first candidate heading whose five points the arm
-        reaches top-down. Raises, changing nothing, when none does."""
+        """Aims the run at the block centre `xy`: the first of `candidates` whose jaw the rules allow and
+        whose five points the arm reaches top-down. Raises, changing nothing but the status's record of the
+        candidates, when none does."""
         xy = np.asarray(xy, float)
         if xy.shape != (2,) or not np.all(np.isfinite(xy)):
             raise RuntimeError("punkt poza zasiegiem ramienia: wspolrzedne nieskonczone")
-        headings = self._headings or grasp_headings(self.block_rotation, self.block.yaw_period,
-                                                    self._heading_now())
+        candidates = self.candidates(self.block_rotation)
         top = self.grasp.top_m if np.isfinite(self.grasp.top_m) else self.top_nominal
-        grasp_z = self._grasp_height(top)
+        skips: dict[str, int] = dict.fromkeys(SKIPS, 0)
+        plans: dict[float, JawPlan | str] = {}
         first_failure: tuple[np.ndarray, dict[str, float], IKSolution] | None = None
-        for psi in headings:
-            plan = self._plan(xy, psi, grasp_z)
-            failure = self._reach(plan, psi)
+        for cand in candidates:
+            jaw = self._candidate_jaw(cand, plans)
+            if isinstance(jaw, str):
+                skips[jaw] += 1
+                continue
+            if cand.origin != GEOMETRY and cand.depth_m - jaw.swing_m / 2 < MIN_BITE_M:
+                # The tips' midpoint goes to the depth, the shallower tip half the swing above it.
+                skips["zbyt plytko"] += 1
+                continue
+            grasp_z = self._grasp_height(top, cand.depth_m, jaw.centre_open)
+            plan = self._plan(xy, cand, jaw, grasp_z)
+            failure = self._reach(plan, cand.psi, jaw.cmd_open)
             if failure is None:
-                self._take_plan(xy, psi, plan, grasp_z)
+                self.grasp.skipped = rejections_text(skips, SKIPS)
+                self._take_plan(xy, cand, jaw, plan, grasp_z)
                 return
             first_failure = first_failure or failure
-        assert first_failure is not None
+        self.grasp.skipped = rejections_text(skips, SKIPS)
+        if first_failure is None:
+            raise RuntimeError(f"biblioteka chwytow '{self.block.kind}': zaden chwyt nie pasuje do szczeki "
+                               f"({self.grasp.skipped})")
         raise RuntimeError(self._unreachable(*first_failure))
 
-    def _plan(self, xy: np.ndarray, psi: float, grasp_z: float) -> dict[str, np.ndarray]:
-        """The TCP points of one heading: the jaw point over the block centre, as the TCP sees it."""
-        u = np.array([math.cos(psi), math.sin(psi)])
+    def candidates(self, rotation: np.ndarray) -> list[GraspCandidate]:
+        """The grasps `_aim` tries on a block with pose `rotation`, in order. The seam of the grasp source.
+
+        Geometry (`grasp_source: geometry`, or a library with an identity rotation: a detector that gives no
+        orientation, where a library composed at a guessed yaw would turn the wrist for nothing): across the
+        short side at the block centre, `grasp_depth` of its height down, on the headings `_headings` holds or
+        else `grasp_headings` gives. Library: the library composed with `rotation` and selected for the jaw
+        (`grasp_library.compose`, `select`), the best first; none left raises with the reasons.
+        """
+        R = np.asarray(rotation, float)
+        cfg, grasp, kin = self.grasp_settings, self.grasp, self.kin
+        psi_now = self._heading_now()
+        if self.library is None or np.allclose(R, np.eye(3), atol=1e-6):
+            grasp.grasp_source = GEOMETRY if self.library is None else f"{GEOMETRY} (brak obrotu)"
+            headings = self._headings or grasp_headings(R, self.block.yaw_period, psi_now)
+            depth = cfg.grasp_depth * self.height_m
+            grasp.candidates, grasp.rejected = len(headings), ""
+            return [GraspCandidate(float(psi), (0.0, 0.0), depth, self.short_m, 1.0, GEOMETRY)
+                    for psi in headings]
+        composed = compose(self.library, R, self.block.yaw_period, axis=self._axis)
+        kept, counts = select(composed, psi_now=psi_now, max_tilt_rad=math.radians(MAX_TILT_DEG),
+                              min_score=cfg.min_score, gap_min_m=kin.jaw_gap(0.0),
+                              gap_max_m=kin.jaw_gap(100.0), open_margin_m=cfg.open_margin_m,
+                              squeeze_m=cfg.squeeze_m, half_size=self.block.half_size)
+        grasp.grasp_source, grasp.candidates, grasp.rejected = LIBRARY, len(kept), rejections_text(counts)
+        if not kept:
+            raise RuntimeError(f"biblioteka chwytow '{self.block.kind}': zaden z {len(composed)} chwytow nie "
+                               f"pasuje ({grasp.rejected})")
+        return [GraspCandidate(c.psi, c.offset_xy, c.depth_m, c.width_m, c.score, f"{LIBRARY}:{c.index}")
+                for c in kept]
+
+    def _candidate_jaw(self, cand: GraspCandidate, plans: dict[float, JawPlan | str]) -> JawPlan | str:
+        """The jaw of `cand`, or the `SKIPS` reason it cannot be made: the run's own openings for a geometry
+        grasp of the width they are for (as `start` checked them, or a regrasp widened them), else computed
+        once per width (`plans`)."""
+        if cand.origin == GEOMETRY and abs(cand.width_m - self._width_m) < 1e-12:
+            return JawPlan(self.gap_open_m, self.gap_closed_m, self.cmd_open, self.cmd_closed, self.cmd_block,
+                           self._centre_open, float("nan"))
+        if cand.width_m not in plans:
+            plans[cand.width_m] = self._jaw_plan(cand.width_m)
+        return plans[cand.width_m]
+
+    def _jaw_plan(self, width_m: float) -> JawPlan | str:
+        """The jaw for a grasp across `width_m` [m], or why it cannot be made: "szczeka" (an opening outside
+        the jaw's travel) or "scisk" (the squeeze within the jaw margin, the start-time rule).
+
+        The opening is the width plus twice `open_margin_m`, plus whatever a regrasp widened the run's opening
+        by since the last aim (`grasp_jev`'s regrasp_wider), with the open jaw's centre of the opening without
+        that widening, as `grasp_jev` keeps it; the close is the width minus `squeeze_m`.
+        """
+        kin, cfg, jaw = self.kin, self.grasp_settings, self.kin.spec.jaw
+        plain = width_m + 2 * cfg.open_margin_m
+        widened = self.gap_open_m - (self._width_m + 2 * cfg.open_margin_m)
+        widened = widened if widened > 1e-9 else 0.0
+        try:
+            cmd_plain = kin.gripper_for_gap(plain)
+            cmd_open = kin.gripper_for_gap(plain + widened) if widened else cmd_plain
+            cmd_closed = kin.gripper_for_gap(width_m - cfg.squeeze_m)
+            cmd_block = kin.gripper_for_gap(width_m)
+        except ValueError:
+            return "szczeka"
+        if self._q(cmd_block) - self._q(cmd_closed) <= jaw.margin + jaw.still:
+            return "scisk"
+        return JawPlan(plain + widened, width_m - cfg.squeeze_m, cmd_open, cmd_closed, cmd_block,
+                       kin.jaw_centre(cmd_plain), kin.tip_swing(cmd_open))
+
+    def _plan(self, xy: np.ndarray, cand: GraspCandidate, jaw: JawPlan, grasp_z: float
+              ) -> dict[str, np.ndarray]:
+        """The TCP points of one candidate: the closed tips over the block centre for the probe, the open jaw
+        point over the block centre plus the grasp's offset for the straddle, as the TCP sees them."""
+        u = np.array([math.cos(cand.psi), math.sin(cand.psi)])
         hover_z = self.config.touch_z + self.config.hover_m
         # The jaw point J = TCP + R @ centre, with R top-down: horizontally centre[2] along the heading,
         # vertically centre[0] down.
         probe_xy = xy - self._centre_probe[2] * u
-        straddle_xy = xy - self._centre_open[2] * u
+        straddle_xy = xy + np.asarray(cand.offset_xy, float) - jaw.centre_open[2] * u
         return {"probe_xy": probe_xy, "straddle_xy": straddle_xy,
                 "probe_hover": np.array([*probe_xy, hover_z]),
                 "probe_bottom": np.array([*probe_xy, self.config.touch_z]),
@@ -608,17 +809,17 @@ class GraspStrategy(TouchStrategy):
                 "grasp": np.array([*straddle_xy, grasp_z]),
                 "lift": np.array([*straddle_xy, grasp_z + self.grasp_settings.lift_m])}
 
-    def _reach(self, plan: dict[str, np.ndarray], psi: float
+    def _reach(self, plan: dict[str, np.ndarray], psi: float, cmd_open: float
                ) -> tuple[np.ndarray, dict[str, float], IKSolution] | None:
-        """None when the full IK reaches every point of `plan` top-down; else the first point that fails,
-        the seed it was tried from and the solution."""
+        """None when the full IK reaches every point of `plan` top-down, the jaw at `cmd_open` from the
+        straddle hover on; else the first point that fails, the seed it was tried from and the solution."""
         kin, R = self.kin, top_down(psi)
         spec = kin.spec
         assert spec.gripper is not None
         seed = kin.from_q(self.q_cmd)
         for name in ("probe_hover", "probe_bottom", "straddle_hover", "grasp", "lift"):
             if name == "straddle_hover":
-                seed = dict(seed, **{spec.gripper: self.cmd_open})
+                seed = dict(seed, **{spec.gripper: cmd_open})
             point = plan[name]
             sol = kin.ik(point, R, seed=seed, accept=self._clear)
             if not (sol.ok and self._clear(sol.joints) and sol.rot_err <= math.radians(MAX_ROT_ERR_DEG)):
@@ -638,25 +839,45 @@ class GraspStrategy(TouchStrategy):
             return f"{where}: chwytak nie siega tam pionowo"
         return f"{where}: ramie uderzyloby samo w siebie"
 
-    def _take_plan(self, xy: np.ndarray, psi: float, plan: dict[str, np.ndarray], grasp_z: float) -> None:
+    def _take_plan(self, xy: np.ndarray, cand: GraspCandidate, jaw: JawPlan, plan: dict[str, np.ndarray],
+                   grasp_z: float) -> None:
+        psi = cand.psi
         self._psi, self._rot = float(psi), top_down(psi)
         self._headings = [float(psi)]
-        self.grasp.heading_deg = math.degrees(psi)
+        self._cand = cand
+        self._width_m, self._depth_m, self._offset_xy = cand.width_m, cand.depth_m, cand.offset_xy
+        self.gap_open_m, self.gap_closed_m = jaw.gap_open_m, jaw.gap_closed_m
+        self.cmd_open, self.cmd_closed, self.cmd_block = jaw.cmd_open, jaw.cmd_closed, jaw.cmd_block
+        self._centre_open = np.asarray(jaw.centre_open, float).copy()
+        g, jaw_rule = self._g, self.kin.spec.jaw
+        # As `start` has it: past the tracker's `open` gate, or the straddle opening when that is wider.
+        self._recover_open_q = min(float(self._hi[g]),
+                                   max(self._q(self.cmd_open), jaw_rule.open + 2 * jaw_rule.margin))
+        grasp = self.grasp
+        grasp.heading_deg = math.degrees(psi)
+        grasp.depth_m = float(cand.depth_m)
+        grasp.offset_xy = (float(cand.offset_xy[0]), float(cand.offset_xy[1]))
+        library = cand.origin.startswith(f"{LIBRARY}:")
+        grasp.library_index = int(cand.origin.split(":")[1]) if library else -1
+        grasp.library_score = float(cand.score) if library else float("nan")
         self.touch_xy = plan["probe_xy"].copy()
         x, y = (float(v) for v in self.touch_xy)
         self.status.touch_point = (x, y, float(self.config.touch_z))
-        self.grasp.block_xy = (float(xy[0]), float(xy[1]))
+        grasp.block_xy = (float(xy[0]), float(xy[1]))
         if self._block_xy0 is None:
             self._block_xy0 = xy.copy()
         self._straddle_xy = plan["straddle_xy"].copy()
         self._grasp_z = float(grasp_z)
-        self.grasp.grasp_point = (float(self._straddle_xy[0]), float(self._straddle_xy[1]), self._grasp_z)
+        grasp.grasp_point = (float(self._straddle_xy[0]), float(self._straddle_xy[1]), self._grasp_z)
 
-    def _grasp_height(self, top_m: float) -> float:
-        """The TCP height of the close [m]: the tips' centres `grasp_depth` of the block's height below its
-        top, the jaw's sole above `MIN_GRASP_Z`."""
-        depth = self.grasp_settings.grasp_depth * self.height_m
-        return max(MIN_GRASP_Z, top_m - depth + float(self._centre_open[0]))
+    def _grasp_height(self, top_m: float, depth_m: float | None = None, centre: np.ndarray | None = None
+                      ) -> float:
+        """The TCP height of the close [m]: the tips' centres `depth_m` below the block's top `top_m` (the
+        chosen grasp's by default), the jaw's sole above `MIN_GRASP_Z`; `centre` is the open jaw's tips'
+        midpoint in the TCP frame (the chosen jaw's by default)."""
+        depth = self._depth_m if depth_m is None else depth_m
+        centre = self._centre_open if centre is None else centre
+        return max(MIN_GRASP_Z, top_m - depth + float(centre[0]))
 
     @property
     def straddle_hover(self) -> np.ndarray:
@@ -1171,11 +1392,12 @@ class GraspStrategy(TouchStrategy):
         return self.hold("szczeka na bloku - w gore i obok")
 
     def _next_shift(self) -> np.ndarray | None:
-        """The next block centre of `SHIFTS` from the first aim, kept in `_retarget_xy`; None when spent."""
+        """The next block centre of `SHIFTS` from the first aim, in half widths of the chosen grasp along its
+        closing heading, kept in `_retarget_xy`; None when spent."""
         self._shift_k += 1
         if self._shift_k > len(SHIFTS) or self._block_xy0 is None:
             return None
-        shift = SHIFTS[self._shift_k - 1] * self.short_m / 2
+        shift = SHIFTS[self._shift_k - 1] * self._width_m / 2
         self._retarget_xy = self._block_xy0 + shift * np.array([math.cos(self._psi), math.sin(self._psi)])
         return self._retarget_xy
 
@@ -1213,8 +1435,9 @@ class GraspStrategy(TouchStrategy):
         if st.phase == RISE:
             rise = {OPEN: "w gore po dotyku", RECOVER: "blok wypadl ze szczeki - w gore"}
             text = rise.get(self._rise_then, "w gore znad bloku") + f": {mm:.0f} mm"
-        elif st.phase == APPROACH and not self._jaw_ready():
-            text = "nad obiekt: zamykam szczeke"
+        elif st.phase == APPROACH:
+            text = ("nad obiekt: zamykam szczeke" if not self._jaw_ready() else f"nad obiekt: {mm:.0f} mm")
+            text += self._source_note()
         elif st.phase == OPEN:
             text = f"nad blok, otwieram szczeke: {grasp.gap_cmd_m * 1000:.0f} mm"
         elif st.phase == STRADDLE:
@@ -1240,18 +1463,22 @@ class GraspStrategy(TouchStrategy):
         return text + (" - cel poza zasiegiem ramienia" if st.out_of_reach else "")
 
 
+    def _source_note(self) -> str:
+        """In library mode, which grasp the aim took: the library's, with its index and score, or the geometry
+        for a pose without rotation; nothing in geometry mode."""
+        if self.library is None:
+            return ""
+        if self._cand is not None and self._cand.origin != GEOMETRY:
+            return f" (biblioteka #{self.grasp.library_index}, wynik {self.grasp.library_score:.2f})"
+        return " (geometria: brak obrotu)"
+
+
 # ------------------------------------------------------------------ geometry
 def top_down(psi: float) -> np.ndarray:
     """The TCP rotation in the base frame with the approach straight down and the jaws closing along the
     heading `psi` [rad]: columns approach, y, closing (the TCP frame's x, y, z)."""
     c, s = math.cos(psi), math.sin(psi)
     return np.column_stack([(0.0, 0.0, -1.0), (-s, c, 0.0), (c, s, 0.0)])
-
-
-def wrap(angle: float) -> float:
-    """`angle` folded into (-pi, pi] [rad]."""
-    folded = (angle + math.pi) % (2 * math.pi) - math.pi
-    return math.pi if folded == -math.pi else folded
 
 
 def tilt(kin: RobotKinematics, joints: Mapping[str, float]) -> float:
@@ -1273,7 +1500,7 @@ def grasp_headings(rotation: np.ndarray, yaw_period: float, current: float) -> l
     and its mirror. Otherwise they close across the block's short side: the rotation's x column is the
     block's long side (`rl.objects`), folded by the block's yaw symmetry `yaw_period`, each with its mirror
     (the same grasp, the wrist turned half way): 4 headings for a cube, 2 for the cuboids and the cylinder.
-    The seam for a grasp library, which would list its cached grasps instead.
+    `GraspStrategy.candidates` turns them into grasps, or lists the grasp library's instead.
     """
     R = np.asarray(rotation, float)
     if np.allclose(R, np.eye(3), atol=1e-6):

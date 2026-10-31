@@ -226,9 +226,13 @@ def test_its_settings_become_the_panel_form():
 
     assert list(fields) == TOUCH_FIELDS + ["object_kind", "open_margin_m", "squeeze_m", "grasp_depth",
                                            "lift_m", "hold_s", "max_attempts", "carry_s", "release", "wait_s",
-                                           "recover_m"]
+                                           "recover_m", "grasp_source", "library_dir", "min_score"]
     assert fields["object_kind"].kind is str and fields["object_kind"].default == "cube"
     assert fields["object_kind"].choices == KINDS
+    assert fields["grasp_source"].kind is str and fields["grasp_source"].default == "geometry"
+    assert fields["grasp_source"].choices == ("geometry", "library")
+    assert fields["library_dir"].kind is str and fields["library_dir"].default == ""
+    assert fields["min_score"].default == 0.0
     assert fields["label"].default == "" and fields["touch_z"].default == 0.0
     assert fields["hover_m"].default == 0.04 and fields["time_limit_s"].default == 120.0
     assert fields["max_attempts"].kind is int
@@ -237,7 +241,8 @@ def test_its_settings_become_the_panel_form():
     assert fields["carry_s"].default == 10.0 and fields["wait_s"].default == 20.0
     assert fields["recover_m"].default == 0.15
     floats = [name for name in fields if name not in ("label", "object_kind", "close_jaw", "need_contact",
-                                                      "max_attempts", "release")]
+                                                      "max_attempts", "release", "grasp_source",
+                                                      "library_dir")]
     assert all(fields[name].kind is float for name in floats)
     assert not any(field.required for field in fields.values())
 
@@ -249,6 +254,9 @@ def test_the_twin_builds_it_strictly():
         plugin.create({"kind": "cube"})
     with pytest.raises(ValueError, match="grasp: object_kind"):
         plugin.create({"object_kind": "ball"})
+    # A library the kind does not have refuses the run before it starts.
+    with pytest.raises(ValueError, match="grasp: no grasp library for 'cuboid5'"):
+        plugin.create({"object_kind": "cuboid5", "grasp_source": "library"})
     strategy = plugin.create({"object_kind": "cuboid5"})
     assert isinstance(strategy, GraspStrategy) and strategy.block.kind == "cuboid5"
     assert strategy.label == "cuboid5"
@@ -392,6 +400,39 @@ def test_a_cuboid_is_gripped_across_its_short_side(twin):
     assert min(abs(across), 180.0 - abs(across)) < 5.0
     assert strategy.grasp.jaw_gap_m == pytest.approx(0.025, abs=0.003)
     assert truth(twin, "cuboid5")[0][2] > 0.04
+
+
+def test_a_library_grasp_lifts_a_yawed_cube_and_the_twin_says_w_dloni(twin):
+    """The bundled cube library composed with the tracker's pose of a cube turned by 20 degrees: the jaws
+    close across one of its faces, and the twin's tracker says "w dloni" from the close on."""
+    add_block(twin, "cube", BLOCK_XY, yaw_deg=20.0)
+    clock = Clock()
+    sources: list[tuple[float, str, float]] = []
+    strategy = load_strategy(NAME).create({"grasp_source": "library", "carry_s": 1.0})
+    assert isinstance(strategy, GraspStrategy)
+    runner = StrategyRunner(twin, strategy, objects=tracked(twin, "cube", clock, sources))
+    phases: list[str] = []
+    holding: list[float] = []
+
+    def watch() -> None:
+        if strategy.started and strategy.grasp.holding and not holding:
+            holding.append(clock.t)
+
+    runner.start(threaded=False)
+    drive(twin, runner, 60.0, clock, until=phases_of(strategy, phases), watch=watch)
+
+    grasp = strategy.grasp
+    assert runner.status.stopped_because == "zadanie wykonane", (strategy.status, grasp)
+    assert grasp.grasp_source == "library" and grasp.library_index == 0 and grasp.library_score == 0.92
+    # Across a face of the cube: 20 degrees plus a quarter turn, whichever.
+    across = (grasp.heading_deg - 20.0) % 90.0
+    assert min(across, 90.0 - across) < 5.0
+    assert strategy.gap_open_m == pytest.approx(0.041)
+    assert truth(twin, "cube")[0][2] > 0.04
+    assert all(c > 0.5 for c in contact(twin, "cube"))
+    in_hand = [t for t, s, _ in sources if s == "w dloni"]
+    assert holding and in_hand and abs(in_hand[0] - holding[0]) <= 0.5
+    assert {s for t, s, _ in sources if t >= in_hand[0]} == {"w dloni"}
 
 
 def test_a_block_taken_away_after_the_probe_ends_without_success(twin):

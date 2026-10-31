@@ -144,6 +144,7 @@ touch_jev:
   max_attempts: 3
 grasp:
   object_kind: cube
+  grasp_source: geometry   # or library
   open_margin_m: 0.008
   squeeze_m: 0.008
   grasp_depth: 0.5
@@ -487,7 +488,7 @@ two simulated cameras, and the strategy grasps it again where it lies.
 Later steps of the [grasp plan](../../docs/grasp-plan.md) plug in through these methods: wrist-camera
 centring through `before_descent` and `before_straddle` (`grasp_wrist`, below), the Jev judge through
 `after_touch`, `after_grasp_failed` and `carrying` (`grasp_jev`, above), a place task through `carrying`
-and `release()`, and the grasp library through `grasp_headings`.
+and `release()`, and the grasp library through `candidates` ([Grasp library](#grasp-library), below).
 
 ### Wrist camera
 
@@ -566,6 +567,63 @@ arm it serves the workspace camera record named `wrist`, the physical USB camera
 triangulates from it. Until the twin's calibration wave skips arm cameras, disable the `wrist` record
 during the wave. test_wrist_in_twin.py lifts a cube seen 15 mm off and a cuboid turned 35 degrees, seen
 without a yaw, from the twin's rendered frames.
+
+### Grasp library
+
+With `grasp_source: library` the grasps come from a library per block instead of the block's geometry.
+GraspGenX (NVlabs) computes them offline on the block meshes, and the lab caches its best grasps in the
+block's frame (`rl/objects.py`: the centre, x the long side, z up) as pad points: where the strategy puts
+the fingertips' midpoint, with the approach and the closing direction. The libraries bundled with the lab
+are under `soarm_lab/grasps/`; `library_dir` names another folder. A kind without a library, or a library
+made for other block dimensions, refuses the run when the strategy is built. Only `cube.json` ships today,
+and it is a hand-written example until a GPU run replaces it.
+
+When the pose is taken the library is composed with the pose's rotation. A cylinder's grasps are first
+rolled about its axis until they point down, since a turn about its own axis is the same grasp. Every
+grasp is folded over the block's yaw symmetry (4 turns for the cube, 2 for the others), because the
+detector cannot tell those yaws apart, and each comes with the jaws both ways round. Then the filters:
+
+| Dropped when | Note's word |
+| --- | --- |
+| the approach leans more than 8 degrees from vertical (the straddle descends vertically) | pochylenie |
+| the score lies below `min_score` | wynik |
+| the jaw cannot open to the width plus twice `open_margin_m` (88 mm) or close to it minus `squeeze_m` (9 mm) | szczeka |
+| the pad point lies above the block's top or below its bottom | glebokosc |
+| the pad point lies outside the block | poza blokiem |
+
+Grasps the hand would execute alike (the same heading, offset, depth and width, from several folds or
+library entries) are tried once, the best-scored. The rest rank by score in steps of 0.05, then by the
+smaller turn of the wrist from its current heading. `_aim` tries them in that order: each sets the
+heading, the jaw point (the block centre plus the grasp's offset, its depth below the measured top) and
+the openings (the grasp's width plus twice `open_margin_m`, minus `squeeze_m`), and the first whose five
+points the arm reaches top-down wins. The probe still goes to the block centre, and the hand stays
+top-down whatever the library's own tilt. A grasp is skipped before the reach check when its squeeze
+would not read as held ("scisk") or when its shallower fingertip would sit less than 3 mm below the top
+("zbyt plytko"): the moving jaw is a hinge, and its tip trails the fixed one along the approach by
+`RobotKinematics.tip_swing`, 0.3 mm at the cube's 41 mm opening and up to 23 mm wide open. After a tip
+stall the retarget moves by half the chosen grasp's width, which is the short side in geometry mode.
+
+A pose without rotation (the LLM detector alone) makes the aim fall back to the geometry: a library
+composed at a guessed yaw would turn the wrist for nothing. The approach's note says which grasp the run
+took: "(biblioteka #0, wynik 0.92)" or "(geometria: brak obrotu)"; `GraspStatus` records the source, the
+candidates, the rejections and skips, the grasp's index, score, depth and offset.
+
+| How the aim ends in library mode | Stop reason |
+| --- | --- |
+| every composed grasp fails a filter | biblioteka chwytow 'cube': zaden z N chwytow nie pasuje (pochylenie 8, ...) |
+| every candidate fails a jaw rule | biblioteka chwytow 'cube': zaden chwyt nie pasuje do szczeki (zbyt plytko 4, ...) |
+| no candidate is reachable top-down | `grasp`'s reach texts |
+
+The commands around the library:
+
+    uv run soarm-lab grasps meshes --out workspace/grasps/meshes   # the blocks as OBJ, GraspGenX's input
+    uv run soarm-lab grasps convert cube workspace/grasps/raw/cube.yml   # GraspGenX's output -> a library
+    uv run soarm-lab grasps show cube                              # the generator and the grasps
+
+GraspGenX itself runs in its own clone on a CUDA GPU, never in this workspace;
+[tools/graspgenx/README.md](../../tools/graspgenx/README.md) has the gripper description, the run and the
+frames, and [soarm_lab/grasps/README.md](soarm_lab/grasps/README.md) the file format.
+test_grasp_in_twin.py lifts a cube turned by 20 degrees with the bundled library.
 
 ## Dream Labs
 

@@ -1,0 +1,175 @@
+{
+ "format": "soarm-lab-grasps",
+ "version": 1,
+ "kind": "cube",
+ "half_size": [
+  0.0125,
+  0.0125,
+  0.0125
+ ],
+ "frame": "block frame of rl/objects.py (centre, x the long side, z up); position = the pad point, the centre of the gripper description's open sweep box, where the strategy puts its fingertip midpoint; approach and closing are unit vectors in the block frame (gripperframe x and z)",
+ "generator": {
+  "name": "hand",
+  "version": "",
+  "commit": "",
+  "gripper": "so101",
+  "checkpoint": "",
+  "date": "2026-10-31",
+  "note": "hand-written example for the tests; a GraspGenX run replaces it (tools/graspgenx/README.md)",
+  "dropped": "0 of 8"
+ },
+ "grasps": [
+  {
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "approach": [
+    0.0,
+    0.0,
+    -1.0
+   ],
+   "closing": [
+    0.0,
+    1.0,
+    0.0
+   ],
+   "width_m": 0.025,
+   "score": 0.92
+  },
+  {
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "approach": [
+    0.0,
+    0.0,
+    -1.0
+   ],
+   "closing": [
+    0.0,
+    -1.0,
+    0.0
+   ],
+   "width_m": 0.025,
+   "score": 0.91
+  },
+  {
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "approach": [
+    0.0,
+    0.0,
+    -1.0
+   ],
+   "closing": [
+    1.0,
+    0.0,
+    0.0
+   ],
+   "width_m": 0.025,
+   "score": 0.9
+  },
+  {
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "approach": [
+    0.0,
+    0.0,
+    -1.0
+   ],
+   "closing": [
+    -1.0,
+    0.0,
+    0.0
+   ],
+   "width_m": 0.025,
+   "score": 0.89
+  },
+  {
+   "position": [
+    0.005,
+    0.0,
+    0.0085
+   ],
+   "approach": [
+    0.0,
+    0.0,
+    -1.0
+   ],
+   "closing": [
+    0.0,
+    1.0,
+    0.0
+   ],
+   "width_m": 0.025,
+   "score": 0.85
+  },
+  {
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "approach": [
+    -1.0,
+    0.0,
+    0.0
+   ],
+   "closing": [
+    0.0,
+    1.0,
+    0.0
+   ],
+   "width_m": 0.025,
+   "score": 0.8
+  },
+  {
+   "position": [
+    0.0,
+    0.0,
+    -0.0105
+   ],
+   "approach": [
+    0.0,
+    0.0,
+    -1.0
+   ],
+   "closing": [
+    0.0,
+    1.0,
+    0.0
+   ],
+   "width_m": 0.025,
+   "score": 0.7
+  },
+  {
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "approach": [
+    0.0,
+    0.0,
+    -1.0
+   ],
+   "closing": [
+    0.707107,
+    0.707107,
+    0.0
+   ],
+   "width_m": 0.035355,
+   "score": 0.55
+  }
+ ]
+}

@@ -11,12 +11,18 @@
     soarm-lab dream models                           # Dream Labs: the checkpoints the account may run
     soarm-lab dream sim --prompt "pick up the cube"  # Dream-1 in the simulation
     soarm-lab dream arm --prompt "pick up the cube" --camera scene=0 --camera wrist=1   # on the arm
+    soarm-lab grasps meshes --out workspace/grasps/meshes   # the blocks as OBJ, for GraspGenX
+    soarm-lab grasps convert cube workspace/grasps/raw/cube.yml   # GraspGenX's isaac_grasp YAML -> a library
+    soarm-lab grasps show cube                       # the grasps of a library
 
 `--station` is a folder the twin exported (`scene.xml`, `assets/`, `station.json`) or the name of a
 station bundled with the package (`sim`, the default). `eval` and `policies` need neither jax nor torch.
 `train` is PPO in JAX on MuJoCo Warp: it needs the `train` extra (jax, on Linux its CUDA build, optax,
 mujoco-warp) and no torch. `convert` needs the `torch` extra. `dream` needs the `dream` extra and a Dream
 Labs API key (`dream_run`).
+
+`grasps` prepares the inputs of GraspGenX and reads its output into the grasp libraries the `grasp` strategy
+uses (`grasp_library`, tools/graspgenx/README.md); GraspGenX itself never runs here.
 
 `train --kinds` trains one shape-conditioned policy on several wooden blocks (`rl.objects`): the task
 observes the block's descriptor, the environment is a `rl.mixed.MixedBatchEnv` with an equal share of
@@ -305,6 +311,105 @@ def _dream_parser(sub) -> None:
                    help="turn a camera's frames clockwise, for one mounted upside down: scene=180, wrist=90")
 
 
+#: Where `grasps` writes by default, and the SO-101's gripper description (`paths.data_path`).
+GRASPS_REL = Path("workspace") / "grasps"
+GRIPPER_CONFIG_REL = Path("tools") / "graspgenx" / "so101" / "config.json"
+
+
+def _grasps_meshes(a: argparse.Namespace) -> int:
+    from .grasp_library import write_block_obj
+    from .paths import data_path
+    from .rl.objects import KINDS
+
+    out = Path(a.out) if a.out else data_path(GRASPS_REL / "meshes")
+    for kind in a.kinds or KINDS:
+        print(write_block_obj(kind, out / f"{kind}.obj"))
+    return 0
+
+
+def _grasps_convert(a: argparse.Namespace) -> int:
+    import datetime
+
+    import yaml
+
+    from .grasp_library import convert_isaac_grasps, graspgenx_frame, read_gripper_config, save_library
+    from .kinematics import RobotKinematics
+    from .paths import data_path
+    from .robot import load_robot
+
+    source = Path(a.yaml)
+    if not source.is_file():
+        raise FileNotFoundError(f"GraspGenX output not found: {source}")
+    gripper = Path(a.gripper) if a.gripper else data_path(GRIPPER_CONFIG_REL)
+    if not gripper.is_file():
+        raise FileNotFoundError(f"gripper config not found: {gripper}; pass --gripper")
+    cfg = read_gripper_config(gripper)
+    frame = graspgenx_frame(RobotKinematics(load_robot()), cfg.base_rotation)
+    generator = {"name": a.generator, "version": "1.0.0" if a.generator == "graspgenx" else "",
+                 "commit": a.commit, "gripper": "so101", "checkpoint": a.checkpoint,
+                 "date": datetime.date.today().isoformat(), "note": a.note}
+    data = yaml.safe_load(source.read_text(encoding="utf-8"))
+    library = convert_isaac_grasps(data if isinstance(data, dict) else {}, a.kind, frame=frame,
+                                   pad_point=cfg.pad_point, generator=generator)
+    out = save_library(library, a.out or data_path(GRASPS_REL / f"{a.kind}.json"))
+    dropped, total = library.generator["dropped"].split(" of ")
+    why = f" ({dropped} of {total} dropped: pad point outside the block)" if dropped != "0" else ""
+    print(f"{a.kind}: {len(library.grasps)} grasps -> {out}{why}")
+    return 0
+
+
+def _grasps_show(a: argparse.Namespace) -> int:
+    from .grasp_library import library_path, load_library
+
+    library = load_library(a.kind, a.library)
+    print(f"{library_path(a.kind, a.library)}: {library.kind}, {len(library.grasps)} grasps")
+    for key, value in library.generator.items():
+        print(f"  {key}: {value or '-'}")
+
+    def vector(v, scale: float, digits: int) -> str:
+        return "(" + ", ".join(f"{x * scale + 0.0:.{digits}f}" for x in v) + ")"
+
+    for i, g in enumerate(library.grasps):
+        print(f"#{i} score {g.score:.2f} pad {vector(g.position, 1000.0, 1)} mm "
+              f"approach {vector(g.approach, 1.0, 2)} closing {vector(g.closing, 1.0, 2)} "
+              f"width {g.width_m * 1000:.1f} mm")
+    return 0
+
+
+def _grasps_parser(sub) -> None:
+    """`soarm-lab grasps meshes|convert|show`: GraspGenX's inputs and its output as grasp libraries."""
+    p = sub.add_parser("grasps", help="grasp libraries of the wooden blocks, computed offline by GraspGenX",
+                       description="Prepares the inputs of GraspGenX and reads its output into the grasp "
+                                   "libraries of the `grasp` strategy (tools/graspgenx/README.md). GraspGenX "
+                                   "itself runs in its own clone on a CUDA GPU, never here.")
+    grasps_sub = p.add_subparsers(dest="grasps_cmd", required=True)
+
+    q = grasps_sub.add_parser("meshes", help="the blocks as OBJ meshes in their block frames: GraspGenX's "
+                                             "input")
+    q.add_argument("--out", default=None, help="the folder of <kind>.obj (default workspace/grasps/meshes)")
+    q.add_argument("--kinds", type=_kinds_arg, default=None, metavar="KIND,KIND",
+                   help="the blocks (default: every block of rl/objects.py)")
+    q.set_defaults(fn=_grasps_meshes)
+
+    q = grasps_sub.add_parser("convert", help="GraspGenX's isaac_grasp YAML of one block -> a grasp library")
+    q.add_argument("kind", type=_kind_arg, help="the block the grasps were computed for (rl/objects.py)")
+    q.add_argument("yaml", help="the file demo_object_mesh.py wrote (--output_file)")
+    q.add_argument("--out", default=None, help="the library to write (default workspace/grasps/<kind>.json)")
+    q.add_argument("--gripper", default=None,
+                   help="the gripper description's config.json (default tools/graspgenx/so101/config.json)")
+    q.add_argument("--generator", default="graspgenx", help="what made the grasps: graspgenx, or hand")
+    q.add_argument("--commit", default="", help="the GraspGenX commit that ran")
+    q.add_argument("--checkpoint", default="", help="the GraspGenX checkpoint that ran (release)")
+    q.add_argument("--note", default="", help="a note stored with the library")
+    q.set_defaults(fn=_grasps_convert)
+
+    q = grasps_sub.add_parser("show", help="the generator and the grasps of a library")
+    q.add_argument("kind", type=_kind_arg, help="the block (rl/objects.py)")
+    q.add_argument("--library", default=None,
+                   help="the folder of <kind>.json libraries (default: the ones bundled with soarm-lab)")
+    q.set_defaults(fn=_grasps_show)
+
+
 def main(argv: list[str] | None = None) -> int:
     a = parser().parse_args(argv)
     return a.fn(a)
@@ -357,6 +462,7 @@ def parser() -> argparse.ArgumentParser:
     p.set_defaults(fn=_convert)
 
     _dream_parser(sub)
+    _grasps_parser(sub)
     return ap
 
 
