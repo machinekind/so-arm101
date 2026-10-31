@@ -4,6 +4,8 @@
     soarm-lab train --task lift --station ~/desk1    # ... on the station from `twin export ~/desk1`
     soarm-lab train --task pickplace                 # ... the cube carried onto a target on the table
     soarm-lab train --init lift-v3 --kinds cube,cuboid5,cuboid85,cylinder   # one policy for four blocks
+    soarm-lab train --init lift-v3 --kinds cube,cuboid5,cuboid85,cylinder --pose-bias-m 0.03 \
+        --pose-delay 4,40 --pose-period 4 --latch-m 0.05 --grip-close-s 1.3   # the backup lift (below)
     soarm-lab eval lift-v3 --rand                    # evaluate a policy in plain MuJoCo
     soarm-lab eval <block policy> --kind cylinder    # ... on one of the blocks it was trained on
     soarm-lab policies                               # bundled policies and those trained here, with results
@@ -22,6 +24,12 @@ Labs API key (`dream_run`).
 observes the block's descriptor, the environment is a `rl.mixed.MixedBatchEnv` with an equal share of
 the worlds per kind, `--init lift-v3` widens the cube policy to the new inputs (`rl.ppo`), and the CPU
 evaluation runs once per kind (`meta.evals["cpu_<kind>"]`, `["cpu_rand_<kind>"]`).
+
+The backup lift trains on a late, biased, latched pose and a slow jaw. `--pose-bias-m`, `--pose-delay`,
+`--pose-period` and `--latch-m` replace the object perception of the randomization
+(`rl.randomize.Randomization`: a per-episode offset, the delay range, the refresh period, the occlusion
+latch); the randomized CPU evaluation uses the same perception, the nominal one the ideal.
+`--grip-close-s` sets the gripper servo's closing time in the station's dynamics.
 """
 
 from __future__ import annotations
@@ -36,22 +44,64 @@ def _station(a: argparse.Namespace):
     return Station.load(a.station)
 
 
-def _train_plan(dyn, no_rand: bool, spread: float):
+def _train_plan(dyn, no_rand: bool, spread: float, perception: dict | None = None):
     """(training randomization, [(label, key in meta.evals, evaluation randomization)]).
 
     Training without randomization (`--no-rand`) is the measured dynamics with zero spread, not
     `Randomization.none()`: that is the Menagerie model with ideal perception, which would drop both the
     identified dynamics and the cube perception model. The randomized evaluation runs only when training
     was randomized: otherwise a second nominal evaluation would land in `cpu_rand`, and the panel would
-    show it as robustness to randomization.
+    show it as robustness to randomization. `perception` (`_perception_flags`) replaces fields of the
+    training randomization, so `cpu_rand` sees the same perception; `cpu_nominal` keeps the ideal one.
     """
+    from dataclasses import replace
+
     from .rl.randomize import Randomization
 
-    rand = Randomization.around(dyn, 0.0 if no_rand else spread)
+    rand = replace(Randomization.around(dyn, 0.0 if no_rand else spread), **(perception or {}))
     evals = [("bez randomizacji", "cpu_nominal", Randomization.nominal(dyn))]
     if rand.randomized:
         evals.append(("z randomizacja", "cpu_rand", rand))
     return rand, evals
+
+
+def _pose_delay_arg(text: str) -> tuple[int, int]:
+    """`--pose-delay`: 'N' is (0, N), 'A,B' is (A, B) [ticks], 0 <= A <= B."""
+    try:
+        parts = [int(p) for p in text.split(",")]
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a delay in ticks: {text!r}; give N or MIN,MAX") from None
+    if len(parts) not in (1, 2):
+        raise argparse.ArgumentTypeError(f"give N or MIN,MAX ticks, not {text!r}")
+    lo, hi = (0, parts[0]) if len(parts) == 1 else (parts[0], parts[1])
+    if not 0 <= lo <= hi:
+        raise argparse.ArgumentTypeError(f"the delay needs 0 <= MIN <= MAX ticks, not {text!r}")
+    return lo, hi
+
+
+def _pose_period_arg(text: str) -> int:
+    """`--pose-period`: the most ticks between two refreshes of the seen pose, at least 1."""
+    try:
+        n = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number of ticks: {text!r}") from None
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"the refresh period needs at least 1 tick, not {n}")
+    return n
+
+
+def _perception_flags(a: argparse.Namespace) -> dict:
+    """The `Randomization` fields the perception flags of `train` set: only those given."""
+    out = {}
+    if a.pose_bias_m is not None:
+        out["pose_bias_m"] = float(a.pose_bias_m)
+    if a.pose_delay is not None:
+        out["cube_min_delay"], out["cube_delay"] = a.pose_delay
+    if a.pose_period is not None:
+        out["cube_period"] = int(a.pose_period)
+    if a.latch_m is not None:
+        out["latch_m"] = float(a.latch_m)
+    return out
 
 
 def _kind_arg(text: str) -> str:
@@ -123,14 +173,21 @@ def _kinds_summary(evals: dict) -> str:
 def _describe(rand) -> str:
     c = rand.centre
     delay = f"{rand.min_delay}" if rand.min_delay == rand.max_delay else f"{rand.min_delay}-{rand.max_delay}"
-    return (f"dynamika: {c.source} (kp x{c.kp:.2f}, tlumienie x{c.damping:.2f}, opoznienie {delay} takt.); "
-            f"randomizacja: {'tak' if rand.randomized else 'brak'}; "
-            f"percepcja kostki: {'jak z kamer' if rand.fold_yaw or rand.cube_delay else 'idealna'}")
+    jaw = f", zamykanie chwytaka {c.grip_close_s:.2f} s" if c.grip_close_s > 0 else ""
+    seen = f", przesuniecie do {rand.pose_bias_m * 100:.0f} cm" if rand.pose_bias_m > 0 else ""
+    lo, period = min(rand.cube_min_delay, rand.cube_delay), max(1, rand.cube_period)
+    seen += f", opoznienie pozy {lo}-{rand.cube_delay} takt., odswiezanie co 1-{period} takt."
+    if rand.latch_m > 0:
+        seen += f", zatrzask pod dlonia < {rand.latch_m * 100:.0f} cm"
+    return (f"dynamika: {c.source} (kp x{c.kp:.2f}, tlumienie x{c.damping:.2f}, opoznienie {delay} takt."
+            f"{jaw}); randomizacja: {'tak' if rand.randomized else 'brak'}; "
+            f"percepcja kostki: {'jak z kamer' if rand.fold_yaw or rand.cube_delay else 'idealna'}{seen}")
 
 
 def _train(a: argparse.Namespace) -> int:
     import json
     import time
+    from dataclasses import replace
 
     from .paths import policies_dir
     from .rl.evaluate import evaluate
@@ -140,7 +197,9 @@ def _train(a: argparse.Namespace) -> int:
 
     st = _station(a)
     dyn = Dynamics.from_dict(st.dynamics)
-    rand, evals = _train_plan(dyn, a.no_rand, a.spread)
+    if a.grip_close_s is not None:
+        dyn = replace(dyn, grip_close_s=a.grip_close_s)
+    rand, evals = _train_plan(dyn, a.no_rand, a.spread, _perception_flags(a))
     cfg = PPOConfig(num_envs=a.envs, iterations=a.iters, seed=a.seed)
     init, init_name = None, ""
     if a.init:
@@ -335,6 +394,21 @@ def parser() -> argparse.ArgumentParser:
                         "each: cube, cuboid5, cuboid85, cylinder (rl/objects.py); default: the task's one cube")
     p.add_argument("--episode-steps", type=int, default=None,
                    help="episode length in policy ticks (default: the task's, lift 200)")
+    p.add_argument("--pose-bias-m", type=float, default=None, metavar="M",
+                   help="a constant xy offset of the seen object pose per episode, of up to M metres in a "
+                        "random direction (default: the randomization's, 0)")
+    p.add_argument("--pose-delay", type=_pose_delay_arg, default=None, metavar="MIN,MAX",
+                   help="the seen object pose is MIN to MAX policy ticks (50 ms) old, drawn per episode; N "
+                        "means 0,N (default: the randomization's, 0,3)")
+    p.add_argument("--pose-period", type=_pose_period_arg, default=None, metavar="N",
+                   help="the seen object pose refreshes every 1 to N policy ticks, drawn per episode "
+                        "(default: the randomization's, 3)")
+    p.add_argument("--latch-m", type=float, default=None, metavar="M",
+                   help="the seen object pose does not refresh while the TCP is nearer the object than M "
+                        "metres, the hand covering it (default: the randomization's, 0 = never)")
+    p.add_argument("--grip-close-s", type=float, default=None, metavar="S",
+                   help="the gripper servo closes its full travel in S seconds, randomized around it "
+                        "(default: the station's dynamics, 0 = as fast as the command)")
     p.set_defaults(fn=_train)
 
     p = sub.add_parser("eval", help="ewaluacja polityki na CPU (zwykle MuJoCo)")

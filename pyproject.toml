@@ -50,6 +50,7 @@ pythonpath = ["packages/soarm/tests"]
 markers = [
     "twin: needs the digital twin (machinekind_twin) installed; skipped otherwise",
     "render: renders frames through MuJoCo/OpenGL; skipped where no OpenGL context can be made",
+    "slow: a CPU run of a minute or more (MuJoCo Warp compiles its CPU kernels on the first run); deselect with -m 'not slow'",
 ]
 
 [tool.ruff]
