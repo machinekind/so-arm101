@@ -827,6 +827,75 @@ def test_before_descent_is_asked_every_tick_until_it_returns_none_once():
     assert len(looking) == 10 and all(a.target == looking[0].target for a in looking)
 
 
+class LooksBeforeStraddle(GraspStrategy):
+    """A wrist look at the straddle hover: `_looking` for `LOOK_S` from its first call, holding the arm,
+    then done."""
+
+    LOOK_S = 4.0
+
+    def __init__(self, settings: GraspSettings | None = None):
+        super().__init__(settings)
+        self.asked: list[tuple[float, bool]] = []
+
+    @property
+    def _looking(self) -> bool:
+        return bool(self.asked) and self._t - self.asked[0][0] < self.LOOK_S
+
+    def before_straddle(self, obs: Observation, settled: bool) -> Action | None:
+        self.asked.append((self._t, settled))
+        return self.hold("patrze z otwarta szczeka") if self._looking else None
+
+
+def test_before_straddle_is_asked_on_the_first_ready_tick_and_the_open_jaw_waits_while_it_looks():
+    _, _, plain, *_ = grasped()
+    s = started(seen(), strategy=LooksBeforeStraddle)
+    answers, phases, *_ = follow(s, dict(SPEC.home), seen(), 1500, block=block_at())
+    assert isinstance(s, LooksBeforeStraddle)
+
+    looking = [k for k, a in enumerate(answers) if a.note == "patrze z otwarta szczeka"]
+    # The plain run straddles on the tick the look begins: the arm settled, the jaw open, the hand top-down.
+    assert looking[0] == plain.index("straddle")
+    assert s.asked[0][1] is True
+    assert len(s.asked) == len(looking) + 1 and looking == list(range(looking[0], looking[-1] + 1))
+    # OPEN's 3 s timeout waits while the look holds the arm.
+    assert len(looking) / s.hz == pytest.approx(LooksBeforeStraddle.LOOK_S, abs=0.06)
+    assert {phases[k] for k in looking} == {"open"}
+    assert all(answers[k].target == answers[looking[0]].target for k in looking)
+    # The tick the seam answers None goes on to the straddle.
+    assert phases[looking[-1] + 1] == "straddle"
+    assert answers[-1].success, answers[-1].note
+
+
+class LooksOnTheWay(GraspStrategy):
+    """A look that runs from the first OPEN tick of each straddle hover and is done at once, before the arm
+    has settled there."""
+
+    def __init__(self, settings: GraspSettings | None = None):
+        super().__init__(settings)
+        self.asked: list[tuple[int, bool]] = []
+
+    @property
+    def _looking(self) -> bool:
+        return self.status.phase == "open" and self.status.attempt not in {a for a, _ in self.asked}
+
+    def before_straddle(self, obs: Observation, settled: bool) -> Action | None:
+        self.asked.append((self.status.attempt, settled))
+        return None
+
+
+@pytest.mark.parametrize("shift", [0.0, -0.010], ids=["one straddle", "a tip stall, then a second"])
+def test_before_straddle_is_asked_until_it_returns_none_once_per_straddle_hover(shift: float):
+    pose = seen(offset(XY, shift))
+    s = started(pose, strategy=LooksOnTheWay)
+    answers, phases, *_ = follow(s, dict(SPEC.home), pose, 3000, block=block_at())
+    assert isinstance(s, LooksOnTheWay)
+
+    assert answers[-1].success, answers[-1].note
+    # Asked on the way, not again once the arm settles at the hover.
+    assert s.asked == ([(1, False)] if shift == 0.0 else [(1, False), (2, False)])
+    assert runs(phases).count("open") == len(s.asked)
+
+
 def test_the_notes_per_phase():
     s, answers, phases, *_ = grasped()
     notes = {p: [a.note for a, q in zip(answers, phases, strict=True) if q == p] for p in set(phases)}
