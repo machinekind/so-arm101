@@ -174,10 +174,29 @@ def block_at(xy: tuple[float, float] = XY, half: tuple[float, float, float] = CU
     return Block(np.array(xy, float), half, yaw)
 
 
+@dataclass
+class GluedBlock(Block):
+    """A block the jaw grips but the arm cannot lift more than `rise_m` from where it gripped it: glued to
+    the table, or too heavy. The arm then stays where it was, as on a stall."""
+
+    rise_m: float = 0.0
+    #: The TCP height when the jaw gripped the block [m].
+    gripped_z: float | None = None
+
+    def stalls(self, joints: Mapping[str, float]) -> bool:
+        if not self.gripped:
+            return super().stalls(joints)
+        z = float(KIN.tcp(joints)[2, 3])
+        if self.gripped_z is None:
+            self.gripped_z = z
+        return z > self.gripped_z + self.rise_m
+
+
 def follow(s: GraspStrategy, joints: dict[str, float], objects: Mapping[str, ObjectPose] | None, ticks: int,
            t0: float = 0.0, block: Block | None = None, offset_z: float = 0.0, cap_deg_s: float | None = None,
            lag_s: float = 0.0, jaw: Jaw | None = None, slip_z: float | None = None,
            commands: list[dict[str, float]] | None = None, measured: list[dict[str, float]] | None = None,
+           command: Mapping[str, float] | None = None,
            ) -> tuple[list[Action], list[str], dict[str, float], float]:
     """Up to `ticks` ticks of the supervisor, the arm and the jaw, ending on `done`.
 
@@ -187,12 +206,13 @@ def follow(s: GraspStrategy, joints: dict[str, float], objects: Mapping[str, Obj
     gripper comes from `jaw` (default: the command, or the block's width when both tips straddle it). Once
     the jaw stands at the block's width with the command tighter, the block is gripped and rides with the
     fingertips' midpoint, until the command opens wider or the TCP rises above `slip_z`. `commands` and
-    `measured` collect the command and the measured joints each tick observed.
+    `measured` collect the command and the measured joints each tick observed. `command` is the supervisor's
+    command to go on from (default: the measured joints).
 
     Returns the answers, the phase after each tick, the last measured joints and the time to go on from.
     """
     answers, phases = [], []
-    command = dict(joints)
+    command = dict(joints if command is None else command)
     share = 1.0 if lag_s <= 0 else 1.0 - np.exp(-1.0 / (s.hz * lag_s))
     t = t0
     g = SPEC.gripper
@@ -559,6 +579,39 @@ def test_a_block_that_slips_on_the_way_up_ends_the_run():
     assert phases[-2] == "lift_off" and answers[-1].done and not answers[-1].success
     assert answers[-1].note == "blok wypadl ze szczeki podczas podnoszenia"
     assert s.grasp.verdict == "slipped"
+
+
+def test_a_block_the_arm_cannot_lift_ends_the_run_with_the_squeeze_kept():
+    s = started(seen())
+    block = GluedBlock(np.array(XY, float), CUBE, rise_m=0.012)
+    answers, phases, joints, _ = follow(s, dict(SPEC.home), seen(), 1500, block=block)
+
+    assert phases[-2] == "lift_off" and answers[-1].done and not answers[-1].success
+    note = answers[-1].note
+    assert note.startswith("ramie nie podnioslo bloku (") and note.endswith(" mm z 40 mm)"), note
+    assert s.grasp.lifted_m == pytest.approx(0.010, abs=0.002)
+    # From the phase clock: 4 cm at 0.1 m/s, then 3 s for the arm to follow.
+    assert phases.count("lift_off") / s.hz == pytest.approx(0.04 / 0.10 + 3.0, abs=0.06)
+    assert answers[-1].target["gripper"] == pytest.approx(s.cmd_closed)
+    assert s.grasp.verdict == "held" and block.gripped
+    assert joints["gripper"] == pytest.approx(KIN.gripper_for_gap(0.025), abs=0.1)
+
+
+def test_a_speed_cap_lowered_during_the_lift_lengthens_its_time_limit():
+    """The strategy started without a cap, so its targets reach the lift point in 0.4 s; the supervisor's
+    command then takes far longer than 3.4 s to get there, and the lift still ends in the check."""
+    reference, _, phases, *_ = grasped()
+    first = phases.index("lift_off")
+    s = started(seen())
+    block = block_at()
+    sent, before, joints, t = follow(s, dict(SPEC.home), seen(), first + 1, block=block)
+    assert before[-1] == "lift_off" and block.gripped
+    answers, phases, *_ = follow(s, joints, seen(), 1500, t0=t, block=block, cap_deg_s=1.0,
+                                 command=sent[-1].target)
+
+    assert answers[-1].success, answers[-1].note
+    assert (phases.count("lift_off") + 1) / s.hz > 0.04 / 0.10 + 3.0
+    assert reference.grasp.verdict == "lifted"
 
 
 def test_creep_during_the_check_is_a_slip():

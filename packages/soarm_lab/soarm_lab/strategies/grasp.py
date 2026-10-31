@@ -63,6 +63,10 @@ Guards (touch's, and):
   degree limit, and the run ends with "chwytak nie siega tam pionowo". The hand turns toward top-down at
   touch's `TURN_DEG_S`, and the target is checked to be top-down within 8 degrees before the probe and
   before the straddle;
+* **the lift's time limit**: the measured TCP must reach the lift point `JAW_WAIT_S` after the lift's
+  travel (`lift_m` at `speed_mps`, or the ticks the target and the supervisor's command took under the
+  speed limits), counted from the phase clock; otherwise the run ends with "ramie nie podnioslo bloku",
+  the squeeze kept;
 * **the attempt budget**: `max_attempts` probe descents in one run.
 
 A jaw tip that stalls on the block during the straddle holds the measured pose until the supervisor's
@@ -292,6 +296,8 @@ class GraspStrategy(TouchStrategy):
         self._straddle_xy = np.full(2, np.nan)
         self._grasp_z = float("nan")
         self._lift_off_point = np.zeros(3)
+        #: The lift's ticks on which the target or the supervisor's command was still on its way [count].
+        self._lift_ticks = 0
         # The close: the jaw angle when it began [rad], whether the jaw left it, ticks it stood since.
         self._q_open_entry = float("nan")
         self._jaw_moved = False
@@ -718,6 +724,7 @@ class GraspStrategy(TouchStrategy):
                 self._jaw.mark()
                 self.grasp.verdict = "held"
                 self._lift_off_point = self.grasp_target + np.array([0.0, 0.0, self.grasp_settings.lift_m])
+                self._lift_ticks = 0
                 self._enter(LIFT_OFF)
                 return None
             self.grasp.empty_closes += 1
@@ -740,6 +747,19 @@ class GraspStrategy(TouchStrategy):
             self.grasp.hold_ticks = 0
             self._enter(CHECK)
             return None
+        # The lift travels while the target moves toward the lift point (a target the IK cannot take further
+        # does not) or the supervisor's command has not reached the target, so a speed cap lowered during the
+        # run lengthens the limit too.
+        on_point = float(np.linalg.norm(self._lift_off_point - self.tcp_cmd)) <= self.ik_tol
+        if (not on_point and not self.status.out_of_reach) or not self._command_on_target:
+            self._lift_ticks += 1
+        # Counted from the phase clock: the travel at `speed_mps`, or the ticks it took when that was longer,
+        # then `JAW_WAIT_S` for the arm to follow. The squeeze stays in the last target.
+        lift_m = self.grasp_settings.lift_m
+        travel = max(lift_m / self.config.speed_mps, self._lift_ticks / self.hz)
+        if self._t - self._phase_t0 >= travel + JAW_WAIT_S:
+            return self._halt(f"ramie nie podnioslo bloku ({self.grasp.lifted_m * 1000:.0f} mm z "
+                              f"{lift_m * 1000:.0f} mm)", self.kin.from_q(self.q_cmd))
         return self._drive(self._lift_off_point, self.approach_step_m)
 
     def _check(self, obs: Observation) -> Action:
