@@ -1,4 +1,5 @@
-"""The arm's kinematics on the station's robot description: units, the TCP, IK, self-contacts and the jaw."""
+"""The arm's kinematics on the station's robot description: units, the TCP, IK, self-contacts, the jaw and the
+wrist camera."""
 
 from __future__ import annotations
 
@@ -7,10 +8,10 @@ import dataclasses
 import numpy as np
 import pytest
 
-pytest.importorskip("mujoco")
+mujoco = pytest.importorskip("mujoco")
 
 from soarm_lab import sim  # noqa: E402
-from soarm_lab.kinematics import RobotKinematics, turn_toward  # noqa: E402
+from soarm_lab.kinematics import RobotKinematics, pose, turn_toward  # noqa: E402
 
 
 def test_degrees_and_gripper_units_round_trip(station):
@@ -153,3 +154,41 @@ def test_turn_toward_caps_the_angle_on_the_shortest_way():
     assert turn_toward(about_z(10.0), about_z(12.0), np.radians(5.0)) == pytest.approx(about_z(12.0))
     assert turn_toward(about_z(10.0), about_z(50.0), np.radians(5.0)) == pytest.approx(about_z(15.0))
     assert turn_toward(about_z(170.0), about_z(-170.0), np.radians(5.0)) == pytest.approx(about_z(175.0))
+
+
+def test_the_camera_pose_from_robot_yaml_matches_the_mjcf_camera(station):
+    """robot.yaml's `cameras: wrist` is the MJCF's `wrist_cam` in OpenCV axes: equal wherever the arm is."""
+    spec = station.spec()
+    kin = RobotKinematics(spec)
+    turned = {"shoulder_pan": 30.0, "shoulder_lift": -10.0, "elbow_flex": 60.0, "wrist_flex": 40.0,
+              "wrist_roll": 60.0, "gripper": 20.0}
+    cam = kin.model.camera("wrist_cam").id
+    for joints in (spec.home, turned):
+        T = kin.camera("wrist", joints)
+        kin._apply(kin.to_q(joints))
+        mujoco.mj_camlight(kin.model, kin.data)
+        mjcf = kin._base_inv() @ pose(kin.data.cam_xmat[cam].reshape(3, 3) @ np.diag([1.0, -1.0, -1.0]),
+                                      kin.data.cam_xpos[cam])
+        assert np.abs(T - mjcf).max() < 1e-6
+
+    assert kin.camera("wrist", spec.home)[:3, 3] == pytest.approx([0.2728, 0.0548, 0.1381], abs=1e-4)
+    with pytest.raises(ValueError, match="no camera 'nope'"):
+        kin.camera("nope", spec.home)
+
+
+def test_the_collision_points_of_the_jaws_come_from_their_primitives(station):
+    spec = station.spec()
+    kin = RobotKinematics(spec)
+    tcp = kin.tcp(spec.home)[:3, 3]
+    fixed_body, moving_body = spec.jaw_bodies
+
+    for body in spec.jaw_bodies:
+        points = kin.collision_points(body, spec.home)
+        assert points.ndim == 2 and points.shape[1] == 3 and points.shape[0] >= 24
+        assert np.linalg.norm(points - tcp, axis=1).max() < 0.12
+    closed, opened = (dict(spec.home, gripper=g) for g in (0.0, 100.0))
+    moved = kin.collision_points(moving_body, closed) - kin.collision_points(moving_body, opened)
+    assert np.abs(moved).max() > 0.01
+    assert kin.collision_points(fixed_body, closed) == pytest.approx(kin.collision_points(fixed_body, opened))
+    with pytest.raises(KeyError):
+        kin.collision_points("nope", spec.home)

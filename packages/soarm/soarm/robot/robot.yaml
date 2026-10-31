@@ -68,6 +68,25 @@ desk:
   map_centre: [0.22, 0.0]
   map_side: 0.56
 
+# The wrist camera of the MJCF (`wrist_cam` on `camera_mount`, Menagerie's official mount), declared for the
+# twin: a camera on the arm. The twin renders it on a simulated arm, serves the workspace camera named `wrist`
+# on a real one, and never triangulates from it. `pose` is T_cam2body in OpenCV axes (z forward, y down,
+# x right): the MJCF's pos (0, 0.055, -0.045) m and euler (-0.57, 0, 0) rad, R_cv = R_mj @ diag(1, -1, -1).
+# fovy from the MJCF sensor: 2 atan(3.24 mm / 2 / 3.6 mm) = 48.4555 deg; rendered at the MJCF's 1920x1080
+# (a strategy derives the focal length from the frame it gets). The name may not be `wrist_cam`: the model
+# already has that camera.
+cameras:
+  wrist:
+    body: camera_mount
+    pose:
+      - [1.0, 0.0, 0.0, 0.0]
+      - [0.0, -0.841900975, -0.539632049, 0.055]
+      - [0.0, 0.539632049, -0.841900975, -0.045]
+      - [0.0, 0.0, 0.0, 1.0]
+    fovy_deg: 48.4555
+    width: 1920
+    height: 1080
+
 joint_labels:
   shoulder_pan: [Podstawa, Obrot podstawy]
   shoulder_lift: [Bark, Bark]

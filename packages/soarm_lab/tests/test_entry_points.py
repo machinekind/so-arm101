@@ -19,6 +19,7 @@ EXPECTED = {
         (STRATEGIES, "touch"): "soarm_lab.strategies.touch:TouchStrategy",
         (STRATEGIES, "touch_jev"): "soarm_lab.strategies.touch_jev:JevTouchStrategy",
         (STRATEGIES, "grasp"): "soarm_lab.strategies.grasp:GraspStrategy",
+        (STRATEGIES, "grasp_wrist"): "soarm_lab.strategies.wrist:WristGraspStrategy",
         ("console_scripts", "soarm-lab"): "soarm_lab.cli:main",
     },
 }
@@ -28,7 +29,10 @@ STRATEGY_NAMES = [name for group, name in EXPECTED["soarm-lab"] if group == STRA
 #: The ones that run without a network: `dream` needs Dream Labs' service, and
 #: tests/strategies/test_dream.py runs it on a fake client. `touch_jev` refuses to start without
 #: TYPESAFE_API_KEY, and tests/strategies/test_touch_jev.py runs this protocol check with a fake judge.
-OFFLINE_STRATEGIES = [name for name in STRATEGY_NAMES if name not in ("dream", "touch_jev")]
+#: `grasp_wrist`'s default settings name the wrist camera and so need OpenCV, which the dev group does not
+#: install: tests/strategies/test_wrist.py runs this check with `wrist_camera=""` and, where cv2 imports,
+#: with the defaults.
+OFFLINE_STRATEGIES = [name for name in STRATEGY_NAMES if name not in ("dream", "touch_jev", "grasp_wrist")]
 
 
 def own_entry_points(dist: str) -> dict[tuple[str, str], metadata.EntryPoint]:

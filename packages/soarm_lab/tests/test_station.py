@@ -44,7 +44,8 @@ def test_plain_mujoco_compiles_the_scene_xml(station):
     assert model.nbody == 1 + ARM_BODIES
     assert model.njnt == model.nu == 6
     names = {mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_CAMERA, i) for i in range(model.ncam)}
-    assert names == {"sym-lewa", "sym-prawa", PREFIX + "wrist_cam"}
+    # The MJCF's own wrist camera and the one robot.yaml declares for the twin, at the same pose.
+    assert names == {"sym-lewa", "sym-prawa", PREFIX + "wrist_cam", PREFIX + "wrist"}
     assert model.opt.timestep == pytest.approx(0.005)
     assert model.opt.integrator == mujoco.mjtIntegrator.mjINT_IMPLICITFAST
     assert model.opt.cone == mujoco.mjtCone.mjCONE_ELLIPTIC
