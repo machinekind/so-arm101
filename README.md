@@ -14,7 +14,8 @@ The repository is a [uv](https://docs.astral.sh/uv/) workspace with two Python p
   a strategy that touches an object the twin's perception located, a variant in which
   TypeSafe's Jev decision model judges each touch and aims again after a miss, and a strategy
   that picks a Classic World block up after that touch and picks it up again when it drops,
-  with a variant in which the wrist camera centres the jaws on the block and turns them across it.
+  with a variant in which the wrist camera centres the jaws on the block and turns them across it,
+  and a variant in which Jev judges the grasp at each step.
 
 Both integrate with the [Machinekind digital twin](https://github.com/machinekind/twin)
 as plugins. The twin measures the physical setup and runs policies and inverse

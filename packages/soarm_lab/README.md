@@ -113,6 +113,8 @@ With this package installed alongside the twin, its Strategies tab offers:
 - `grasp`: `touch`'s probe on a block of the Classic World set, then rise, open, straddle, close and
   lift; the jaw rule verifies the hold, and the strategy grasps the block again when it drops out of
   the jaws; see [Grasp a block](#grasp-a-block).
+- `grasp_jev`: `grasp` plus Jev after the probe, the close and the lift, which picks the next step; see
+  [Jev in the grasp loop](#jev-in-the-grasp-loop).
 - `grasp_wrist`: `grasp` plus a look through the wrist camera at each hover: the block's colour blob is
   fitted with its known shape, the jaws are centred on it and turned across its short side; see
   [Wrist camera](#wrist-camera).
@@ -149,6 +151,12 @@ grasp:
   carry_s: 10.0
   wait_s: 20.0
   time_limit_s: 120.0
+grasp_jev:
+  object_kind: cube
+  model: jev-1.14.0
+  min_confidence: 0.8
+  send_frames: false
+  wrist_camera: wrist
 grasp_wrist:
   object_kind: cuboid5
   wrist_camera: wrist
@@ -185,6 +193,7 @@ See [policy settings](soarm_lab/strategies/policy.py),
 [touch settings](soarm_lab/strategies/touch.py),
 [touch_jev settings](soarm_lab/strategies/touch_jev.py),
 [grasp settings](soarm_lab/strategies/grasp.py),
+[grasp_jev settings](soarm_lab/strategies/grasp_jev.py),
 [grasp_wrist settings](soarm_lab/strategies/wrist.py) and
 [conventions](../../docs/conventions.md) for the full interfaces.
 
@@ -254,6 +263,80 @@ input can be put to Claude or to a person to compare accuracy. A Claude judge wo
 process handling of the twin's `machinekind_twin_llm.cli` copied here, not imported (that package is
 only in the `twin` group and loads OpenCV), a fake CLI for its tests, and an `answer_timeout_s` near
 its 60 s limit, because the CLI answers in seconds where Jev answers in about 0.1 s.
+
+## Jev in the grasp loop
+
+`grasp_jev` runs `grasp` and asks Jev at three points of every attempt, through the same client, key,
+retry and records as `touch_jev`. Without `TYPESAFE_API_KEY` it refuses the run before the arm moves.
+`grasp` itself never asks.
+
+1. **The probe**, when the closed tips have stalled on the block: `touch_jev`'s two questions (touched,
+   correction) on its state, with the block centre as the touch point. A confident "touched" goes on into
+   the rise, the open jaw and the straddle. A "touched" on a probe that met nothing, or that stalled more
+   than `contact_band_m` above the probe's bottom, ends the run for review: the straddle needs the
+   measured top. A miss is corrected one `correction_m` step as in `touch_jev`.
+2. **The close**: after a held close on the first tick of the lift, after an empty close or a jaw tip on
+   the block while the arm holds where it stopped (phase `judge`).
+3. **The lift**, on the first tick of the hold check at the top.
+
+At the close and the lift the state holds facts computed in code, in named buckets: how the close ended;
+the measured jaw gap against the block's short side (`closed`: a jaw commanded tighter than the block
+reached its command; `narrower_than_block`; `block_wide`, within 3 mm of the short side; `open`); whether
+the jaw stands and whether it moved since the close; how far the arm lifted (`not_lifted`, `partly`,
+`lifted`); whether the wrist camera shows the block between the jaws (`unknown` until a blob is wired in,
+see below); the twin's latest pose of the block against the jaws (`at_the_jaws`, `near_the_jaws`,
+`elsewhere`) with its source, annotated sources named apart (`last_seen_dropped` for "ostatnie widziane
+(upuszczona)"); whether the jaws' heading came from the block's rotation or was a guess; the earlier
+attempts; and `available_next`, the steps the geometry allows. Two questions go out: `held`
+(nothing_in_jaws, block_held, held_by_edge) and `next` (lift, regrasp_wider, regrasp_rotated, give_up).
+
+| Jev's answer | The run |
+| --- | --- |
+| `held` below `min_confidence` (0.8), or `next` below `min_correction_confidence` (0.6) | ends for review |
+| a `next` not in `available_next` | ends for review |
+| regrasp on the last of `max_attempts` (3) | ends |
+| lift | goes on; the lift's time limit and the 1 s hold count from the answer, not from the ask |
+| give_up | ends with the block where it is: a held block stays in the jaws |
+| regrasp_wider | the jaw opens 16 mm wider on the moving jaw's side for every later straddle |
+| regrasp_rotated | the jaws turn 90 degrees at the same block centre |
+| no answer within `answer_timeout_s`, an overload or a dropped connection | asks once more after 0.5 s, then ends for review |
+| a refused key or request, an unusable answer | ends for review |
+
+The `held` answer never moves the arm. A disagreement with the jaw rule is counted, and a review or stop
+reason says "szczeka: trzyma" or "szczeka: pusta". Lift is available only after a held close.
+regrasp_rotated is available only for a heading that was a guess on a block a turn changes, so never on
+the cube, and regrasp_wider only while the jaw can open that far.
+
+The wider opening goes all to the moving jaw's side. The SO-101 closes one jaw and the block always ends
+against the fixed tip, so a fixed tip farther out pushes the block farther across the table: in the twin
+a 16 mm push ran the cube up onto the fixed tip. After a tip on the block the regrasp probes half the
+short side toward the moving jaw first, as `grasp`'s own retry does; after an empty close it probes the
+same block centre again. A block in the jaws is first put back. On the table the jaw opens there (phase
+`let_go`). In the air the arm first lowers it to the grasp point (phase `lower`), and a stall on the way
+counts as arrival, so nothing presses into the table. The jaw opens before the arm rises and closes only
+at the hover, and the next probe aims at the centre between the fingertips.
+
+A block that drops out of the jaws goes to `grasp`'s recovery (see [Recovery](#recovery)), also while
+it is lowered: a close or lift question in flight or in its retry pause is cancelled and recorded as
+such, and the regrasp's probe is asked about as any other. The plan's ambiguous row, a held block the
+cameras see elsewhere, reaches Jev through the state's `block_sighting`.
+
+With `send_frames: true` only the wrist camera's frame goes out, named by `wrist_camera` as in robot.yaml.
+The MJCF camera renders 1920x1080; the frame is halved by integer striding to 960x540 to fit Jev's 1568
+px. A frame below 280 px, a missing one, or one older than 1 s is left out with its reason in
+`frames_left_out`: a stalled stream keeps serving its last image with a growing age. The state then
+always carries `camera_views`, `frames_left_out`, `frames_scaled` and `frames_age_s`.
+
+`GraspJevStrategy(..., blob=fn)` takes a function of the wrist frame that gives the share of the area
+between the jaws the block's colour fills, 0..1; 0.15 or more is `yes`. Nothing passes one yet: the twin
+builds the strategy from its settings alone, so the state says `unknown` until a blob from `grasp_wrist`'s
+colour mask (`wrist.segment`) is wired in.
+
+Every call gives one record per question, with `point` (probe, close, lift) in its state beside the
+questions' version (`touch_jev/1` at the probe, `grasp_jev/1` otherwise), and one "Ocena chwytu" log line.
+A run takes up to three answers per attempt, each up to `answer_timeout_s` plus a retry, so
+`time_limit_s` defaults to 180 s. test_grasp_jev_in_twin.py runs the strategy in the twin with a judge
+that answers from the jaws' contact sensors.
 
 ## Grasp a block
 
@@ -396,15 +479,15 @@ sends the last target and disengages, and the supervisor holds that command.
 `carry_s` (10 s) is the window in which a demonstrator can knock the block out or take it; 0 ends the run
 at the verified lift. `wait_s` (20 s) covers two LLM answers when two cameras see the block. The default
 `time_limit_s` (120 s) fits a grasp of about 10 s, its carry, one drop with its wait, a regrasp and a
-second carry, about 65 s in all. `release()` is the seam a place task or the Jev step calls to end the
-watch and open the jaw; it returns the tick's answer, so a `carrying` override can return it.
+second carry, about 65 s in all. `release()` is the seam a place task calls to end the watch and open the
+jaw; it returns the tick's answer, so a `carrying` override can return it.
 test_grasp_from_cameras.py pulls the cube out of the jaws mid-carry in the twin, the cube seen only by
 two simulated cameras, and the strategy grasps it again where it lies.
 
 Later steps of the [grasp plan](../../docs/grasp-plan.md) plug in through these methods: wrist-camera
-centring through `before_descent` and `before_straddle` (`grasp_wrist`, below), a Jev judge through
-`after_touch`, `after_miss` and `after_grasp_failed`, a place task or the Jev step through `carrying` and
-`release()`, and the grasp library through `grasp_headings`.
+centring through `before_descent` and `before_straddle` (`grasp_wrist`, below), the Jev judge through
+`after_touch`, `after_grasp_failed` and `carrying` (`grasp_jev`, above), a place task through `carrying`
+and `release()`, and the grasp library through `grasp_headings`.
 
 ### Wrist camera
 
