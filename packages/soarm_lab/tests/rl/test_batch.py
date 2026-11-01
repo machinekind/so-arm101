@@ -18,7 +18,7 @@ pytest.importorskip("mujoco_warp", reason="mujoco-warp is not installed (the `tr
 
 import jax.numpy as jnp  # noqa: E402
 
-from soarm_lab.rl import task as tk  # noqa: E402
+from soarm_lab.rl import tasks as tk  # noqa: E402
 from soarm_lab.rl.batch import BatchEnv  # noqa: E402
 from soarm_lab.rl.env import ArmEnv  # noqa: E402
 from soarm_lab.rl.policy import Policy  # noqa: E402

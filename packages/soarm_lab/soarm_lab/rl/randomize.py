@@ -202,3 +202,21 @@ class Randomization:
             "cube_delay": rng.integers(0, self.cube_delay + 1, n),
             "cube_period": rng.integers(1, max(1, self.cube_period) + 1, n),
         }
+
+
+def train_plan(dyn: Dynamics, spread: float):
+    """Use measured dynamics and evaluate nominally, plus randomly when spread is positive."""
+    rand = Randomization.around(dyn, spread)
+    evals = [("bez randomizacji", "cpu_nominal", Randomization.nominal(dyn))]
+    if rand.randomized:
+        evals.append(("z randomizacja", "cpu_rand", rand))
+    return rand, evals
+
+
+def describe(rand: Randomization) -> str:
+    """Describe the dynamics, randomization and cube perception for CLI output."""
+    c = rand.centre
+    delay = f"{rand.min_delay}" if rand.min_delay == rand.max_delay else f"{rand.min_delay}-{rand.max_delay}"
+    return (f"dynamika: {c.source} (kp x{c.kp:.2f}, tlumienie x{c.damping:.2f}, opoznienie {delay} takt.); "
+            f"randomizacja: {'tak' if rand.randomized else 'brak'}; "
+            f"percepcja kostki: {'jak z kamer' if rand.fold_yaw or rand.cube_delay else 'idealna'}")

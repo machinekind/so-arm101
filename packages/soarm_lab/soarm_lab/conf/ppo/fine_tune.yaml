@@ -1,0 +1,6 @@
+defaults:
+  - default
+  - _self_
+
+init_std: 0.25
+critic_warmup: 30

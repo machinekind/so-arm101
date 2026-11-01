@@ -15,7 +15,7 @@ import pytest
 
 pytest.importorskip("mujoco")
 
-from soarm_lab.rl import task as tk  # noqa: E402
+from soarm_lab.rl import tasks as tk  # noqa: E402
 from soarm_lab.rl.policy import (  # noqa: E402
     FORMAT,
     POLICY_FILE,

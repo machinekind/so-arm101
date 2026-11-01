@@ -33,7 +33,7 @@ from machinekind_twin.strategy import StrategyRunner  # noqa: E402
 from machinekind_twin.ui.watch import arm_mask  # noqa: E402
 from machinekind_twin.workspace import CameraRecord, Workspace  # noqa: E402
 
-from soarm_lab.rl import task as tk  # noqa: E402
+from soarm_lab.rl import tasks as tk  # noqa: E402
 from soarm_lab.strategies.policy import PolicySettings, PolicyStrategy  # noqa: E402
 
 

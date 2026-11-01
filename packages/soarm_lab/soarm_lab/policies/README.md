@@ -1,11 +1,13 @@
-# Bundled policy provenance
+# Policies
+
+## Bundled policy provenance
 
 `reach-v3` and `lift-v3` come from the SO-101 PPO training work in the
 [Machinekind digital twin](https://github.com/machinekind/twin). The training
 code uses MuJoCo simulation and domain randomization. Git records both checkpoint
 additions under the author `przemeknowak781`, dated 2026-09-24.
 
-## Upstream checkpoints
+### Upstream checkpoints
 
 | Policy | Original checkpoint | Training history recorded by the commit |
 | --- | --- | --- |
@@ -19,7 +21,7 @@ its creation timestamp. These files match the metadata at the respective
 upstream commits. They are training summaries, not a complete record of every
 earlier training run.
 
-## Import and format conversion
+### Import and format conversion
 
 [Commit `5acba3408df83eb26a4c10e5276b0a83c10b76fa`](https://github.com/machinekind/so-arm101/commit/5acba3408df83eb26a4c10e5276b0a83c10b76fa)
 imported both policy folders from the twin into this package. The imported
@@ -34,3 +36,79 @@ original import. The [policy API](../rl/policy.py) documents the NPZ format.
 
 The policies are distributed under the license stated in the
 [soarm-lab README](../../README.md#license).
+
+
+## Train a policy
+
+Training uses PPO in JAX on MuJoCo Warp. Install the `train` extra for Hydra,
+JAX, optax and MuJoCo Warp. Linux installs JAX with CUDA 12 support.
+Use `device=cpu` for a small local run.
+
+```bash
+uv run --extra train soarm-lab train task=reach
+uv run --extra train soarm-lab train task=lift ppo.iterations=50 device=cpu
+uv run --extra train soarm-lab train task=pickplace station=$HOME/stations/desk1
+uv run --extra train soarm-lab train --cfg job
+uv run --extra train soarm-lab train --help
+```
+
+Training ends with CPU evaluation. Policies are saved in
+`workspace/policies/<name>/` in a checkout. Set `SOARM_LAB_POLICIES` or `out`
+to choose another directory. Each folder holds `policy.npz`, `meta.json`,
+`config.json`, `experiment.yaml` and training progress. `experiment.yaml`
+records the composed settings. Policy inference uses NumPy and needs no Hydra.
+Commands accept a policy name or a path to `policy.npz`. Local names take
+precedence over bundled names.
+
+The task group selects `reach`, `lift` or `pickplace`. Task settings use keys
+such as `task.episode_steps`. PPO settings use `ppo.num_envs`, `ppo.iterations`
+and `ppo.seed`. The root `seed` sets `ppo.seed` unless it is overridden directly.
+The other run keys are `name`, `out`, `station`, `eval_episodes`, `stop_file`,
+`init` and `device`.
+
+Set `randomization.spread=0` to train on the station's measured dynamics with
+zero spread. This also skips randomized evaluation. A positive spread scales
+the randomization around those measurements. Export a measured station with
+`twin export ~/stations/desk1` and pass `station=$HOME/stations/desk1`.
+
+## Experiments
+
+An experiment selects config groups and overrides their settings.
+The standard experiments are `reach` with 150 iterations, `lift` with 300,
+and `pickplace` with 300. `lift_finetune` starts from the bundled lift policy
+and selects `ppo=fine_tune`.
+
+```bash
+uv run --extra train soarm-lab train experiment=lift_finetune
+uv run --extra train soarm-lab train init=lift-v3 ppo=fine_tune
+uv run --extra train soarm-lab train init=lift-v3 ppo=fine_tune +task_overrides.episode_steps=250
+EXPERIMENTS="reach lift" OVERRIDES="ppo.iterations=50" bash jobs/train.sh
+```
+
+`init` requires `ppo=fine_tune` and uses the policy's stored task.
+An explicitly selected task must have the same name. `task_overrides` changes that stored task. The fine-tuning PPO group
+sets `init_std=0.25` and `critic_warmup=30`.
+
+`jobs/train.sh` runs `reach` when `EXPERIMENTS` is empty.
+`EXPERIMENTS` and `OVERRIDES` are space-separated lists. Each experiment sets its
+output name. Set `OVERRIDES="name=x"` to change it. The dispatcher also reads
+`GPUS` and `ON_FAILURE`.
+
+## Add an experiment
+
+Add a YAML file under [`conf/experiment`](../conf/experiment) with a global
+package directive. Select groups in `defaults` and set the values for the run.
+For example, `short_lift.yaml` can contain:
+
+```yaml
+# @package _global_
+defaults:
+  - override /task: lift
+
+name: short_lift
+ppo:
+  iterations: 50
+```
+
+Run it with `soarm-lab train experiment=short_lift`. Command-line overrides
+apply after the experiment. Unknown config keys are rejected.

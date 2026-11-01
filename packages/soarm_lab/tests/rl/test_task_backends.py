@@ -16,7 +16,7 @@ pytest.importorskip("mujoco")
 jnp = pytest.importorskip("jax.numpy")
 
 from soarm_lab import sim as sc  # noqa: E402
-from soarm_lab.rl import task as tk  # noqa: E402
+from soarm_lab.rl import tasks as tk  # noqa: E402
 from soarm_lab.rl.env import scene_config  # noqa: E402
 
 #: Worlds in a batch.
@@ -42,7 +42,7 @@ def inputs(task: tk.TaskConfig, lim: tk.Limits, seed: int) -> dict[str, np.ndarr
     goal[::3] = tcp[::3] + rng.normal(0, 0.005, (len(goal[::3]), 3))      # reach: some within success_dist
     cube = rng.normal(0, 0.2, (N, 3))
     cube[: N // 2, 2] = 0.09                                    # half lifted: the carry latch, the lift term
-    cube[N // 2:, 2] = task.cube_half + rng.uniform(-0.002, 0.004, N - N // 2)
+    cube[N // 2:, 2] = tk.make_task("lift").cube_half + rng.uniform(-0.002, 0.004, N - N // 2)
     cube[::5, 2] = -0.08                                        # off the table: failure
     target = np.c_[rng.normal(0, 0.2, (N, 2)), np.zeros(N)]
     cube[N // 2::2, :2] = target[N // 2::2, :2] + rng.normal(0, 0.01, (len(cube[N // 2::2]), 2))
@@ -81,17 +81,18 @@ def run(xp, task: tk.TaskConfig, lim: tk.Limits, x: dict[str, np.ndarray]) -> di
         kw = dict(target=f(x["target"]), cube_vel=f(x["vel"]), carried=b(x["carried"]),
                   grip_open=b(x["opened"]))
     out = {
-        "observe": tk.observe(xp, task, lim, f(x["q"]), f(x["q_cmd"]), f(x["tcp"]), f(x["prev"]),
+        "observe": task.observe(xp, lim, f(x["q"]), f(x["q_cmd"]), f(x["tcp"]), f(x["prev"]),
                               goal=f(x["goal"]), cube_pos=f(x["cube"]) if cube else None,
                               cube_rot=f(x["rot"]) if cube else None, target=f(x["target"])),
         "apply_action": tk.apply_action(xp, task, lim, f(x["q_cmd"]), f(x["act"])),
         "fold_yaw": tk.fold_yaw(xp, f(x["rot"])),
-        "carry_latch": tk.carry_latch(xp, task, b(x["carried"]), f(x["jaws"]), f(x["cube"])),
+        "carry_latch": tk.carry_latch(xp, task if task.cube else tk.make_task("lift"),
+                                      b(x["carried"]), f(x["jaws"]), f(x["cube"])),
         "grip_is_open": tk.grip_is_open(xp, lim, f(x["q_cmd"])),
         # reach has no limit penalty of its own; `limit_cost` is checked with one anyway.
         "limit_cost": tk.limit_cost(xp, replace(task, limit_penalty=0.5), lim, f(x["q_cmd"])),
     }
-    r, s, fail = tk.reward(xp, task, f(x["tcp"]), f(x["act"]), f(x["prev"]), goal=f(x["goal"]),
+    r, s, fail = task.reward(xp, f(x["tcp"]), f(x["act"]), f(x["prev"]), goal=f(x["goal"]),
                            cube_pos=f(x["cube"]) if cube else None,
                            jaw_contacts=f(x["jaws"]) if cube else None, q_cmd=f(x["q_cmd"]), limits=lim, **kw)
     out.update(reward=r, success=s, failure=fail)

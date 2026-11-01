@@ -47,14 +47,14 @@ def evaluate(policy: Policy, episodes: int = 50, *, randomization: Randomization
                     break
             succ.append(float(info["success"]))
             ever.append(float(hit))
-            final.append(info["distance"] if task.name == "reach" else info["height"])
+            final.append(info["distance"] if not task.cube else info["height"])
             if "dist_target" in info:
                 place.append(info["dist_target"])
     finally:
         env.close()
     out = {"episodes": episodes, "success": float(np.mean(succ)), "ever_success": float(np.mean(ever)),
            "randomized": rand.randomized, "centre": rand.centre.source}
-    key = "final_distance_mm" if task.name == "reach" else "final_height_mm"
+    key = "final_distance_mm" if not task.cube else "final_height_mm"
     out[key] = float(np.median(final) * 1000)
     if place:                                          # pickplace: cube to target (xy) at the episode's end
         out["final_place_mm"] = float(np.median(place) * 1000)
