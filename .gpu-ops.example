@@ -7,7 +7,7 @@
 #
 #   cp .gpu-ops.example .gpu-ops
 
-# Where this repository keeps its payloads (jobs/train.sh).
+# Where this repository keeps its payloads (jobs/train.sh, jobs/grasps.sh).
 OPS_PAYLOAD_DIR=jobs
 # The Python project the remote venv is synced from: the workspace root (pyproject.toml, uv.lock).
 OPS_PROJECT_DIR=.
@@ -16,7 +16,8 @@ OPS_REPO_NAME=so-arm101
 # What never leaves this machine, on top of the dispatcher's own list: venvs, trained policies,
 # logs, caches, the session folders.
 OPS_RSYNC_EXTRA=.venv/ workspace/ logs/ .jax_cache/ .pytest_cache/ .ruff_cache/ __pycache__/ .claude/
-# What comes back while a job runs and when it ends: the trained policies and the job logs.
-OPS_WATCH_PULL=workspace/policies logs
+# What comes back while a job runs and when it ends: the trained policies, the grasp libraries
+# (jobs/grasps.sh) and the job logs.
+OPS_WATCH_PULL=workspace/policies workspace/grasps logs
 # Default job name. Empty: derived from the payload being run.
 OPS_JOB_NAME=

@@ -16,7 +16,7 @@ from galaxeo-manipulators, with two changes:
   over most of the A1X workspace. IK starts from the given pose, from the rest pose and from a few random
   ones, and keeps the best.
 
-The jaw helpers read openings, fingertip positions and collision reach from the model.
+The jaw helpers read openings, fingertip positions, tip swing and collision reach from the model.
 
 All poses are in the arm's BASE frame, not the scene's world frame: a camera calibrated relative to the
 base stays correct wherever the arm stands. `camera` returns arm-camera poses in this frame with
@@ -307,6 +307,17 @@ class RobotKinematics:
             else:
                 hi = mid
         return 0.5 * (lo + hi)
+
+    def tip_swing(self, gripper: float) -> float:
+        """Return fingertip separation along the approach axis [m] at `gripper` [app units].
+
+        A hinged jaw changes this offset as it opens, reducing the shallower tip's available bite.
+        """
+        joints = self._jaw_pose(gripper)
+        fixed, moving = self.fingertips(joints)
+        Ti = inverse(self.tcp(joints))
+        a = self._approach / np.linalg.norm(self._approach)
+        return abs(float(a @ (Ti[:3, :3] @ (fixed - moving))))
 
     def jaw_centre(self, gripper: float) -> np.ndarray:
         """Return the fingertips' midpoint in the TCP frame [m] at `gripper` [app units].

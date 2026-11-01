@@ -1,0 +1,73 @@
+<?xml version="1.0"?>
+<!--
+  Derived from so101.xml (MuJoCo Menagerie ac6b2b0, Apache-2.0, see packages/soarm/THIRD_PARTY_NOTICES):
+  the gripper subtree only, rewritten by hand as URDF for GraspGenX. Modified from the original: the wrist
+  camera mount and its collision boxes are left out, the primitive collision geoms are left out, poses are
+  copied from the MJCF (its quaternions written as roll-pitch-yaw).
+
+  The root link `gripper` is the MJCF `gripper` body frame. GraspGenX's description (config.json beside this
+  file) turns it by base_rotation = Rx(180 deg) so that +Z is the approach and +X the closing direction.
+  The meshes are in metres; install_gripper.sh copies them from packages/soarm/soarm/robot/assets/.
+-->
+<robot name="so101_gripper">
+  <link name="world"/>
+
+  <joint name="world_joint" type="fixed">
+    <parent link="world"/>
+    <child link="gripper"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <link name="gripper">
+    <!-- The wrist roll servo inside the gripper body (MJCF quat 1 -1 0 0). -->
+    <visual>
+      <origin xyz="0.0077 0.0001 -0.0234" rpy="-1.5707963 0 0"/>
+      <geometry>
+        <mesh filename="meshes/sts3215_03a_v1.stl"/>
+      </geometry>
+    </visual>
+    <!-- The fixed jaw (MJCF quat 0 1 0 0). -->
+    <visual>
+      <origin xyz="0 -0.000218 0.00095" rpy="3.1415927 0 0"/>
+      <geometry>
+        <mesh filename="meshes/wrist_roll_follower_so101_v1.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 -0.000218 0.00095" rpy="3.1415927 0 0"/>
+      <geometry>
+        <mesh filename="meshes/wrist_roll_follower_so101_gripper_part0_v1.stl"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- MJCF body moving_jaw_so101_v1 (quat 1 1 0 0) and its hinge `gripper`. -->
+  <joint name="gripper" type="revolute">
+    <parent link="gripper"/>
+    <child link="moving_jaw"/>
+    <origin xyz="0.0202 0.0188 -0.0234" rpy="1.5707963 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-0.174533" upper="1.7453292" effort="2.94" velocity="5.0"/>
+  </joint>
+
+  <link name="moving_jaw">
+    <visual>
+      <origin xyz="0 0 0.0189" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/moving_jaw_so101_v1.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.0189" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/moving_jaw_so101_gripper_part0_v1.stl"/>
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="0 0 0.0189" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/moving_jaw_so101_gripper_part1_v1.stl"/>
+      </geometry>
+    </collision>
+  </link>
+</robot>

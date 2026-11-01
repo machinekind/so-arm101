@@ -106,6 +106,7 @@ touch_jev:
   max_attempts: 3
 grasp:
   block: cube
+  grasp_source: geometry   # or library
   open_margin_m: 0.008
   squeeze_m: 0.008
   grasp_depth: 0.5
@@ -362,6 +363,32 @@ then continues from the settled aim. Looks consume no grasp attempts. Focal leng
 alignment and colour thresholds still need calibration on the stand.
 
 See [wrist settings](soarm_lab/strategies/wrist.py) for the full interface.
+
+### Grasp library
+
+`grasp_source: library` uses cached block grasps. GraspGenX generates them offline from
+meshes supplied by `blocks.block`. Each file stores pad points, approach and closing axes
+in the block frame. `library_dir` selects another folder and `min_score` filters scores.
+A missing library or dimensions that differ from the catalog refuse the run.
+Only a hand-written cube example is bundled.
+
+The strategy composes grasps with the observed rotation and block symmetries. A pose
+without orientation uses geometry. Library candidates are checked for tilt, score, jaw
+travel, depth and position. Duplicates are tried once. Score bins and wrist turn determine
+attempt order, followed by jaw and reach checks.
+
+The chosen width sets opening and squeeze. Depth and offset place the fingertip midpoint
+below the nominal top by default. With `probe: true`, depth counts from the measured top
+and the probe targets the block centre. Tip swing must leave enough bite for the shallower
+tip. The hand stays down. Tip retries move half the chosen width.
+Status and panel notes identify the source, candidate and rejection reasons.
+
+    uv run soarm-lab grasps meshes --out workspace/grasps/meshes
+    uv run soarm-lab grasps convert cube workspace/grasps/raw/cube.yml
+    uv run soarm-lab grasps show cube
+
+See [generation setup](../../tools/graspgenx/README.md) and the
+[library format](soarm_lab/grasps/README.md). GraspGenX runs in its own CUDA environment.
 
 ## Dream Labs
 
