@@ -121,6 +121,8 @@ The plugin contracts are the package `machinekind-twin-api` (see the root README
   It opens, straddles below the catalog top height, closes and lifts.
   With `probe: true`, it first measures the top with a closed-jaw descent as `touch` does.
   `soarm_lab.strategies.jaw.JawMonitor` verifies the hold with the same thresholds as the twin's tracker.
+  Each carrying tick checks the jaw and `Observation.objects`. A sighting after a drop can trigger
+  a regrasp through `retarget`. `release()` ends monitoring and opens the jaw.
 - `packages/soarm_lab/pyproject.toml` registers these strategies under `machinekind_twin.strategies` (`STRATEGIES`)
   as `policy`, `ik`, `touch`, `touch_jev`, `grasp` and `dream`. `soarm_lab.strategies.dream.DreamStrategy` imports the Dream client only in `start`.
 - The station export is `Workspace.export` in the twin (`twin export`). `soarm_lab.station.Station` reads it.

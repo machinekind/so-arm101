@@ -1,15 +1,15 @@
-"""Test grasp phases and failure handling with a fake supervisor, arm and jaw.
+"""Test grasp phases and recovery with a fake supervisor, arm and jaw.
 
-The arm stalls when a fingertip would enter the block. The jaw closes to the block's width
-when the tips straddle it. A held block follows the fingertips until release or `slip_z`.
-Other jaw models simulate delay, failed motion, creep and vibration.
-`test_grasp_in_twin.py` covers the twin's runner, tracker and physics."""
+The arm stalls at the block, and a held block follows the fingertips. Jaw models simulate
+motion, delay, creep and failures. Phase hooks can drop the block. `Script` supplies the
+tracker's poses around a drop. Twin integration and camera tests cover physics and perception.
+"""
 
 from __future__ import annotations
 
 import math
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 import pytest
@@ -23,9 +23,13 @@ from soarm_lab.blocks import block  # noqa: E402
 from soarm_lab.kinematics import IKSolution, RobotKinematics  # noqa: E402
 from soarm_lab.robot import load_robot  # noqa: E402
 from soarm_lab.strategies.grasp import (  # noqa: E402
+    IN_HAND,
     JAW_REACH_M,
     PROBE_BELOW_M,
+    SEEN,
+    STALE,
     GraspSettings,
+    GraspStatus,
     GraspStrategy,
     grasp_headings,
     heading,
@@ -49,6 +53,8 @@ PER_UNIT = (SPEC.gripper_range_q[1] - SPEC.gripper_range_q[0]) / 100
 #: Maps time [s], supervisor gripper command [app units] and straddle state
 #: to the measured gripper command [app units].
 Jaw = Callable[[float, float, bool], float]
+#: Fixed poses or poses supplied by observation time [s].
+Objects = Mapping[str, ObjectPose] | Callable[[float], Mapping[str, ObjectPose]]
 
 
 def run_info(limits: dict[str, tuple[float, float]] | None = None, simulated: bool = True,
@@ -127,6 +133,8 @@ class Block:
     #: False when the block has been removed.
     present: bool = True
     path: list[np.ndarray] = field(default_factory=list)
+    #: First observation time after the last drop [s]. NaN until a drop occurs.
+    dropped_t: float = NAN
 
     @property
     def height(self) -> float:
@@ -189,22 +197,76 @@ class GluedBlock(Block):
         return z > self.gripped_z + self.rise_m
 
 
-def follow(s: GraspStrategy, joints: dict[str, float], objects: Mapping[str, ObjectPose] | None, ticks: int,
+#: Stage fields are drop delay [s], source, xy [m, base frame], initial age [s] and height [m].
+#: A None source hides the pose. None xy uses the block's position.
+Stage = tuple[float, str | None, tuple[float, float] | None, float, float]
+
+
+def stage(delay_s: float, source: str | None, xy: tuple[float, float] | None = None, age_s0: float = 0.0,
+          z: float = 0.0) -> Stage:
+    return (delay_s, source, xy, age_s0, z)
+
+
+@dataclass
+class Script:
+    """Supply tracker poses before and after a drop.
+
+    Use `before` until a stage starts after `Block.dropped_t`. Then use the latest started
+    stage and increase its pose age with elapsed time.
+    """
+
+    block: Block
+    before: Objects
+    stages: list[Stage]
+    label: str = "cube"
+
+    def __call__(self, t: float) -> Mapping[str, ObjectPose]:
+        since = t - self.block.dropped_t
+        begun = [st for st in self.stages if since >= st[0] - 1e-9]
+        if math.isnan(since) or not begun:
+            return self.before(t) if callable(self.before) else self.before
+        delay, source, xy, age0, z = begun[-1]
+        if source is None:
+            return {}
+        where = self.block.xy if xy is None else np.asarray(xy, float)
+        return {self.label: ObjectPose(np.array([*where, z], float), np.eye(3), source, age0 + since - delay)}
+
+
+def drop_it(block: Block, where: tuple[float, float], times: int = 1) -> Callable[[float], None]:
+    """Return a hook that drops the block at `where` on its first `times` calls."""
+    calls: list[float] = []
+
+    def hook(t: float) -> None:
+        calls.append(t)
+        if len(calls) <= times:
+            block.gripped = False
+            block.xy = np.asarray(where, float)
+
+    return hook
+
+
+def follow(s: GraspStrategy, joints: dict[str, float], objects: Objects | None, ticks: int,
            t0: float = 0.0, block: Block | None = None, offset_z: float = 0.0, cap_deg_s: float | None = None,
            lag_s: float = 0.0, jaw: Jaw | None = None, slip_z: float | None = None,
            commands: list[dict[str, float]] | None = None, measured: list[dict[str, float]] | None = None,
            command: Mapping[str, float] | None = None,
+           on_phase: dict[str, Callable[[float], None]] | None = None,
+           trace: list[tuple[float, GraspStatus]] | None = None,
            ) -> tuple[list[Action], list[str], dict[str, float], float]:
     """Run up to `ticks` ticks, stopping on `done`.
 
     The supervisor limits arm speed to `cap_deg_s` [deg/s], or follows at once for None.
-    The gripper follows its ramped target at once. The arm follows with lag and height offset,
-    stalling at `block`. `jaw` supplies the measured opening. By default it follows the command
-    until the block prevents further closing. A held block follows the fingertip midpoint until
-    release or until the TCP exceeds `slip_z`.
+    The gripper follows its ramped target. The arm follows with lag and a TCP height offset,
+    stalling at `block`. `jaw` supplies measured opening, defaulting to the command bounded
+    by block width. A held block follows the fingertip midpoint until release or a drop.
+    `slip_z` triggers a drop above that TCP height only before the first drop.
 
-    `commands` and `measured` collect each tick's joints. `command` supplies the initial supervisor
-    command, defaulting to the measured joints. Return actions, phases, final joints and final time."""
+    `objects` supplies fixed poses or poses by observation time. `on_phase` hooks run after
+    the first tick entering a phase. The next observation records a drop in `block.dropped_t`.
+    `commands`, `measured` and `trace` collect commands, measured joints and timestamped grasp
+    states. `command` supplies the initial supervisor command, defaulting to measured joints.
+    Return actions, phases, final joints and final time.
+    """
     answers, phases = [], []
     command = dict(joints if command is None else command)
     share = 1.0 if lag_s <= 0 else 1.0 - np.exp(-1.0 / (s.hz * lag_s))
@@ -216,8 +278,14 @@ def follow(s: GraspStrategy, joints: dict[str, float], objects: Mapping[str, Obj
             commands.append(command)
         if measured is not None:
             measured.append(joints)
-        answers.append(a := s.act(obs(joints, t=t, objects=objects, command=command)))
+        gripped = block is not None and block.gripped
+        seen_now = objects(t) if callable(objects) else objects
+        answers.append(a := s.act(obs(joints, t=t, objects=seen_now, command=command)))
         phases.append(s.status.phase)
+        if trace is not None:
+            trace.append((t, replace(s.grasp)))
+        if on_phase and phases[-1] in on_phase and (len(phases) == 1 or phases[-2] != phases[-1]):
+            on_phase[phases[-1]](t)
         t += 1 / s.hz
         command = supervised(command, a.target, None if cap_deg_s is None else cap_deg_s / s.hz)
         arm = servo(joints, held(s, command, offset_z), share)
@@ -234,12 +302,15 @@ def follow(s: GraspStrategy, joints: dict[str, float], objects: Mapping[str, Obj
         arm[g] = grip
         if block is not None:
             units = block.units(arm) if between else NAN
-            if block.gripped and (command[g] > units + 0.5 or (slip_z is not None and tcp(arm)[2] > slip_z)):
+            slips = slip_z is not None and math.isnan(block.dropped_t) and tcp(arm)[2] > slip_z
+            if block.gripped and (command[g] > units + 0.5 or slips):
                 block.gripped = False
                 if jaw is None:
                     arm[g] = command[g]
             elif between and not block.gripped and abs(grip - units) < 0.5 and command[g] < units - 0.5:
                 block.gripped = True
+            if gripped and not block.gripped:
+                block.dropped_t = t
             if block.stalls(arm):
                 arm = dict(joints, **{g: arm[g]})
             if block.gripped:
@@ -294,7 +365,8 @@ def offset(xy: tuple[float, float], metres: float) -> tuple[float, float]:
 
 
 def grasped(**settings) -> tuple[GraspStrategy, list[Action], list[str], dict[str, float], Block]:
-    """Run a complete cube grasp at `XY` from the rest pose."""
+    """Run a complete cube grasp at `XY` with a short carry unless overridden."""
+    settings.setdefault("carry_s", 0.5)
     s = started(seen(), **settings)
     block = block_at()
     answers, phases, joints, _ = follow(s, dict(SPEC.home), seen(), 1500, block=block)
@@ -404,12 +476,10 @@ def test_the_whole_grasp_on_a_cube_in_free_space(probe: bool):
     start = KIN.from_q(started().q_cmd)
     s, answers, phases, joints, block = grasped(probe=probe)
 
-    assert runs(phases)[0] in ("approach", "lift")
     probed = ["descend", "touched", "rise"] if probe else []
-    assert runs(phases)[-(7 + len(probed)):] == ["approach", *probed, "open", "straddle", "close", "lift_off",
-                                                 "check", "done"]
+    assert runs(phases) == ["approach", *probed, "open", "straddle", "close", "lift_off", "check", "carry",
+                            "done"]
     if not probe:
-        assert not {"descend", "touched", "rise"} & set(phases)
         # Without a closed-jaw descent, the hand stays at the hover until the open jaw straddles.
         hover_z = s.config.touch_z + s.config.hover_m
         assert min(tcp(a.target)[2] for a, p in zip(answers, phases, strict=True)
@@ -419,8 +489,11 @@ def test_the_whole_grasp_on_a_cube_in_free_space(probe: bool):
     last = answers[-1]
     assert last.done and last.success and s.status.success
     assert last.note.startswith("blok w szczekach, podniesiony o")
+    assert ", niesiony 0.5 s (szczeka" in last.note
     assert int(last.note.split("podniesiony o ")[1].split(" mm")[0]) == pytest.approx(40, abs=5)
     assert s.grasp.verdict == "lifted" and s.status.attempt == 1
+    assert phases.count("carry") == round(0.5 * s.hz) and s.grasp.carried_s == pytest.approx(0.5)
+    assert s.grasp.drops == 0 and s.grasp.creeps == 0 and s.grasp.elsewhere is None
     if probe:
         assert s.grasp.top_m == pytest.approx(2 * CUBE[2], abs=0.002)
     else:
@@ -645,17 +718,6 @@ def test_the_sideways_retarget_respects_max_attempts_1():
 
 
 # ------------------------------------------------------------ carrying
-def test_a_block_that_slips_on_the_way_up_ends_the_run():
-    s = started(seen())
-    # Derive the slip height from the nominal grasp point.
-    slip_z = max(0.012, 2 * CUBE[2] - CUBE[2] + 0.003) + 0.02
-    answers, phases, *_ = follow(s, dict(SPEC.home), seen(), 1500, block=block_at(), slip_z=slip_z)
-
-    assert phases[-2] == "lift_off" and answers[-1].done and not answers[-1].success
-    assert answers[-1].note == "blok wypadl ze szczeki podczas podnoszenia"
-    assert s.grasp.verdict == "slipped"
-
-
 def test_a_block_the_arm_cannot_lift_ends_the_run_with_the_squeeze_kept():
     s = started(seen())
     block = GluedBlock(np.array(XY, float), CUBE, rise_m=0.012)
@@ -688,23 +750,6 @@ def test_a_speed_cap_lowered_during_the_lift_lengthens_its_time_limit():
     assert reference.grasp.verdict == "lifted"
 
 
-def test_creep_during_the_check_is_a_slip():
-    s = started(seen())
-    creep: list[float] = []
-
-    def jaw(t: float, command: float, between: bool) -> float:
-        if not between:
-            return command
-        if s.status.phase == "check":
-            creep.append(0.004)
-        return max(command, CUBE_UNITS - sum(creep) / PER_UNIT)
-
-    answers, phases, *_ = follow(s, dict(SPEC.home), seen(), 1500, block=block_at(), jaw=jaw)
-
-    assert phases[-2] == "check" and answers[-1].done and not answers[-1].success
-    assert answers[-1].note == "blok zsuwa sie w szczekach" and s.grasp.verdict == "crept"
-
-
 def test_a_jaw_that_never_stands_after_the_close_ends_the_run():
     ticks: list[int] = []
 
@@ -728,6 +773,471 @@ def test_a_jaw_that_does_not_open_ends_the_run():
 
     assert phases[-2] == "open" and not answers[-1].success
     assert answers[-1].note == "szczeka nie otworzyla sie w 3 s (21 mm zamiast 45 mm)"
+
+
+# ------------------------------------------------------------ carrying and recovery
+UPUSZCZONA = "ostatnie widziane (upuszczona)"
+#: Landing position for most recovery tests [m, base frame].
+LANDS = (XY[0] + 0.03, XY[1])
+
+
+def carried(s: GraspStrategy) -> Callable[[float], Mapping[str, ObjectPose]]:
+    """Return the detector pose until closing, then the tracker's in-hand pose."""
+    closed: list[bool] = []
+
+    def objects(t: float) -> Mapping[str, ObjectPose]:
+        if closed or s.status.phase in ("close", "lift_off", "check", "carry"):
+            closed.append(True)
+            return seen(source="w dloni", age_s=0.0, z=0.05)
+        return seen()
+
+    return objects
+
+
+@dataclass
+class Knocked:
+    """A drop-test run with per-tick actions and observations, plus targets recorded at each knock."""
+
+    s: GraspStrategy
+    block: Block
+    answers: list[Action]
+    phases: list[str]
+    trace: list[tuple[float, GraspStatus]]
+    measured: list[dict[str, float]]
+    at_knock: list[tuple[np.ndarray, tuple[float, float, float] | None]]
+
+    @property
+    def drop(self) -> int:
+        """The tick that declared the first drop."""
+        return next(k for k, (_, grasp) in enumerate(self.trace) if grasp.drops >= 1)
+
+    def first(self, phase: str, after: int = 0) -> int:
+        return self.phases.index(phase, after)
+
+    @property
+    def safe_point(self) -> np.ndarray:
+        """Return the vertical recovery point at least as high as the hover."""
+        z0 = self.at_knock[0][0]
+        hover = self.s.config.touch_z + self.s.config.hover_m
+        return np.array([z0[0], z0[1], max(hover, z0[2])])
+
+
+def knocked(stages: list[Stage], phase: str = "carry", where: tuple[float, float] = LANDS, times: int = 1,
+            before: Objects | None = None, block: Block | None = None, jaw: Jaw | None = None,
+            strategy: type[GraspStrategy] = GraspStrategy, ticks: int = 4000, **settings) -> Knocked:
+    """Run a cube grasp with drops at `where` on the first `times` entries into `phase`.
+
+    `stages` supplies poses after each drop. `before` supplies earlier poses, defaulting to `carried`.
+    """
+    settings.setdefault("carry_s", 0.5)
+    s = started(seen(), strategy=strategy, **settings)
+    block = block or block_at()
+    at_knock: list[tuple[np.ndarray, tuple[float, float, float] | None]] = []
+    knock = drop_it(block, where, times)
+
+    def hook(t: float) -> None:
+        if len(at_knock) < times:
+            at_knock.append((s.tcp_cmd.copy(), s.status.touch_point))
+        knock(t)
+
+    trace: list[tuple[float, GraspStatus]] = []
+    measured: list[dict[str, float]] = []
+    script = Script(block, carried(s) if before is None else before, stages)
+    answers, phases, *_ = follow(s, dict(SPEC.home), script, ticks, block=block, jaw=jaw,
+                                 on_phase={phase: hook}, trace=trace, measured=measured)
+    return Knocked(s, block, answers, phases, trace, measured, at_knock)
+
+
+def seen_again(xy: tuple[float, float] = LANDS, delay_s: float = 0.6) -> list[Stage]:
+    """Report the tracker's drop guess, followed by a camera sighting at `xy`."""
+    return [stage(0.0, UPUSZCZONA, XY), stage(delay_s, "kamery", xy, 0.1)]
+
+
+def test_carry_s_zero_ends_the_run_at_the_verified_lift():
+    s, answers, phases, *_ = grasped(carry_s=0.0)
+
+    assert answers[-1].success and phases[-2] == "check" and "carry" not in phases
+    note = answers[-1].note
+    assert note.startswith("blok w szczekach, podniesiony o") and "niesiony 0.0 s" in note
+    assert s.grasp.carried_s == 0.0 and s.grasp.verdict == "lifted"
+
+
+@pytest.mark.parametrize("lift_m", [0.04, 0.065], ids=["lift below the hover", "lift above the hover"])
+@pytest.mark.parametrize("phase", ["check", "carry"])
+def test_a_block_dropped_mid_carry_and_seen_on_the_table_is_grasped_again(phase: str, lift_m: float):
+    """The default regrasp opens at the hover and straddles without probing."""
+    run = knocked(seen_again(), phase=phase, lift_m=lift_m)
+    s, answers, phases, trace = run.s, run.answers, run.phases, run.trace
+
+    assert answers[-1].success, answers[-1].note
+    drop = run.drop
+    assert runs(phases[drop:]) == ["rise", "recover", "approach", "open", "straddle", "close", "lift_off",
+                                   "check", "carry", "done"]
+    assert s.grasp.drops == 1 and s.grasp.recoveries == 1 and s.status.attempt == 2
+    # Regrasp uses the camera sighting.
+    assert s.grasp.block_xy == pytest.approx(LANDS, abs=1e-9)
+    # Recovery rises vertically without lowering an arm already above the hover.
+    safe = tcp(answers[run.first("recover", drop)].target)
+    assert safe == pytest.approx(run.safe_point, abs=s.ik_tol)
+    if lift_m > 0.05:
+        assert run.safe_point[2] > s.config.touch_z + s.config.hover_m + 0.01
+    knock = phases.index(phase)
+    assert trace[knock][1].block_source == "w dloni"
+    assert trace[drop][1].block_source == UPUSZCZONA
+    assert trace[drop][1].dropped_t == trace[drop][0] == s.grasp.dropped_t
+    assert trace[drop][1].verdict == "dropped" and answers[drop].note == "blok wypadl ze szczeki - w gore"
+
+
+def test_the_recovery_opens_the_jaw_and_the_regrasp_closes_it_before_the_descent():
+    """With the probe on, the jaw closes before the regrasp's measured-top descent."""
+    run = knocked(seen_again(), probe=True)
+    s, answers = run.s, run.answers
+    g = SPEC.joints.index("gripper")
+
+    drop, recover = run.drop, run.first("recover", run.drop)
+    grips = [a.target["gripper"] for a in answers[drop - 1:recover + 1]]
+    assert grips[0] == pytest.approx(s.cmd_closed)
+    assert all(-1e-9 <= b - a <= 12.0 + 1e-6 for a, b in zip(grips, grips[1:], strict=False))
+    assert KIN.to_q(answers[recover].target)[g] == pytest.approx(s._recover_open_q)
+    assert s._recover_open_q == pytest.approx(SPEC.jaw.open + 2 * SPEC.jaw.margin)
+    # The empty jaw follows the command.
+    assert run.measured[recover]["gripper"] == pytest.approx(grips[-1])
+    assert KIN.to_q(run.measured[recover])[g] > SPEC.jaw.open
+
+    regrasp = run.first("approach", recover)
+    descend = run.first("descend", regrasp)
+    closing = [a.target["gripper"] for a in answers[regrasp:descend + 1]]
+    assert all(-12.0 - 1e-6 <= b - a <= 1e-9 for a, b in zip(closing, closing[1:], strict=False))
+    assert answers[descend].target["gripper"] == pytest.approx(SPEC.limits["gripper"][0])
+    assert any(a.note == "nad obiekt: zamykam szczeke" for a in answers[regrasp:descend])
+    assert answers[regrasp].note == "blok lezy na blacie - ponowna proba"
+
+
+def test_a_block_that_slips_on_the_way_up_is_grasped_again():
+    s = started(seen(), carry_s=0.5)
+    block = block_at()
+    # Derive the slip height from the nominal grasp point.
+    slip_z = max(0.012, 2 * CUBE[2] - CUBE[2] + 0.003) + 0.02
+    script = Script(block, carried(s), [stage(0.0, UPUSZCZONA, XY), stage(0.5, "kamery", None, 0.1)])
+    answers, phases, *_ = follow(s, dict(SPEC.home), script, 4000, block=block, slip_z=slip_z)
+
+    assert answers[-1].success, answers[-1].note
+    assert contains(runs(phases), ["lift_off", "rise", "recover", "approach", "open", "lift_off", "check",
+                                   "carry", "done"])
+    assert s.grasp.drops == 1 and s.grasp.recoveries == 1
+    assert not any("podczas podnoszenia" in a.note for a in answers)
+
+
+def test_a_block_that_reappears_as_a_late_last_seen_pose_is_grasped_again():
+    """A delayed plain last-seen pose captured after the drop can guide a regrasp."""
+    where = (XY[0] + 0.02, XY[1])
+    run = knocked([stage(0.0, UPUSZCZONA, XY), stage(3.0, "ostatnie widziane", where, 2.0)], where=where)
+    s, phases, trace = run.s, run.phases, run.trace
+
+    assert run.answers[-1].success, run.answers[-1].note
+    assert s.grasp.recoveries == 1 and s.grasp.block_xy == pytest.approx(where, abs=1e-9)
+    regrasp = run.first("approach", run.drop)
+    assert set(phases[run.drop:regrasp]) == {"rise", "recover"}
+    assert trace[regrasp][0] == pytest.approx(trace[run.drop][0] + 3.0, abs=1 / s.hz + 1e-6)
+
+
+@pytest.mark.parametrize("case, why", [
+    ("gone", "kamery go nie widza"),
+    ("dropped", f"zrodlo '{UPUSZCZONA}'"),
+    ("in a hand", "zrodlo 'kamery', 7 cm nad blatem"),
+    ("before the drop", "zrodlo 'ostatnie widziane' sprzed upadku"),
+])
+def test_a_block_taken_away_stops_the_run_for_a_person(case: str, why: str):
+    stages = {"gone": [stage(0.0, UPUSZCZONA, XY), stage(6.0, None)],
+              "dropped": [stage(0.0, UPUSZCZONA, XY)],
+              "in a hand": [stage(0.5, "kamery", XY, 0.1, z=0.07)],
+              "before the drop": []}[case]
+    # Republishing an old capture must preserve its age.
+    before = (lambda t: seen(age_s=8.0 + t)) if case == "before the drop" else None
+    run = knocked(stages, where=XY, before=before, wait_s=8.0, max_pose_age_s=60.0)
+    s, answers, trace = run.s, run.answers, run.trace
+    g = SPEC.joints.index("gripper")
+
+    assert answers[-1].done and not answers[-1].success
+    assert answers[-1].note == f"blok zabrany ze szczeki: {why} od 8 s - czekam na czlowieka"
+    assert s.grasp.verdict == "taken" and s.grasp.recoveries == 0
+    assert 0.0 <= trace[-1][0] - (s.grasp.dropped_t + 8.0) < 1 / s.hz
+    assert "approach" not in run.phases[run.drop:]
+    # Stop at the safe point with the jaw open.
+    assert tcp(answers[-1].target) == pytest.approx(run.safe_point, abs=s.ik_tol)
+    assert KIN.to_q(answers[-1].target)[g] == pytest.approx(s._recover_open_q)
+
+
+@pytest.mark.parametrize("where, settings", [((0.6, 0.4), {"recover_m": 1.0}), ((XY[0] + 0.2, XY[1]), {})],
+                         ids=["out of reach", "far away"])
+def test_a_block_dropped_out_of_reach_or_far_away_stops_the_run(where: tuple[float, float], settings: dict):
+    run = knocked(seen_again(where), where=where, **settings)
+    s, answers = run.s, run.answers
+    g = SPEC.joints.index("gripper")
+
+    assert answers[-1].done and not answers[-1].success and s.grasp.verdict == "taken"
+    note = answers[-1].note
+    if "recover_m" in settings:
+        assert note.startswith("blok upadl poza zasiegiem: punkt (")
+        assert note.endswith("poza zasiegiem ramienia - czekam na czlowieka"), note
+    else:
+        assert s._drop_xy is not None
+        far = float(np.linalg.norm(np.asarray(where) - s._drop_xy))
+        # Use the fingertip midpoint as the drop origin.
+        assert far == pytest.approx(0.2, abs=0.015) and far > s.grasp_settings.recover_m
+        assert note == f"blok zabrany: lezy {far * 100:.0f} cm od miejsca upadku - czekam na czlowieka"
+    # An unreachable sighting keeps the old aim and safe pose.
+    assert tcp(answers[-1].target) == pytest.approx(run.safe_point, abs=s.ik_tol)
+    assert KIN.to_q(answers[-1].target)[g] == pytest.approx(s._recover_open_q)
+    assert s.status.touch_point == run.at_knock[0][1]
+    assert s.grasp.recoveries == 0 and "approach" not in run.phases[run.drop:]
+
+
+def test_recoveries_share_the_attempt_budget():
+    run = knocked(seen_again(), times=2, max_attempts=2)
+    s, answers = run.s, run.answers
+
+    assert answers[-1].note == "wyczerpane proby chwytu (2): blok wypadl ze szczeki"
+    assert not answers[-1].success and s.grasp.verdict == "taken"
+    assert s.grasp.drops == 2 and s.grasp.recoveries == 1 and s.status.attempt == 2
+
+
+def test_a_fresh_pose_elsewhere_while_holding_is_only_noted():
+    s = started(seen(), carry_s=0.5)
+    other = (XY[0] + 0.1, XY[1])
+
+    def objects(t: float) -> Mapping[str, ObjectPose]:
+        if s.status.phase in ("lift_off", "check", "carry"):
+            return seen(other, source="kamery", age_s=0.1)
+        return seen()
+
+    answers, phases, *_ = follow(s, dict(SPEC.home), objects, 1500, block=block_at())
+
+    assert answers[-1].success, answers[-1].note
+    assert s.grasp.elsewhere == pytest.approx(other) and s.grasp.drops == 0
+    assert any(a.note.endswith(" - kamery widza blok gdzie indziej")
+               for a, p in zip(answers, phases, strict=True) if p == "carry")
+
+
+def creeping(s: GraspStrategy, phase: str) -> Jaw:
+    """Model small jaw closures that look still per tick but together exceed the creep threshold."""
+    calls: list[float] = []
+
+    def model(t: float, command: float, between: bool) -> float:
+        if not between:
+            return command
+        if s.status.phase == phase:
+            calls.append(t)
+        # The model supplies the next tick's measurement.
+        creep = 0.0175 * min(2, max(0, len(calls) - 2))
+        return max(command, CUBE_UNITS - creep / PER_UNIT)
+
+    return model
+
+
+@pytest.mark.parametrize("phase", ["check", "carry"])
+def test_creep_restarts_the_check_and_is_noted_while_carrying(phase: str):
+    _, _, plain, *_ = grasped()
+    s = started(seen(), carry_s=0.5)
+    answers, phases, *_ = follow(s, dict(SPEC.home), seen(), 1500, block=block_at(), jaw=creeping(s, phase))
+
+    assert answers[-1].success, answers[-1].note
+    assert s.grasp.creeps == 1 and s.grasp.drops == 0
+    # The jaw keeps squeezing throughout the creep.
+    assert KIN.to_q({"gripper": CUBE_UNITS})[-1] - 0.035 - s._q(s.cmd_closed) > SPEC.jaw.margin
+    if phase == "check":
+        # Creep restarts the hold streak.
+        assert phases.count("check") - plain.count("check") == pytest.approx(5, abs=1)
+        assert phases.count("check") < (s.grasp_settings.hold_s + 3.0) * s.hz
+    else:
+        assert phases.count("check") == plain.count("check")
+
+
+class ReleasesWhileCarrying(GraspStrategy):
+    """A place step's shape: it watches through `super().carrying` and commands the release 0.5 s into the
+    carry."""
+
+    def carrying(self, obs: Observation, reading: JawReading) -> Action | None:
+        action = super().carrying(obs, reading)
+        if action is None and self.status.phase == "carry" and self._t - self.phase_started >= 0.5:
+            return self.release()
+        return action
+
+
+@pytest.mark.parametrize("how", ["setting", "subclass"])
+def test_the_release_opens_the_jaw_and_ends_the_watch(how: str):
+    if how == "setting":
+        s = started(seen(), release=True, carry_s=0.5)
+    else:
+        s = started(seen(), strategy=ReleasesWhileCarrying)
+    block = block_at()
+    answers, phases, joints, _ = follow(s, dict(SPEC.home), seen(), 1500, block=block)
+
+    assert runs(phases)[-3:] == ["carry", "release", "done"]
+    assert answers[-1].success, answers[-1].note
+    assert answers[-1].note.startswith("blok oddany: szczeka otwarta (")
+    assert s.grasp.released and s.grasp.verdict == "released" and s.grasp.drops == 0
+    release = phases.index("release")
+    assert answers[release].note == "oddaje blok: otwieram szczeke"
+    grips = [a.target["gripper"] for a in answers[release - 1:]]
+    assert grips[0] == pytest.approx(s.cmd_closed)
+    assert all(-1e-9 <= b - a <= 12.0 + 1e-6 for a, b in zip(grips, grips[1:], strict=False))
+    assert grips[-1] == pytest.approx(KIN.gripper_for_gap(s.gap_open_m), abs=0.1)
+    # Release lets the measured jaw follow the opening command.
+    assert joints["gripper"] == pytest.approx(grips[-1]) and not block.gripped
+    assert not {"rise", "recover"} & set(phases[release:])
+
+
+def test_a_jaw_that_does_not_open_on_release_ends_the_run():
+    s = started(seen(), release=True, carry_s=0.5)
+
+    def jaw(t: float, command: float, between: bool) -> float:
+        if s.status.phase == "release":
+            return CUBE_UNITS
+        return max(command, CUBE_UNITS) if between else command
+
+    answers, phases, *_ = follow(s, dict(SPEC.home), seen(), 1500, block=block_at(), jaw=jaw)
+
+    assert phases[-2] == "release" and answers[-1].done and not answers[-1].success
+    assert answers[-1].note == "szczeka nie otworzyla sie po oddaniu bloku w 3 s (29 mm zamiast 45 mm)"
+    assert (phases.count("release") + 1) / s.hz == pytest.approx(3.0, abs=0.06)
+
+
+def test_release_outside_a_carrying_phase_raises():
+    s = started()
+    s.act(obs(dict(SPEC.home), t=0.05))
+    assert s.status.phase == "wait"
+    with pytest.raises(RuntimeError, match=r"grasp: release\(\) outside a carrying phase"):
+        s.release()
+    s, *_ = grasped()
+    assert s.status.phase == "done"
+    with pytest.raises(RuntimeError, match=r"grasp: release\(\) outside a carrying phase"):
+        s.release()
+
+
+def test_one_empty_reading_is_no_drop():
+    s = started(seen(), carry_s=1.0)
+    once: list[float] = []
+
+    def jaw(t: float, command: float, between: bool) -> float:
+        if s.status.phase == "carry" and not once:
+            once.append(t)
+            return command
+        return max(command, CUBE_UNITS) if between else command
+
+    trace: list[tuple[float, GraspStatus]] = []
+    answers, phases, *_ = follow(s, dict(SPEC.home), seen(), 1500, block=block_at(), jaw=jaw, trace=trace)
+
+    assert answers[-1].success, answers[-1].note
+    assert s.grasp.drops == 0 and "rise" not in phases[phases.index("carry"):]
+    # The carry already observed the empty reading.
+    assert once and any(not grasp.holding for t, grasp in trace if t > once[0] - 1e-9)
+
+
+def test_the_watch_reads_a_tick_once_when_the_phase_changes_within_it():
+    """A lift-to-check transition calls `carrying` twice, but counts an empty reading once."""
+    _, _, reference, *_ = grasped()
+    s = started(seen(), carry_s=0.5)
+    _, phases, joints, t = follow(s, dict(SPEC.home), seen(), reference.index("lift_off") + 1,
+                                  block=block_at())
+    assert phases[-1] == "lift_off"
+    empty = JawReading(q=0.0, cmd=0.0, still=True, squeezing=False, holding=False, open=False, crept=False)
+    tick = obs(joints, t=t, objects=seen())
+
+    # The next tick runs both lift and check handlers.
+    s.status.step += 1
+    assert s.carrying(tick, empty) is None and s.carrying(tick, empty) is None
+    assert s.grasp.drops == 0 and s._empty_ticks == 1
+    s.status.step += 1
+    assert s.carrying(tick, empty) is not None
+    assert s.grasp.drops == 1 and s.status.phase == "rise"
+
+
+@pytest.mark.parametrize("probe", [False, True], ids=["default", "probe"])
+def test_a_regrasp_that_misses_ends_as_touch_does(probe: bool):
+    """A wrong camera pose ends in an empty close by default, or a probe miss with `probe: true`."""
+    run = knocked(seen_again((XY[0] + 0.03, XY[1])), where=(XY[0] + 0.08, XY[1]), probe=probe)
+
+    assert run.answers[-1].note == ("brak kontaktu w punkcie dotyku - obiektu tam nie ma" if probe
+                                    else "chwyt pusty - blok przesuniety albo obok szczek")
+    assert not run.answers[-1].success and run.s.grasp.recoveries == 1
+    assert runs(run.phases).count("recover") == 1
+
+
+@pytest.mark.parametrize("settings, match", [
+    ({"carry_s": -1.0}, "grasp: carry_s must be zero or more"),
+    ({"carry_s": NAN}, "grasp: carry_s must be zero or more"),
+    ({"wait_s": 0.0}, "grasp: wait_s must be positive"),
+    ({"recover_m": 0.0}, "grasp: recover_m must be positive"),
+])
+def test_recovery_settings_are_validated(settings: dict, match: str):
+    with pytest.raises(ValueError, match=match):
+        GraspStrategy(GraspSettings(**settings))
+
+
+def test_the_recovery_defaults_fit_a_drop_and_a_regrasp_in_the_time_limit():
+    d = GraspSettings()
+
+    assert (d.carry_s, d.release, d.wait_s, d.recover_m, d.time_limit_s) == (10.0, False, 20.0, 0.15, 120.0)
+    # The time limit covers two grasps and carries plus a recovery wait.
+    assert d.time_limit_s >= 2 * (10.0 + d.carry_s) + d.wait_s + 5.0
+
+
+def test_the_notes_of_the_recovery_phases():
+    run = knocked(seen_again())
+    notes = {p: [a.note for a, q in zip(run.answers, run.phases, strict=True) if q == p]
+             for p in set(run.phases)}
+
+    assert all(n.startswith("niose blok: ") for n in notes["carry"])
+    rise = [a.note for a in run.answers[run.drop + 1:run.first("recover", run.drop)]]
+    assert rise and all(n.startswith("blok wypadl ze szczeki - w gore: ") for n in rise)
+    assert all(n.startswith("blok wypadl, czekam na kamery: ") for n in notes["recover"])
+    assert run.s.grasp_verdict() == ("lifted", "blok podniesiony")
+
+    s, answers, phases, *_ = grasped(release=True)
+    assert [a.note for a, p in zip(answers, phases, strict=True) if p == "release"][0] == (
+        "oddaje blok: otwieram szczeke")
+    assert s.grasp_verdict() == ("released", "blok oddany")
+
+
+def test_the_sighting_kinds():
+    s = started()
+    joints = pose_at((XY[0], XY[1], 0.04))
+    jaw = np.mean(KIN.fingertips(joints), axis=0)
+    under = (float(jaw[0]), float(jaw[1]))
+
+    def sighting(source: str, xy: tuple[float, float] = (0.3, 0.1), z: float = 0.0, age_s: float = 0.1,
+                 squeezing: bool = False, strategy: GraspStrategy = s, position: np.ndarray | None = None):
+        where = np.array([*xy, z], float) if position is None else position
+        pose = ObjectPose(where, rot_z(0.3), source, age_s)
+        return strategy._sighting(obs(joints, t=5.0, objects={"cube": pose}), squeezing)
+
+    def kind(*args, **kwargs) -> str:
+        found = sighting(*args, **kwargs)
+        assert found is not None
+        return found.kind
+
+    assert kind("w dloni", z=0.05) == IN_HAND
+    assert kind("kamery") == SEEN and kind("ostatnie widziane", age_s=2.0) == SEEN
+    assert kind("ostatnie widziane", age_s=40.0) == STALE
+    assert kind(UPUSZCZONA) == STALE and kind("ostatnie widziane (1 kamera widzi ja gdzie indziej)") == STALE
+    assert kind("kamery", z=0.07) == STALE and kind("brak") == STALE
+    assert float(np.linalg.norm(np.array([*under, CUBE[2]]) - jaw)) < 0.06
+    assert kind("symulacja", under, z=CUBE[2], squeezing=True) == IN_HAND
+    assert kind("symulacja", under, z=CUBE[2], squeezing=False) == SEEN
+    assert kind("symulacja", (under[0] + 0.2, under[1]), z=CUBE[2], squeezing=True) == SEEN
+    assert kind("", under, z=CUBE[2]) == SEEN
+    # A block resting under the hand is empty when the jaw is not squeezing.
+    cuboid = started(block="cuboid", label="cube")
+    assert kind("symulacja", under, z=block("cuboid").half_size[0], squeezing=False, strategy=cuboid) == SEEN
+    assert kind("", strategy=started(simulated=False)) == STALE
+    assert sighting("kamery", position=np.array([NAN, 0.0, 0.0])) is None
+    assert sighting("kamery", position=np.zeros(2)) is None
+    found = sighting("kamery", age_s=1.5)
+    assert found is not None
+    assert found.seen_t == pytest.approx(3.5) and found.xy == (0.3, 0.1) and found.source == "kamery"
+    assert found.rotation == pytest.approx(rot_z(0.3))
+    assert s._sighting(obs(joints, t=5.0, objects={}), False) is None
 
 
 # ------------------------------------------------------------ headings
@@ -866,9 +1376,9 @@ def test_the_seams_are_called(probe: bool):
     descents = [c for c in s.calls if c[0] == "before_descent"]
     assert descents == ([("before_descent", 1, True)] if probe else [])
     carrying = [c for c in s.calls if c[0] == "carrying"]
-    # Include the ticks that enter check and finish the run.
-    assert len(carrying) == phases.count("lift_off") + phases.count("check") + 2
-    assert all(c[2] for c in carrying) and {c[1] for c in carrying} == {"lift_off", "check"}
+    # Include phase transitions and the final tick.
+    assert len(carrying) == phases.count("lift_off") + phases.count("check") + phases.count("carry") + 3
+    assert all(c[2] for c in carrying) and {c[1] for c in carrying} == {"lift_off", "check", "carry"}
 
     pose = seen(offset(XY, -0.010))
     s = started(pose, strategy=Seams, probe=probe)
@@ -997,6 +1507,7 @@ def test_the_notes_per_phase():
     assert any(n.startswith("sprawdzam chwyt") for n in notes["close"])
     assert any(n.startswith("podnosze blok") for n in notes["lift_off"])
     assert any(n.startswith("trzymam blok") for n in notes["check"])
+    assert all(n.startswith("niose blok: ") for n in notes["carry"])
 
     pose = seen(offset(XY, -0.010))
     s = started(pose)

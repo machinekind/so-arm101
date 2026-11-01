@@ -1,29 +1,39 @@
-"""Straddle a block from above, close the jaw and verify the hold through the lift.
+"""Grip and lift a block from above, then monitor the hold and recover after a drop.
 
 The twin loads `grasp` through `machinekind_twin.strategies` and builds `GraspSettings`
 from its configuration or panel. See the package README for settings.
 
-`blocks.block` supplies the block's dimensions and yaw symmetry. The strategy plans at the
-fingertips' midpoint and uses the model's jaw geometry to find the TCP targets. By default,
-it opens at the hover, straddles below the catalog top height, closes and lifts.
-With `probe: true`, a closed-jaw descent first measures the top from the stalled TCP height
-and the jaw's reach. A probe that reaches its bottom with `need_contact: false` uses the nominal top.
+`blocks.block` supplies dimensions and yaw symmetry. The strategy latches each grasp's pose
+and uses the model's jaw geometry to plan TCP targets. By default, it opens at the hover,
+straddles below the catalog top height, closes and verifies the hold through the lift.
+With `probe: true`, a closed-jaw descent first measures the top.
+All planned points must be reachable with the hand down. A tip stall retries half the short
+side away within `max_attempts`. Without the probe, an empty close after such a retry tries
+the other side. Any other empty close ends the run.
 
-The pose is latched for the run. The hand points down with the jaws across the block's short
-side. A pose without orientation keeps the current closing heading. The reach check requires
-all planned points to be reachable at one heading within the joint and collision limits.
+After closing, `carrying` checks the jaw and pose on each lift, check and carry tick.
+A squeezing jaw keeps the block held. Creep restarts the check's hold streak.
+`EMPTY_TICKS` consecutive empty readings declare a drop. The arm rises to at least the
+hover and opens the jaw so the tracker can accept nearby detections.
 
-A tip stall during the straddle triggers a rise and a retry half the short side away.
-Retries alternate sides of the original aim within `max_attempts`. With `probe: true`, each retry
-probes again. Without the probe, an empty close after a sideways retry tries the other side.
-Any other empty close ends the run.
-The close counts as held only after the jaw has left its opening and settled against the block.
-The lift stops if the jaw stops squeezing or creeps closed. Success keeps the squeeze commanded.
+Recovery requires a plain camera or last-seen pose captured at least `DROP_SETTLE_S` after
+the drop. The pose must be fresh enough and at rest height. Simulation poses at rest height
+also count. Annotated last-seen poses cannot guide a regrasp. A sighting within `recover_m`
+triggers another grasp through `retarget`, sharing the attempt budget. The regrasp skips the
+probe by default. A farther sighting, an unreachable pose, exhausted attempts or no sighting
+within `wait_s` stops the run for a
+person with the jaw open.
+
+The verified block stays at lift height for `carry_s`. Success keeps the squeeze unless
+`release` is enabled. `release()` ends monitoring and opens the jaw without moving the arm.
 
 Subclasses can refine the aim through `before_straddle`. With the probe on, `before_descent`
 also refines the aim, and `after_touch` and `after_miss` judge the probe.
-`after_grasp_failed` and `carrying` handle failures. `grasp_headings` supplies candidate headings.
-`grasp_verdict` supplies the verdict for logs and judges."""
+`after_grasp_failed` handles grasp failures. Subclasses can extend `carrying` and return
+`release()` for a handover.
+`grasp_headings` supplies candidate headings. `grasp_verdict` supplies the verdict for logs
+and judges.
+"""
 
 from __future__ import annotations
 
@@ -40,6 +50,7 @@ from ..blocks.classic_world import BLOCKS
 from ..kinematics import IKSolution, RobotKinematics
 from .jaw import JawMonitor, JawReading
 from .touch import (
+    APPROACH,
     DESCEND,
     HOLD_WAIT_S,
     MIN_TOUCH_Z,
@@ -81,7 +92,26 @@ STRADDLED = "straddled"
 CLOSE = "close"
 LIFT_OFF = "lift_off"
 CHECK = "check"
+#: Monitor the verified hold at lift height for `carry_s`.
+CARRY = "carry"
+#: Wait for a sighting at the safe height with the jaw open.
+RECOVER = "recover"
+#: Open the jaw after ending hold monitoring.
+RELEASE = "release"
 RETARGET = "retarget"
+
+#: Consecutive empty readings required to declare a drop. Ignore an isolated bad reading.
+EMPTY_TICKS = 2
+#: Minimum delay from drop declaration to a usable capture [s], allowing the block to land.
+DROP_SETTLE_S = 0.3
+#: Distance from the fingertip midpoint for a simulated pose to count as near the jaw [m].
+IN_HAND_M = 0.06
+#: Exact sources accepted for a regrasp. Simulation poses use height and jaw state.
+SIGHTING_SOURCES = ("kamery", "ostatnie widziane")
+#: Pose classifications used by hold monitoring.
+IN_HAND = "in_hand"
+SEEN = "seen"
+STALE = "stale"
 
 #: Display text for each grasp verdict.
 VERDICTS = {
@@ -89,10 +119,31 @@ VERDICTS = {
     "tip": "szczeka oparla sie o blok przy zjezdzie",
     "empty": "chwyt pusty",
     "held": "szczeka trzyma blok",
-    "slipped": "blok wypadl ze szczeki",
-    "crept": "blok zsuwa sie w szczekach",
     "lifted": "blok podniesiony",
+    "dropped": "blok wypadl ze szczeki",
+    "recovering": "ponowna proba po upadku",
+    "taken": "blok zabrany - czekam na czlowieka",
+    "released": "blok oddany",
 }
+
+
+@dataclass(frozen=True)
+class Sighting:
+    """A block pose classified for hold monitoring and recovery.
+
+    `IN_HAND` means the tracker reports a hold, or the simulated pose is near squeezing jaws.
+    `SEEN` means a plain camera or last-seen pose is fresh enough and at rest height.
+    `STALE` covers other poses. `seen_t = obs.t - age_s` is capture time on the run clock [s].
+    """
+
+    kind: str
+    #: Position [m, base frame] and rotation (3x3, identity if absent or invalid).
+    xy: tuple[float, float]
+    z: float
+    rotation: np.ndarray
+    source: str
+    age_s: float
+    seen_t: float
 
 
 @dataclass
@@ -106,7 +157,7 @@ class GraspSettings(TouchSettings):
     #: Without `probe`, the block dimensions set this reference height.
     #: A lower hover keeps more downward poses reachable.
     hover_m: float = 0.04
-    #: Time limit for the run [s]. Zero disables it.
+    #: Time limit for the whole run, including recovery [s]. Zero disables it.
     time_limit_s: float = 120.0
     #: Block name for `blocks.block`, which supplies dimensions and yaw symmetry.
     block: str = field(default="cube", metadata={"choices": tuple(BLOCKS)})
@@ -123,8 +174,16 @@ class GraspSettings(TouchSettings):
     lift_m: float = 0.04
     #: How long the jaw must hold at the top before the run succeeds [s].
     hold_s: float = 1.0
-    #: Maximum attempts from the hover, including retries after tip stalls [count].
+    #: Maximum attempts from the hover, including tip retries and regrasps after drops [count].
     max_attempts: int = 3
+    #: Carry duration after the verified lift [s]. Zero finishes at the lift check.
+    carry_s: float = 10.0
+    #: Open the jaw after `carry_s`. False finishes with the block held for the operator.
+    release: bool = False
+    #: Time from a drop to a usable sighting before stopping for a person [s].
+    wait_s: float = 20.0
+    #: Maximum sighting distance from the drop point for a regrasp [m].
+    recover_m: float = 0.15
 
 
 @dataclass
@@ -150,8 +209,23 @@ class GraspStatus:
     empty_closes: int = 0
     #: How far the measured TCP rose above the grasp point [m].
     lifted_m: float = float("nan")
-    #: '', 'tip', 'empty', 'held', 'slipped', 'crept' or 'lifted'.
+    #: Grasp verdict key in `VERDICTS`, or '' before a verdict.
     verdict: str = ""
+    #: Latest monitored pose source, or '' without a valid pose.
+    block_source: str = ""
+    #: Drop, regrasp and jaw-creep counts.
+    drops: int = 0
+    recoveries: int = 0
+    creeps: int = 0
+    #: Camera sighting away from squeezing jaws [m, base frame]. None until seen.
+    elsewhere: tuple[float, float] | None = None
+    #: How long the verified block has been carried [s].
+    carried_s: float = 0.0
+    #: Last drop time [s, `obs.t`] and elapsed time on the latest recovery tick [s].
+    dropped_t: float = float("nan")
+    lost_s: float = float("nan")
+    #: `release()` was commanded.
+    released: bool = False
 
 
 class GraspStrategy(TouchStrategy):
@@ -167,10 +241,12 @@ class GraspStrategy(TouchStrategy):
         if config.probe and not (config.touch_z == 0 or config.touch_z >= MIN_TOUCH_Z):
             raise ValueError(f"grasp: touch_z must be zero (from the block) or at least {MIN_TOUCH_Z} m, "
                              f"is {config.touch_z}")
-        for name in ("open_margin_m", "squeeze_m", "lift_m", "hold_s"):
+        for name in ("open_margin_m", "squeeze_m", "lift_m", "hold_s", "wait_s", "recover_m"):
             value = getattr(config, name)
             if not value > 0:
                 raise ValueError(f"grasp: {name} must be positive, is {value}")
+        if not config.carry_s >= 0:
+            raise ValueError(f"grasp: carry_s must be zero or more, is {config.carry_s}")
         if not 0 < config.grasp_depth <= 1:
             raise ValueError(f"grasp: grasp_depth must lie within (0, 1], is {config.grasp_depth}")
         if not config.max_attempts >= 1:
@@ -184,6 +260,8 @@ class GraspStrategy(TouchStrategy):
         self.height_m = 2 * spec.half_size[2]
         #: Nominal top above the table [m], used until a probe measures it.
         self.top_nominal = self.height_m
+        #: Maximum centre height accepted as resting on the table [m, base frame].
+        self.rest_z_max = max(spec.half_size) + 0.01
         #: The jaw's reach below the TCP [m], from the model once `start` has it.
         self._reach_m = JAW_REACH_M
         #: Original settings. `config` holds the resolved probe height and label.
@@ -238,9 +316,17 @@ class GraspStrategy(TouchStrategy):
         self._before_descent_pending = False
         self._before_straddle_pending = False
         self._descent_waited = False
+        # Last monitored step, empty streak, drop time [s, obs.t], drop position [m, base frame]
+        # and recovery opening [rad].
+        self._watched_step = -1
+        self._empty_ticks = 0
+        self._drop_t = float("nan")
+        self._drop_xy: np.ndarray | None = None
+        self._recover_open_q = float("nan")
         self._phases.update({RISE: self._rise, OPEN: self._open, STRADDLE: self._straddle,
                              STRADDLED: self._straddled, CLOSE: self._close, LIFT_OFF: self._lift_off,
-                             CHECK: self._check})
+                             CHECK: self._check, CARRY: self._carry, RECOVER: self._recover,
+                             RELEASE: self._release})
 
     def _probe_z(self) -> float:
         """Return the probe's bottom TCP height [m above the table, base frame].
@@ -292,6 +378,10 @@ class GraspStrategy(TouchStrategy):
         self._jaw_tol_q = JAW_COMMAND_TOL * (opened - closed) / 100.0
         self._jaw_goal_q = float(self.q_cmd[g])
         self._jaw_on_command = True
+        # Open far enough for the tracker to accept nearby detections despite servo error.
+        self._recover_open_q = min(float(self._hi[g]), max(self._q(self.cmd_open), jaw.open + 2 * jaw.margin))
+        self._watched_step, self._empty_ticks = -1, 0
+        self._drop_t, self._drop_xy = float("nan"), None
 
         self.grasp = GraspStatus()
         self.block_rotation = np.eye(3)
@@ -470,25 +560,41 @@ class GraspStrategy(TouchStrategy):
 
     # ------------------------------------------------------------------ the hover and the probe
     def _approach(self, obs: Observation) -> Action | None:
-        """Wait at the hover for the hand to point down, then descend for the probe or open the jaw."""
-        if self._rot is None or self._vertical():
-            self._turn_t0 = float("nan")
-            if self.grasp_settings.probe:
-                return super()._approach(obs)
-            if self._settled(self.hover_point):
+        """Reach the hover with the hand down, then descend for the probe or open the jaw.
+
+        After recovery, ramp the jaw closed on the way to hover. With the probe on, wait at most
+        `JAW_WAIT_S` from phase entry for the target and supervisor command to agree before descending.
+        """
+        self._ramp_jaw()
+        if self._rot is not None and not self._vertical():
+            # Finish turning at the hover within `JAW_WAIT_S`.
+            if self._arrived(self.hover_point):
+                if not np.isfinite(self._turn_t0):
+                    self._turn_t0 = self._t
+                elif self._t - self._turn_t0 >= JAW_WAIT_S:
+                    return self._halt(self._not_vertical(), self.kin.from_q(self.q_cmd))
+            self._settle_count = 0
+            return self._drive(self.hover_point, self.approach_step_m)
+        self._turn_t0 = float("nan")
+        # Keep this check here so `_settled` counts only once per tick.
+        if self._settled(self.hover_point):
+            if not self.grasp_settings.probe:
                 self.status.attempt += 1
                 # OPEN times its travel to the straddle hover from here.
                 self._rise_point = self.hover_point
                 self._enter(OPEN)
                 return None
-            return self._drive(self.hover_point, self.approach_step_m)
-        # Finish turning at the hover within `JAW_WAIT_S`.
-        if self._arrived(self.hover_point):
-            if not np.isfinite(self._turn_t0):
-                self._turn_t0 = self._t
-            elif self._t - self._turn_t0 >= JAW_WAIT_S:
-                return self._halt(self._not_vertical(), self.kin.from_q(self.q_cmd))
-        self._settle_count = 0
+            if not self._jaw_ready():
+                if self._t - self._phase_t0 >= JAW_WAIT_S:
+                    return self._halt(f"szczeka nie zamknela sie przed zejsciem w {JAW_WAIT_S:.0f} s",
+                                      self.kin.from_q(self.q_cmd))
+                return self.hold()
+            # Use the settled hover offset as the descent's contact reference.
+            self._bias_z = self._offset_z
+            self._hover_z = float(self._tcp_measured[2])
+            self.status.attempt += 1
+            self._enter(DESCEND)
+            return None
         return self._drive(self.hover_point, self.approach_step_m)
 
     def _not_vertical(self) -> str:
@@ -544,11 +650,16 @@ class GraspStrategy(TouchStrategy):
 
     # ------------------------------------------------------------------ the grasp
     def _start_rise(self, then: str) -> None:
-        """Start a vertical rise to hover height, followed by `then` (OPEN or RETARGET)."""
+        """Rise vertically to at least the hover, then enter `then`.
+
+        RECOVER opens to `_recover_open_q`. OPEN and RETARGET close the jaw after clearing the block.
+        """
         self._rise_then = then
         self._rise_z0 = float(self._tcp_measured[2])
         hover_z = self.config.touch_z + self.config.hover_m
         self._rise_point = np.array([self.tcp_cmd[0], self.tcp_cmd[1], max(hover_z, float(self.tcp_cmd[2]))])
+        self._empty_ticks = 0
+        self._jaw_goal_q = self._recover_open_q if then == RECOVER else float(self._lo[self._g])
         self._enter(RISE)
 
     def _rise(self, obs: Observation) -> Action | None:
@@ -557,12 +668,16 @@ class GraspStrategy(TouchStrategy):
             return self.hold()
         arrived = self._arrived(self._rise_point)
         # Clear the block before closing so the moving tip cannot sweep across its top.
-        if arrived or self._tcp_measured[2] >= self._rise_z0 + CLEAR_BEFORE_CLOSE_M:
-            self._jaw_goal_q = float(self._lo[self._g])
+        # Recovery opens the jaw immediately.
+        clear = self._tcp_measured[2] >= self._rise_z0 + CLEAR_BEFORE_CLOSE_M
+        if self._rise_then == RECOVER or arrived or clear:
             self._ramp_jaw()
-        if arrived and self._jaw_ready() and self._jaw_goal_q == float(self._lo[self._g]):
+        if arrived and self._jaw_ready():
             if self._rise_then == OPEN:
                 self._enter(OPEN)
+                return None
+            if self._rise_then == RECOVER:
+                self._enter(RECOVER)
                 return None
             assert self._retarget_xy is not None
             try:
@@ -695,35 +810,215 @@ class GraspStrategy(TouchStrategy):
                               f"{lift_m * 1000:.0f} mm)", self.kin.from_q(self.q_cmd))
         return self._drive(self._lift_off_point, self.approach_step_m)
 
-    def _check(self, obs: Observation) -> Action:
+    def _check(self, obs: Observation) -> Action | None:
         self.grasp.lifted_m = float(self._tcp_measured[2]) - self._grasp_z
         action = self.carrying(obs, self.reading)
         if action is not None:
             return action
         grasp = self.grasp
-        grasp.hold_ticks = grasp.hold_ticks + 1 if self.reading.holding else 0
+        # Creep resets the hold streak for a fresh check on the next tick.
+        reading = self.reading
+        grasp.hold_ticks = grasp.hold_ticks + 1 if reading.holding and not reading.crept else 0
         if grasp.hold_ticks >= math.ceil(self.grasp_settings.hold_s * self.hz):
             grasp.verdict = "lifted"
-            return self._halt(f"blok w szczekach, podniesiony o {grasp.lifted_m * 1000:.0f} mm "
-                              f"(szczeka {grasp.jaw_gap_m * 1000:.0f} mm)", self.kin.from_q(self.q_cmd),
-                              success=True)
+            self._enter(CARRY)
+            return None
         if self._t - self._phase_t0 >= self.grasp_settings.hold_s + JAW_WAIT_S:
             return self._halt("szczeka nie stoi po podniesieniu - blok sie rusza w szczekach",
                               self.kin.from_q(self.q_cmd))
         return self.hold()
 
-    def carrying(self, obs: Observation, reading: JawReading) -> Action | None:
-        """Check the jaw at the start of each LIFT_OFF and CHECK tick.
+    def _carry(self, obs: Observation) -> Action:
+        """Monitor the block at lift height for `carry_s`, then finish holding or command release."""
+        action = self.carrying(obs, self.reading)
+        if action is not None:
+            return action
+        grasp, cfg = self.grasp, self.grasp_settings
+        grasp.carried_s = self._t - self._phase_t0
+        # Allow for float rounding of `obs.t`, so a whole number of ticks ends the carry on time.
+        if grasp.carried_s >= cfg.carry_s - 1e-9:
+            if cfg.release:
+                return self.release()
+            return self._halt(f"blok w szczekach, podniesiony o {grasp.lifted_m * 1000:.0f} mm, niesiony "
+                              f"{grasp.carried_s:.1f} s (szczeka {grasp.jaw_gap_m * 1000:.0f} mm)",
+                              self.kin.from_q(self.q_cmd), success=True)
+        return self.hold()
 
-        Return an action to interrupt the phase or None to continue. The default stops on loss
-        of squeeze or creep since the close. Stillness is required only for the final hold check."""
-        if not reading.squeezing:
-            self.grasp.verdict = "slipped"
-            return self._halt("blok wypadl ze szczeki podczas podnoszenia", self.kin.from_q(self.q_cmd))
-        if reading.crept:
-            self.grasp.verdict = "crept"
-            return self._halt("blok zsuwa sie w szczekach", self.kin.from_q(self.q_cmd))
-        return None
+    def carrying(self, obs: Observation, reading: JawReading) -> Action | None:
+        """Monitor the hold once per tick during LIFT_OFF, CHECK and CARRY.
+
+        Return None to continue or an action to interrupt the phase. A squeezing jaw remains held.
+        Creep resets the hold reference. A sighting away from squeezing jaws is recorded in
+        `elsewhere`. Consecutive empty readings start a recovery rise with the jaw opening.
+        Overrides that call `release()` must return its action.
+        """
+        if self._watched_step == self.status.step:
+            # A phase transition can call this twice. Count each reading once.
+            return None
+        self._watched_step = self.status.step
+        grasp = self.grasp
+        seen = self._sighting(obs, reading.squeezing)
+        grasp.block_source = seen.source if seen is not None else ""
+        jaw_xy = self._jaw_point(obs.joints)[:2]
+        if reading.squeezing:
+            self._empty_ticks = 0
+            if reading.crept:
+                # Still squeezed, but shifted. Restart the hold reference.
+                grasp.creeps += 1
+                assert self._jaw is not None
+                self._jaw.mark()
+                logger.info("Blok przesuwa sie w szczekach (%d)", grasp.creeps)
+            if (seen is not None and seen.kind == SEEN and grasp.elsewhere is None
+                    and float(np.linalg.norm(np.asarray(seen.xy) - jaw_xy)) > IN_HAND_M):
+                grasp.elsewhere = seen.xy
+                logger.info("Kamery widza blok gdzie indziej: (%.3f, %.3f) m", *seen.xy)
+            return None
+        # Ignore isolated empty readings.
+        self._empty_ticks += 1
+        if self._empty_ticks < EMPTY_TICKS:
+            return None
+        grasp.drops += 1
+        grasp.verdict = "dropped"
+        self._drop_t = grasp.dropped_t = self._t
+        self._drop_xy = jaw_xy.copy()
+        grasp.elsewhere = None
+        grasp.lost_s = 0.0
+        logger.info("Blok wypadl ze szczeki (zrodlo: %s)", grasp.block_source or "brak")
+        self._start_rise(RECOVER)
+        return self.hold("blok wypadl ze szczeki - w gore")
+
+    def release(self) -> Action:
+        """End monitoring and open the jaw without moving the arm.
+
+        Call only during LIFT_OFF, CHECK or CARRY. Return this action from a `carrying` override.
+        The run succeeds once the measured jaw reaches the opening. The receiver must support
+        the block during release.
+        """
+        if self.status.phase not in (LIFT_OFF, CHECK, CARRY):
+            raise RuntimeError("grasp: release() outside a carrying phase")
+        self.grasp.released = True
+        self.grasp.verdict = "released"
+        self._set_jaw_goal(self.cmd_open)
+        self._enter(RELEASE)
+        return self.hold("oddaje blok: otwieram szczeke")
+
+    def _release(self, obs: Observation) -> Action:
+        self._ramp_jaw()
+        grasp = self.grasp
+        if self._jaw_ready() and abs(self.reading.q - float(self.q_cmd[self._g])) <= self.kin.spec.jaw.margin:
+            return self._halt(f"blok oddany: szczeka otwarta ({grasp.jaw_gap_m * 1000:.0f} mm)",
+                              self.kin.from_q(self.q_cmd), success=True)
+        if self._t - self._phase_t0 >= JAW_WAIT_S:
+            return self._halt(f"szczeka nie otworzyla sie po oddaniu bloku w {JAW_WAIT_S:.0f} s "
+                              f"({grasp.jaw_gap_m * 1000:.0f} mm zamiast {self.gap_open_m * 1000:.0f} mm)",
+                              self.kin.from_q(self.q_cmd))
+        return self.hold()
+
+    # ------------------------------------------------------------------ recovery
+    def _recover(self, obs: Observation) -> Action:
+        """Wait at the safe height with the jaw open for a sighting captured after the drop.
+
+        Regrasp nearby sightings. Stop for a person if the block is too far away or `wait_s` expires.
+        """
+        grasp, cfg = self.grasp, self.grasp_settings
+        seen = self._sighting(obs, self.reading.squeezing)
+        grasp.block_source = seen.source if seen is not None else ""
+        lost_s = grasp.lost_s = self._t - self._drop_t
+        target = self.kin.from_q(self.q_cmd)
+        # Require a capture after the block had time to land.
+        if seen is not None and seen.kind == SEEN and seen.seen_t >= self._drop_t + DROP_SETTLE_S:
+            assert self._drop_xy is not None
+            far = float(np.linalg.norm(np.asarray(seen.xy) - self._drop_xy))
+            if far > cfg.recover_m:
+                # A distant block requires a person's help.
+                grasp.verdict = "taken"
+                return self._halt(f"blok zabrany: lezy {far * 100:.0f} cm od miejsca upadku - czekam na "
+                                  "czlowieka", target)
+            if self.status.attempt >= cfg.max_attempts:
+                grasp.verdict = "taken"
+                return self._halt(f"wyczerpane proby chwytu ({self.status.attempt}): blok wypadl ze szczeki",
+                                  target)
+            return self._regrasp(seen)
+        if lost_s >= cfg.wait_s:
+            grasp.verdict = "taken"
+            if seen is None:
+                why = "kamery go nie widza"
+            elif seen.kind == SEEN:
+                # This capture predates the drop.
+                why = f"zrodlo '{seen.source}' sprzed upadku"
+            else:
+                high = f", {seen.z * 100:.0f} cm nad blatem" if seen.z > self.rest_z_max else ""
+                why = f"zrodlo '{seen.source}'{high}"
+            return self._halt(f"blok zabrany ze szczeki: {why} od {lost_s:.0f} s - czekam na czlowieka",
+                              target)
+        return self.hold()
+
+    def _regrasp(self, seen: Sighting) -> Action:
+        """Re-aim through `retarget` and count the next grasp against the attempt budget.
+
+        Close the jaw on the way to hover. By default, open there and straddle below the catalog top.
+        With `probe: true`, measure the top before straddling.
+        An unreachable sighting stops the run and keeps the old aim.
+        """
+        grasp = self.grasp
+        saved = self._block_xy0, self._shift_k, self.block_rotation, self._headings
+        # The sideways shifts after a tip stall start from the new block point.
+        self._block_xy0, self._shift_k = None, 0
+        self._heading_from(seen.rotation)
+        try:
+            self.retarget(seen.xy[0], seen.xy[1])
+        except RuntimeError as exc:
+            self._block_xy0, self._shift_k, self.block_rotation, self._headings = saved
+            grasp.verdict = "taken"
+            return self._halt(f"blok upadl poza zasiegiem: {exc} - czekam na czlowieka",
+                              self.kin.from_q(self.q_cmd))
+        self._jaw_goal_q = float(self._lo[self._g])
+        grasp.elsewhere = None
+        grasp.recoveries += 1
+        grasp.verdict = "recovering"
+        self._empty_ticks = 0
+        logger.info("Blok lezy na blacie w (%.3f, %.3f) m - ponowna proba", *seen.xy)
+        return self.hold("blok lezy na blacie - ponowna proba")
+
+    def _sighting(self, obs: Observation, squeezing: bool) -> Sighting | None:
+        """Classify the observed block pose for hold monitoring and recovery.
+
+        Return None if the pose is absent or its position is invalid. Classification uses the
+        observation, `squeezing` and configuration without changing strategy state.
+        """
+        pose = {normalised(str(key)): value for key, value in obs.objects.items()}.get(self.label)
+        if pose is None:
+            return None
+        position = np.asarray(pose.position, float)
+        if position.shape != (3,) or not np.all(np.isfinite(position)):
+            return None
+        source = str(pose.source or "")
+        age = float(pose.age_s)
+        if not math.isfinite(age):
+            age = math.inf
+        rotation = np.asarray(pose.rotation, float)
+        if rotation.shape != (3, 3) or not np.all(np.isfinite(rotation)):
+            rotation = np.eye(3)
+        z = float(position[2])
+        lying = z <= self.rest_z_max
+        if source == "w dloni":
+            kind = IN_HAND
+        elif source in SIGHTING_SOURCES and age <= self.config.max_pose_age_s and lying:
+            # Delayed detections can remain usable as plain last-seen poses.
+            kind = SEEN
+        elif source == "symulacja" or (not source and self._simulated):
+            # A resting block can be near the fingertips. Require squeeze to classify it as held.
+            near = float(np.linalg.norm(position - self._jaw_point(obs.joints))) < IN_HAND_M
+            kind = IN_HAND if near and squeezing else SEEN if lying else STALE
+        else:
+            kind = STALE
+        t = float(obs.t)
+        return Sighting(kind, (float(position[0]), float(position[1])), z, rotation.copy(), source, age,
+                        t - age)
+
+    def _jaw_point(self, joints: Mapping[str, float]) -> np.ndarray:
+        """Return the fingertips' midpoint at `joints` [m, base frame]."""
+        return np.mean(self.kin.fingertips(joints), axis=0)
 
     def after_grasp_failed(self, why: str, obs: Observation) -> Action:
         """Handle "tip" or "empty" while holding the arm's pose.
@@ -786,7 +1081,10 @@ class GraspStrategy(TouchStrategy):
         st, grasp = self.status, self.grasp
         mm = st.distance * 1000
         if st.phase == RISE:
-            text = ("w gore po dotyku" if self._rise_then == OPEN else "w gore znad bloku") + f": {mm:.0f} mm"
+            rise = {OPEN: "w gore po dotyku", RECOVER: "blok wypadl ze szczeki - w gore"}
+            text = rise.get(self._rise_then, "w gore znad bloku") + f": {mm:.0f} mm"
+        elif st.phase == APPROACH and not self._jaw_ready():
+            text = "nad obiekt: zamykam szczeke"
         elif st.phase == OPEN:
             text = f"nad blok, otwieram szczeke: {grasp.gap_cmd_m * 1000:.0f} mm"
         elif st.phase == STRADDLE:
@@ -799,6 +1097,14 @@ class GraspStrategy(TouchStrategy):
             text = f"podnosze blok: {mm:.0f} mm"
         elif st.phase == CHECK:
             text = f"trzymam blok: {grasp.hold_ticks / self.hz:.1f} s"
+        elif st.phase == CARRY:
+            text = f"niose blok: {grasp.carried_s:.1f} s"
+            if grasp.elsewhere is not None:
+                text += " - kamery widza blok gdzie indziej"
+        elif st.phase == RECOVER:
+            text = f"blok wypadl, czekam na kamery: {grasp.lost_s:.1f} s"
+        elif st.phase == RELEASE:
+            text = "oddaje blok: otwieram szczeke"
         else:
             return super()._note()
         return text + (" - cel poza zasiegiem ramienia" if st.out_of_reach else "")
