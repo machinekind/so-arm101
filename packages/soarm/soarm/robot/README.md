@@ -24,3 +24,8 @@ The model follows LeRobot's new calibration convention, with joint zero at the
 calibrated midpoint. Arm angles convert from degrees to MJCF radians; the gripper's
 0–100 range maps to the jaw angles configured in `robot.yaml`.
 See [conventions](../../../../docs/conventions.md) for units and calibration details.
+
+`robot.yaml` declares the wrist camera on `camera_mount` as `cameras: wrist`.
+Its `pose` is T_cam2body in OpenCV axes. Field of view and image size define its intrinsics.
+The twin renders it in simulation and serves the workspace camera named `wrist` on a real arm.
+`RobotKinematics.camera` exposes its pose to soarm-lab strategies.

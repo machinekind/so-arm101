@@ -68,6 +68,22 @@ desk:
   map_centre: [0.22, 0.0]
   map_side: 0.56
 
+# The twin renders this wrist camera in simulation and serves the workspace camera named `wrist` on hardware.
+# `pose` is T_cam2body in OpenCV axes: x right, y down, z forward.
+# Convert MJCF axes with R_cv = R_mj @ diag(1, -1, -1).
+# Use a name distinct from the model's `wrist_cam` to avoid a duplicate camera.
+cameras:
+  wrist:
+    body: camera_mount
+    pose:
+      - [1.0, 0.0, 0.0, 0.0]
+      - [0.0, -0.841900975, -0.539632049, 0.055]
+      - [0.0, 0.539632049, -0.841900975, -0.045]
+      - [0.0, 0.0, 0.0, 1.0]
+    fovy_deg: 48.4555
+    width: 1920
+    height: 1080
+
 joint_labels:
   shoulder_pan: [Podstawa, Obrot podstawy]
   shoulder_lift: [Bark, Bark]
