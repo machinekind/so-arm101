@@ -14,6 +14,7 @@ The repository is a [uv](https://docs.astral.sh/uv/) workspace with two Python p
   touch and grasp strategies guided by the twin's perception, recovery after a drop, and a touch
   variant that uses TypeSafe's Jev model to judge contact and re-aim after a miss.
   A wrist-camera variant refines the grasp's aim and yaw.
+  A Jev variant judges the close and lift and chooses the next grasp step.
 
 Both integrate with the [Machinekind digital twin](https://github.com/machinekind/twin)
 as plugins. The twin measures the physical setup and runs policies and inverse
