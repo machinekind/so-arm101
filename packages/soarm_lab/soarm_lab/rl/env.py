@@ -12,6 +12,7 @@ Each reset samples the object's colour independently of the physics.
 Pose observations include delay, a refresh period, a constant xy bias per episode and noise.
 They freeze while the true TCP is within `Randomization.latch_m` of the object.
 The gripper actuator has a speed limit independent of the command rate.
+Each episode can scale the block's dimensions, mass, inertia, collision geometry and resting height.
 """
 
 from __future__ import annotations
@@ -36,6 +37,8 @@ TARGET_SIZE = (0.035, 0.035, 0.002)
 TARGET_RGBA = (1.0, 1.0, 1.0, 1.0)
 #: Seed prefix for the object's independent colour stream.
 COLOUR_STREAM = 0xC0105
+#: Side length change fields [mm] in body-axis order (x, y, z).
+SIZE_KEYS = ("size_x", "size_y", "size_z")
 
 
 def look_at(eye, target, up=(0.0, 0.0, 1.0)) -> np.ndarray:
@@ -70,10 +73,18 @@ def object_geoms(m: mujoco.MjModel, name: str) -> np.ndarray:
     return np.flatnonzero(m.geom_bodyid == m.body(name).id)
 
 
+def sized_block(task: tk.TaskConfig, rand: Randomization) -> blocks.BlockSpec | None:
+    """Return a scalable block specification when size randomization is enabled, or None when disabled."""
+    if task.cube is None or rand.block_tolerance_mm <= 0:
+        return None
+    blocks.check_scalable(task.block_spec)
+    return task.block_spec
+
+
 class ModelFields:
     """Store nominal model fields for episode randomization."""
 
-    def __init__(self, scene: sc.Scene, cube: str | None):
+    def __init__(self, scene: sc.Scene, cube: str | None, block: blocks.BlockSpec | None = None):
         m = scene.model
         self.act = scene.act_ids
         self.dof = scene.kin.dadr
@@ -87,18 +98,42 @@ class ModelFields:
         self.cube_mass = m.body_mass[self.cube_body] if cube else 0.0
         self.cube_inertia = m.body_inertia[self.cube_body].copy() if cube else None
         self.cube_friction = m.geom_friction[self.cube_geoms].copy() if cube else None
+        #: Block specification for size randomization, or None when disabled.
+        self.block = block
+        if block is not None:
+            b, g = self.cube_body, self.cube_geoms[0]
+            #: Bounding volume used to cull contacts. Its box must match the scaled geometry.
+            self.bvh = int(m.body_bvhadr[b])
+            same = np.allclose(m.bvh_aabb[self.bvh], m.geom_aabb[g], rtol=0.0, atol=1e-12)
+            if m.body_bvhnum[b] != 1 or not same:
+                raise ValueError(f"{block.name}: the body's bounding volume is not its one geom's box")
 
-    def apply(self, m: mujoco.MjModel, d: mujoco.MjData, s: dict[str, float]) -> None:
-        """Scale nominal model fields by `s` so multipliers do not accumulate across resets."""
+    def apply(self, m: mujoco.MjModel, d: mujoco.MjData, s: dict[str, float], size: np.ndarray) -> None:
+        """Scale nominal model fields by `s` so multipliers do not accumulate across resets.
+
+        `size` (3,) scales block dimensions along the body axes. Mass scales with volume at constant density.
+        """
         m.actuator_gainprm[self.act, 0] = self.kp * s["kp"]
         m.actuator_biasprm[self.act, 1] = self.bias[:, 0] * s["kp"]
         m.dof_damping[self.dof] = self.damping * s["damping"]
         m.dof_armature[self.dof] = self.armature * s["armature"]
         m.dof_frictionloss[self.dof] = self.frictionloss * s["frictionloss"]
         if self.cube_body is not None:
-            # Scale inertia with mass to preserve its distribution.
-            m.body_mass[self.cube_body] = self.cube_mass * s["cube_mass"]
-            m.body_inertia[self.cube_body] = self.cube_inertia * s["cube_mass"]
+            if self.block is None:
+                # Scale inertia with mass to preserve its distribution.
+                m.body_mass[self.cube_body] = self.cube_mass * s["cube_mass"]
+                m.body_inertia[self.cube_body] = self.cube_inertia * s["cube_mass"]
+            else:
+                scale = np.asarray(size, float).reshape(1, 3)
+                mass = self.cube_mass * s["cube_mass"] * float(np.prod(scale))
+                geo = blocks.scaled_geometry(self.block, scale, np.array([mass]))
+                g = self.cube_geoms[0]
+                m.body_mass[self.cube_body] = mass
+                m.body_inertia[self.cube_body] = geo.inertia[0]
+                m.geom_size[g] = geo.size[0]
+                m.geom_rbound[g] = geo.rbound[0]
+                m.geom_aabb[g, 3:] = geo.aabb[0]
+                m.bvh_aabb[self.bvh, 3:] = geo.aabb[0]
             m.geom_friction[self.cube_geoms] = self.cube_friction * np.array([s["cube_friction"], 1.0, 1.0])
         # Recompute contact constants after mass and armature changes to keep contacts stable.
         mujoco.mj_setConst(m, d)
@@ -112,13 +147,14 @@ class ArmEnv(gym.Env):
                  render_camera: str | None = None):
         station = station or Station.load()
         self.task = task if isinstance(task, tk.TaskConfig) else tk.make_task(task, spec=station.spec())
+        self.rand = randomization if randomization is not None else Randomization()
+        block = sized_block(self.task, self.rand)
         self.render_mode = render_mode
         self.scene = sc.build(scene_config(self.task, station, view=render_mode is not None))
         self.render_camera = render_camera or (self.scene.cfg.cameras[0].name if self.scene.cfg.cameras else None)
         self.kin = self.scene.kin
         self.limits = tk.Limits.of(self.kin)
-        self.rand = randomization if randomization is not None else Randomization()
-        self.fields = ModelFields(self.scene, self.task.cube)
+        self.fields = ModelFields(self.scene, self.task.cube, block)
         m = self.scene.model
         m.opt.timestep = self.task.timestep
         self.T_world2base = inverse(self.scene.T_base2world)
@@ -152,6 +188,8 @@ class ArmEnv(gym.Env):
         self._bias = np.zeros(2)
         #: Maximum gripper actuator step for this episode [rad per policy tick].
         self._grip_rate = float("inf")
+        #: Block scale along body axes for this episode, shape (3,).
+        self.size = np.ones(3)
 
     # ------------------------------------------------------------ state
     def state(self) -> dict[str, np.ndarray]:
@@ -203,7 +241,9 @@ class ArmEnv(gym.Env):
         rng = self.np_random
         m, d = self.scene.model, self.scene.data
         s = {k: float(v[0]) for k, v in self.rand.sample(rng, 1).items()}
-        self.fields.apply(m, d, s)
+        block = self.fields.block
+        self.size = np.ones(3) if block is None else blocks.scale_from_mm(np, block, *(s[k] for k in SIZE_KEYS))
+        self.fields.apply(m, d, s, self.size)
         self._noise = self.rand.obs_noise_deg
         self._delay = [np.zeros(self.task.act_dim)] * int(s["delay"])
         self._cube_delay, self._cube_period = int(s["cube_delay"]), int(s["cube_period"])
@@ -224,6 +264,7 @@ class ArmEnv(gym.Env):
             else:
                 p, qt = tk.sample_cubes(self.task, rng, 1)
                 pos, quat = p[0], qt[0]
+                pos[2] = self.task.rest_heights(self.size)
             self.set_cube(pos, quat)
             m.geom_rgba[self.fields.cube_geoms] = blocks.random_rgba(self._colours)
             if self.task.target:
@@ -283,7 +324,7 @@ class ArmEnv(gym.Env):
         kw = {}
         if self.task.target:
             carried = tk.carry_latch(np, self.task, np.array([self._carried]), s["jaws"][None], s["cube_pos"][None],
-                                     s["cube_rot"][None])
+                                     s["cube_rot"][None], self.size[None])
             self._carried = bool(carried[0])
             kw = dict(target=self.target[None], cube_vel=s["cube_vel"][None], carried=carried,
                       grip_open=tk.grip_is_open(np, self.limits, self.q_cmd[None]))
@@ -291,7 +332,7 @@ class ArmEnv(gym.Env):
                                         goal=self.goal[None], cube_pos=s.get("cube_pos", np.zeros(3))[None],
                                         cube_rot=s.get("cube_rot", np.eye(3))[None],
                                         jaw_contacts=s.get("jaws", np.zeros(2))[None],
-                                        q_cmd=self.q_cmd[None], limits=self.limits, **kw)
+                                        q_cmd=self.q_cmd[None], limits=self.limits, size=self.size[None], **kw)
         self.prev_action = action
         streak, finished = tk.success_streak(np, self.task, np.array([self._streak]), success)
         self._streak = int(streak[0])
@@ -299,7 +340,7 @@ class ArmEnv(gym.Env):
         if not self.task.cube:
             info["distance"] = float(np.linalg.norm(self.goal - s["tcp"]))
         else:
-            info["height"] = float(self.task.height(np, s["cube_pos"][None], s["cube_rot"][None])[0])
+            info["height"] = float(self.task.height(np, s["cube_pos"][None], s["cube_rot"][None], self.size[None])[0])
             info["grasped"] = bool(s["jaws"].min() > 0.5)
         if self.task.target:
             d_t = float(np.linalg.norm(s["cube_pos"][:2] - self.target[:2]))

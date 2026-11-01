@@ -4,7 +4,7 @@
     obs = env.reset()                         # (N, obs_dim)
     obs, rew, done, info = env.step(action)   # action (N, act_dim)
 
-Each variant needs its own `BatchEnv` because collision geometry is fixed within a batch.
+Each variant needs its own `BatchEnv` because collision shape types are fixed at compilation.
 Batches step in sequence. Arrays group worlds in variant order.
 `info["variant"]` has shape (N,) and indexes `env.variants`.
 `num_envs` must be divisible by the number of variants.

@@ -137,3 +137,5 @@ def test_variant_tasks_and_with_variant():
     with pytest.raises(ValueError, match="unknown block"):
         tasks.make_task("lift").with_variant("mug")
     assert tasks.make_task("reach").variant is None
+
+

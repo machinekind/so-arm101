@@ -11,6 +11,7 @@ import pytest
 mujoco = pytest.importorskip("mujoco")
 gym = pytest.importorskip("gymnasium")
 
+from soarm_lab import blocks  # noqa: E402
 from soarm_lab.blocks import block  # noqa: E402
 from soarm_lab.rl import tasks as tk  # noqa: E402
 from soarm_lab.rl.env import TARGET_RGBA, VIEW, ArmEnv  # noqa: E402
@@ -280,6 +281,105 @@ def test_each_reset_paints_the_block_without_touching_the_physics():
         assert len({paint()[1] for _ in range(5)}) == 5
     finally:
         env.close()
+
+
+#: Seeds that increase block height enough to expose missing geometry updates despite soft contacts.
+SIZED_SEEDS = {"cuboid": 4, "cylinder": 0}
+
+
+@pytest.mark.parametrize("name", sorted(SIZED_SEEDS))
+def test_a_sized_block_has_its_own_geometry_and_mass_but_the_catalog_descriptor(name):
+    """Episode size sets collision geometry, mass, inertia and resting height.
+
+    The policy's descriptor keeps the catalog dimensions.
+    """
+    task = tk.make_task("lift", variants=VARIANTS, block=name)
+    env = ArmEnv(task, randomization=replace(Randomization.none(), block_tolerance_mm=5.0))
+    try:
+        obs, _ = env.reset(seed=SIZED_SEEDS[name])
+        size, spec = env.size, block(name)
+        nominal = 2000.0 * np.asarray(spec.half_size)                       # [mm]
+        change = nominal * size - nominal
+        assert size.shape == (3,) and (np.abs(change) <= 5.0 + 1e-9).all()
+        assert change[2] > 2.0 and len(set(size.tolist())) == (2 if name == "cylinder" else 3)
+        if name == "cylinder":
+            assert size[1] == size[2]
+        m, b, (g,) = env.scene.model, env.fields.cube_body, env.fields.cube_geoms
+        mass = spec.mass * float(np.prod(size))
+        geo = blocks.scaled_geometry(spec, size[None], mass)
+        assert m.body_mass[b] == pytest.approx(mass, rel=1e-12)
+        np.testing.assert_allclose(m.body_inertia[b], geo.inertia[0], rtol=1e-12)
+        np.testing.assert_allclose(m.geom_size[g], geo.size[0], rtol=1e-12)
+        np.testing.assert_allclose(m.geom_rbound[g], geo.rbound[0], rtol=1e-12)
+        np.testing.assert_allclose(m.geom_aabb[g], np.r_[0.0, 0.0, 0.0, geo.aabb[0]], rtol=1e-12)
+        np.testing.assert_allclose(m.bvh_aabb[env.fields.bvh], np.r_[0.0, 0.0, 0.0, geo.aabb[0]], rtol=1e-12)
+        assert np.array_equal(obs[33:], task.descriptor())
+        s = env.state()
+        assert abs(task.height(np, s["cube_pos"][None], s["cube_rot"][None], size[None])[0]) < 1e-12
+        for _ in range(40):
+            obs, _, _, _, info = env.step(np.zeros(task.act_dim))
+        assert abs(info["height"]) < 5e-4
+        assert np.array_equal(obs[33:], task.descriptor())
+        env.reset(seed=SIZED_SEEDS[name] + 1)
+        assert not np.array_equal(env.size, size)
+    finally:
+        env.close()
+
+
+def test_the_3cm_cube_takes_a_size_tolerance_and_stays_square():
+    env = ArmEnv("lift", randomization=replace(Randomization.none(), block_tolerance_mm=5.0))
+    try:
+        env.reset(seed=0)
+        size = env.size
+        assert env.fields.block is block("cube3cm")
+        assert size[0] == size[1] and size[1] != size[2]
+        assert (np.abs(30.0 * size - 30.0) <= 5.0 + 1e-9).all()                # Sides [mm].
+        g = env.fields.cube_geoms[0]
+        np.testing.assert_allclose(env.scene.model.geom_size[g], 0.015 * size, rtol=1e-12)
+        s = env.state()
+        assert s["cube_pos"][2] == pytest.approx(0.015 * size[2], rel=1e-9)
+    finally:
+        env.close()
+
+
+def test_reach_ignores_a_size_tolerance_and_a_block_without_one_keeps_its_fields():
+    env = ArmEnv("reach", randomization=replace(Randomization(), block_tolerance_mm=2.0))
+    try:
+        env.reset(seed=0)
+        assert env.size.tolist() == [1.0, 1.0, 1.0] and env.fields.block is None
+    finally:
+        env.close()
+    env = ArmEnv(tk.make_task("lift", block="cuboid"), randomization=replace(Randomization.none(),
+                                                                             cube_mass=(1.5, 1.5)))
+    try:
+        env.reset(seed=0)
+        b = env.fields.cube_body
+        assert env.fields.block is None and env.size.tolist() == [1.0, 1.0, 1.0]
+        assert np.array_equal(env.scene.model.body_inertia[b], env.fields.cube_inertia * 1.5)
+    finally:
+        env.close()
+
+
+def test_a_block_that_cannot_scale_refuses_a_size_tolerance_and_runs_without_one(monkeypatch):
+    from soarm_lab.station import Part
+
+    half = (0.03, 0.0125, 0.0125)
+    two = blocks.BlockSpec("two", half, 0.04, (Part("box", (0.015, 0.0125, 0.0125), pos=(-0.015, 0.0, 0.0)),
+                                               Part("box", (0.015, 0.0125, 0.0125), pos=(0.015, 0.0, 0.0))),
+                           np.pi)
+    quat = (np.cos(np.pi / 8), 0.0, 0.0, np.sin(np.pi / 8))
+    turned = blocks.BlockSpec("turned", (0.0125,) * 3, 0.01, (Part("box", (0.0125,) * 3, quat=quat),), np.pi)
+    for spec, message in ((two, "one-part block"), (turned, "not axis-aligned")):
+        monkeypatch.setitem(blocks.classic_world.BLOCKS, spec.name, spec)
+        task = tk.make_task("lift", block=spec.name)
+        with pytest.raises(ValueError, match=message):
+            ArmEnv(task, randomization=replace(Randomization.none(), block_tolerance_mm=2.0))
+        env = ArmEnv(task, randomization=Randomization.none())
+        try:
+            env.reset(seed=0)
+            assert env.fields.block is None and env.size.tolist() == [1.0, 1.0, 1.0]
+        finally:
+            env.close()
 
 
 #: Cube position in the base frame [m].

@@ -48,7 +48,7 @@ class PickPlaceConfig(LiftConfig):
         return self._with_descriptor(xp, parts + [target, target - cube_pos, prev_action], q)
 
     def reward(self, xp, tcp, action, prev_action, cube_pos=None, cube_rot=None, jaw_contacts=None, q_cmd=None,
-               limits=None, target=None, cube_vel=None, carried=None, grip_open=None, **_):
+               limits=None, target=None, cube_vel=None, carried=None, grip_open=None, size=None, **_):
         """Count success when a previously carried block rests on the target after release.
         Falls terminate episodes. Time limits and success streaks truncate them.
         """
@@ -56,7 +56,7 @@ class PickPlaceConfig(LiftConfig):
         opened = grip_open if grip_open is not None else grip_is_open(xp, limits, q_cmd)
         d = _norm(cube_pos - tcp)
         g = grasped(xp, jaw_contacts)
-        height = self.height(xp, cube_pos, cube_rot)
+        height = self.height(xp, cube_pos, cube_rot, size)
         lifted = _clip(xp, height / self.lift_height, 0.0, 1.0)
         d_t = _norm(cube_pos[..., :2] - target[..., :2])
         placed = (d_t < self.place_radius) & (height < self.place_height)
@@ -73,8 +73,8 @@ class PickPlaceConfig(LiftConfig):
         failure = height < -0.05
         return r - cost, success, failure
 
-    def sample_reset(self, jax, n, keys, **_):
-        sampled = super().sample_reset(jax, n, keys)
+    def sample_reset(self, jax, n, keys, size, **_):
+        sampled = super().sample_reset(jax, n, keys, size)
         return {**sampled, "target": sample_targets_jax(jax, self, keys[4], sampled["cube_pos"])}
 
     def for_spec(self, spec: RobotSpec):
@@ -82,9 +82,9 @@ class PickPlaceConfig(LiftConfig):
         return replace(base, target_radius=spec.desk.cube_radius, target_bearing=spec.desk.cube_bearing)
 
 
-def carry_latch(xp, task: LiftConfig, carried, jaw_contacts, cube_pos, cube_rot):
+def carry_latch(xp, task: LiftConfig, carried, jaw_contacts, cube_pos, cube_rot, size=None):
     """Latch carrying after a grasped block clears `lift_height`, before computing reward."""
-    return carried | (grasped(xp, jaw_contacts) & (task.height(xp, cube_pos, cube_rot) > task.lift_height))
+    return carried | (grasped(xp, jaw_contacts) & (task.height(xp, cube_pos, cube_rot, size) > task.lift_height))
 
 
 TARGET_TRIES = 64

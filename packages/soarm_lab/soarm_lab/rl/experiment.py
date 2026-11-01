@@ -41,6 +41,8 @@ class RandomizationConfig:
     latch_m: float = 0.0
     # Full gripper closing time [s]. Null uses the station's value. Zero disables the servo speed limit.
     grip_close_s: float | None = None
+    # Block side tolerance per world in (0, 5] mm. Null disables it.
+    block_tolerance_mm: float | None = None
 
     def __post_init__(self) -> None:
         for key in ("pose_bias_m", "latch_m", "grip_close_s"):
@@ -55,6 +57,9 @@ class RandomizationConfig:
                 raise ValueError(f"randomization.pose_delay needs 0 <= min <= max ticks, not {self.pose_delay}")
         if self.pose_period is not None and self.pose_period < 1:
             raise ValueError(f"randomization.pose_period needs at least 1 tick, not {self.pose_period}")
+        if self.block_tolerance_mm is not None and not 0.0 < self.block_tolerance_mm <= 5.0:
+            raise ValueError(f"randomization.block_tolerance_mm needs 0 < T <= 5 mm (null disables it), "
+                             f"not {self.block_tolerance_mm}")
 
     @property
     def delay_range(self) -> tuple[int, int]:
@@ -63,7 +68,7 @@ class RandomizationConfig:
         return (0, delay[0]) if len(delay) == 1 else (delay[0], delay[1])
 
     def changes(self) -> dict[str, Any]:
-        """Return explicitly enabled perception overrides for `Randomization`."""
+        """Return explicitly enabled overrides for `Randomization`."""
         out: dict[str, Any] = {}
         if self.pose_bias_m > 0:
             out["pose_bias_m"] = self.pose_bias_m
@@ -73,6 +78,8 @@ class RandomizationConfig:
             out["cube_period"] = self.pose_period
         if self.latch_m > 0:
             out["latch_m"] = self.latch_m
+        if self.block_tolerance_mm is not None:
+            out["block_tolerance_mm"] = self.block_tolerance_mm
         return out
 
 

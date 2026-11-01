@@ -5,6 +5,8 @@ These tests require the `train` extra and compile each scene's physics kernels.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
@@ -16,6 +18,7 @@ import jax.numpy as jnp  # noqa: E402
 
 from soarm_lab.rl import tasks as tk  # noqa: E402
 from soarm_lab.rl.mixed import MixedBatchEnv  # noqa: E402
+from soarm_lab.rl.randomize import Randomization  # noqa: E402
 
 #: Box and cylinder variants require different collision geometry.
 VARIANTS = ("cuboid", "cylinder")
@@ -55,6 +58,21 @@ def test_the_variants_step_as_one_environment(env, task):
     # Each variant retains its own collision geometry.
     geoms = [int(e.scene.model.geom_type[e.cube_geoms[0]]) for e in env.envs]
     assert geoms == [mujoco.mjtGeom.mjGEOM_BOX, mujoco.mjtGeom.mjGEOM_CYLINDER]
+
+
+def test_each_variant_draws_its_own_sizes(task, station):
+    rand = replace(Randomization.none(), block_tolerance_mm=5.0)
+    env = MixedBatchEnv(task.variant_tasks(), 4, station=station, randomization=rand, device="cpu", seed=3)
+    obs = np.asarray(env.reset())
+    sizes = [np.asarray(e.s["size"]) for e in env.envs]
+    for i, (inner, size) in enumerate(zip(env.envs, sizes, strict=True)):
+        half = np.asarray(inner.task.block_spec.half_size)
+        assert (obs[2 * i:2 * i + 2, -3:] == inner.task.descriptor()[-3:]).all()
+        assert (np.abs(2000.0 * half * (size - 1.0)) <= 5.0 + 1e-4).all()       # Side changes [mm].
+    assert np.array_equal(sizes[1][:, 1], sizes[1][:, 2])                   # The cylinder stays round.
+    assert not np.array_equal(sizes[0][:, 1], sizes[0][:, 2])
+    obs, rew, done, info = env.step(jnp.zeros((4, env.act_dim)))
+    assert jnp.isfinite(obs).all() and jnp.isfinite(rew).all() and not info["broken"].any()
 
 
 def test_the_worlds_must_divide_by_the_variants(task, station):

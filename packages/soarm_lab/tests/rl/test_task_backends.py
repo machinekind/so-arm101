@@ -152,6 +152,78 @@ def test_numpy_and_jax_compute_the_same_task_with_variants(name, own, station, l
     assert 0 < a["success"].sum() < N and 0 < a["failure"].sum() < N
 
 
+@pytest.mark.parametrize("own", VARIANTS)
+def test_numpy_and_jax_compute_the_same_sized_block(own, station, limits):
+    """NumPy and JAX agree on block scales, descriptors, lowest points and resting heights."""
+    task = tk.make_task("lift", spec=station.spec(), variants=VARIANTS, block=own)
+    spec = task.block_spec
+    x = inputs(task, limits, seed=30 + VARIANTS.index(own))
+    draws = np.random.default_rng(7).uniform(-5.0, 5.0, (3, N))         # side changes [mm]
+    size = blocks.scale_from_mm(np, spec, *draws)
+    assert size.shape == (N, 3)
+    np.testing.assert_allclose(np.asarray(blocks.scale_from_mm(jnp, spec, *jnp.asarray(draws, jnp.float32))),
+                               size, rtol=1e-6)
+    nominal = 2000.0 * np.asarray(spec.half_size)                         # [mm]
+    assert np.abs(nominal * size - nominal).max() <= 5.0 + 1e-9
+    shared = {"cube": (0, 1), "cylinder": (1, 2)}.get(own)
+    if shared:
+        assert np.array_equal(size[:, shared[0]], size[:, shared[1]])
+    assert len({tuple(c) for c in size.T.round(12).tolist()}) == (2 if shared else 3)
+
+    def run(xp):
+        def f(a):
+            return np.asarray(a, float) if xp is np else jnp.asarray(a, jnp.float32)
+
+        obs = task.observe(xp, limits, f(x["q"]), f(x["q_cmd"]), f(x["tcp"]), f(x["prev"]),
+                           cube_pos=f(x["cube"]), cube_rot=f(x["rot"]), size=f(size))
+        height = task.height(xp, f(x["cube"]), f(x["rot"]), f(size))
+        return {k: np.asarray(v) for k, v in
+                {"observe": obs, "height": height, "rest": task.rest_heights(f(size))}.items()}
+
+    a, b = run(np), run(jnp)
+    for k in a:
+        assert b[k].dtype == np.float32 and a[k].shape == b[k].shape, k
+        np.testing.assert_allclose(b[k], a[k], rtol=1e-5, atol=1e-6, err_msg=k)
+    np.testing.assert_array_equal(a["height"], blocks.bottom_height(np, spec, x["cube"], x["rot"], size))
+    np.testing.assert_allclose(a["rest"], spec.half_size[2] * size[:, 2], rtol=1e-15)
+    one = np.ones((N, 3))
+    args = (np, limits, x["q"], x["q_cmd"], x["tcp"], x["prev"])
+    plain = task.observe(*args, cube_pos=x["cube"], cube_rot=x["rot"])
+    assert np.array_equal(a["observe"], plain)
+    assert np.array_equal(task.height(np, x["cube"], x["rot"], one), task.height(np, x["cube"], x["rot"]))
+
+
+def test_the_3cm_cube_scales_like_any_block(station):
+    """The cube preserves its yaw symmetry and uses scaled dimensions to compute its lowest point."""
+    task = tk.make_task("lift", spec=station.spec())
+    draws = np.random.default_rng(8).uniform(-5.0, 5.0, (3, 4))         # side changes [mm]
+    size = blocks.scale_from_mm(np, task.block_spec, *draws)
+    assert np.array_equal(size[:, 0], size[:, 1]) and not np.array_equal(size[:, 1], size[:, 2])
+    pos, upright = np.tile([0.2, 0.0, 0.05], (4, 1)), np.tile(np.eye(3), (4, 1, 1))
+    # The bottom moves by half the height change.
+    np.testing.assert_allclose(task.height(np, pos, upright, size), 0.05 - (30.0 + draws[2]) / 2000.0,
+                               rtol=1e-12)
+
+
+@pytest.mark.parametrize("name", ("lift", "pickplace"))
+def test_the_lift_verdicts_use_the_scaled_block(name, station, limits):
+    """Success and carrying depend on the scaled block's lowest point."""
+    task = tk.make_task(name, spec=station.spec(), block="cuboid")
+    x = _pinned_batch(task, limits)
+    pos = np.array([[0.2, 0.0, task.block_spec.half_size[2] + task.lift_height + 0.001]])
+    rot, jaws, no = x["rot"][:1], np.ones((1, 2)), np.zeros(1, bool)
+    # A block 3 mm taller has its bottom 1.5 mm lower, below the 1 mm margin.
+    same = np.ones((1, 3))
+    taller = blocks.scale_from_mm(np, task.block_spec, *np.array([[0.0], [0.0], [3.0]]))
+    assert tk.carry_latch(np, task, no, jaws, pos, rot, same).tolist() == [True]
+    assert tk.carry_latch(np, task, no, jaws, pos, rot, taller).tolist() == [False]
+    if name == "lift":
+        args = (np, x["tcp"][:1], x["act"][:1], x["prev"][:1])
+        kw = dict(cube_pos=pos, cube_rot=rot, jaw_contacts=jaws, q_cmd=x["q_cmd"][:1], limits=limits)
+        assert task.reward(*args, size=same, **kw)[1].tolist() == [True]
+        assert task.reward(*args, size=taller, **kw)[1].tolist() == [False]
+
+
 def _pinned_batch(task: tk.TaskConfig, lim: tk.Limits) -> dict[str, np.ndarray]:
     """Build fixed states spanning grasp, lift, placement, and failure conditions."""
     rng = np.random.default_rng(5)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -10,9 +11,23 @@ import pytest
 mujoco = pytest.importorskip("mujoco")
 
 from soarm_lab import blocks  # noqa: E402
-from soarm_lab.blocks import WOOD, BlockSpec, block, bottom_height, box_block, cylinder_block, scene_object  # noqa: E402
+from soarm_lab.blocks import (  # noqa: E402
+    WOOD,
+    BlockSpec,
+    Geometry,
+    block,
+    bottom_height,
+    box_block,
+    check_scalable,
+    cylinder_block,
+    part_scale,
+    scale_from_mm,
+    scaled_geometry,
+    scene_object,
+    symmetric_scale,
+)
 from soarm_lab.kinematics import inverse  # noqa: E402
-from soarm_lab.station import Part  # noqa: E402
+from soarm_lab.station import Box, Part  # noqa: E402
 
 #: Include all catalog entries and the default cube.
 NAMES = ("cube3cm", *blocks.classic_world.BLOCKS)
@@ -20,6 +35,11 @@ NAMES = ("cube3cm", *blocks.classic_world.BLOCKS)
 ROTATIONS = 20
 #: Rim samples bound the lowest-point error by r * (1 - cos(pi / RIM)).
 RIM = 3600
+#: A turn of 45 degrees about z.
+_TURNED = (float(np.cos(np.pi / 8)), 0.0, 0.0, float(np.sin(np.pi / 8)))
+#: Body-axis scale factors for each test block. Cylinder radial scales must match.
+SCALES = {"cube3cm": (0.9, 1.1, 1.2), "cube": (1.15, 0.85, 1.05), "cuboid": (0.85, 1.1, 1.15),
+          "cylinder": (0.88, 1.13, 1.13)}
 
 
 def _rot(axis: int, angle: float) -> np.ndarray:
@@ -39,8 +59,20 @@ def _random_rotations(rng: np.random.Generator, n: int) -> np.ndarray:
     return out.reshape(n, 3, 3)
 
 
-def _scene(station, spec: BlockSpec):
-    model = station.build(objects=[scene_object(spec, "cube", (0.2, 0.1))], grasp_sensors=["cube"])
+def _scaled_object(spec: BlockSpec, scale) -> Box:
+    """Build an independent reference object at `scale` with constant density."""
+    half = tuple(float(h * s) for h, s in zip(spec.half_size, scale, strict=True))
+    part = spec.parts[0]
+    if part.kind == "box":
+        parts = (Part("box", half),)
+    else:
+        parts = (Part("cylinder", (half[1], half[0], 0.0), quat=part.quat),)
+    return Box("cube", half, (0.2, 0.1), rgba=WOOD, mass=spec.mass * float(np.prod(scale)), parts=parts)
+
+
+def _scene(station, spec: BlockSpec, scale=None):
+    obj = scene_object(spec, "cube", (0.2, 0.1)) if scale is None else _scaled_object(spec, scale)
+    model = station.build(objects=[obj], grasp_sensors=["cube"])
     data = mujoco.MjData(model)
     body = model.body("cube").id
     return model, data, body, model.jnt_qposadr[model.body_jntadr[body]]
@@ -113,10 +145,16 @@ def _two_parts() -> BlockSpec:
     return BlockSpec("two", (0.03, 0.0145, 0.0135), 0.02, parts, np.pi)
 
 
-@pytest.mark.parametrize("spec", [block(name) for name in NAMES] + [_two_parts()], ids=lambda s: s.name)
-def test_bottom_height_is_the_lowest_point_of_the_geoms(station, spec):
+#: Nominal blocks, a compound block and scaled blocks for the lowest-point checks.
+LOWEST_CASES = [*((block(name), None) for name in NAMES), (_two_parts(), None),
+                *((block(name), SCALES[name]) for name in NAMES)]
+
+
+@pytest.mark.parametrize("spec,scale", LOWEST_CASES,
+                         ids=[f"{s.name}-{'scaled' if c else 'own'}" for s, c in LOWEST_CASES])
+def test_bottom_height_is_the_lowest_point_of_the_geoms(station, spec, scale):
     """Compare height with box corners and cylinder rim samples from compiled geoms."""
-    model, data, body, a = _scene(station, spec)
+    model, data, body, a = _scene(station, spec, scale)
     T = inverse(station.T_base2world)
     geoms = np.flatnonzero(model.geom_bodyid == body)
     assert len(geoms) == len(spec.parts)
@@ -139,7 +177,8 @@ def test_bottom_height_is_the_lowest_point_of_the_geoms(station, spec):
             world = local @ data.geom_xmat[g].reshape(3, 3).T + data.geom_xpos[g]
             lowest = min(lowest, float((world @ T[:3, :3].T + T[:3, 3])[:, 2].min()))
         pos, rot = _pose(station, data, body)
-        assert bottom_height(np, spec, pos[None], rot[None])[0] == pytest.approx(lowest, abs=1e-7)
+        s = None if scale is None else np.asarray(scale)[None]
+        assert bottom_height(np, spec, pos[None], rot[None], s)[0] == pytest.approx(lowest, abs=1e-7)
 
 
 def test_numpy_and_jax_compute_the_same_bottom_height():
@@ -147,9 +186,15 @@ def test_numpy_and_jax_compute_the_same_bottom_height():
     rng = np.random.default_rng(0)
     rot = _random_rotations(rng, 64)
     pos = rng.normal(0.0, 0.1, (64, 3))
+    scale = rng.uniform(0.8, 1.2, (64, 3))
     for spec in [block(name) for name in NAMES] + [_two_parts()]:
         a = bottom_height(np, spec, pos, rot)
         b = bottom_height(jnp, spec, jnp.asarray(pos, jnp.float32), jnp.asarray(rot, jnp.float32))
+        assert a.shape == b.shape == (64,) and b.dtype == np.float32
+        np.testing.assert_allclose(np.asarray(b), a, rtol=1e-5, atol=1e-6)
+        a = bottom_height(np, spec, pos, rot, scale)
+        b = bottom_height(jnp, spec, jnp.asarray(pos, jnp.float32), jnp.asarray(rot, jnp.float32),
+                          jnp.asarray(scale, jnp.float32))
         assert a.shape == b.shape == (64,) and b.dtype == np.float32
         np.testing.assert_allclose(np.asarray(b), a, rtol=1e-5, atol=1e-6)
 
@@ -158,3 +203,112 @@ def test_a_part_without_a_height_is_refused():
     spec = BlockSpec("ball", (0.01,) * 3, 0.01, (Part("sphere", (0.01, 0.0, 0.0)),), np.pi)
     with pytest.raises(ValueError, match="no height for a 'sphere' part"):
         bottom_height(np, spec, np.zeros((1, 3)), np.eye(3)[None])
+
+
+def test_part_scale_maps_the_body_axes_onto_the_part():
+    """Body-axis scales map to the part frame in both NumPy and JAX."""
+    s = np.array([[1.1, 0.9, 1.2], [0.8, 1.0, 1.3]])
+    box, cyl = block("cuboid").parts[0], block("cylinder").parts[0]
+    assert np.array_equal(part_scale(box, s), s)
+    assert np.array_equal(part_scale(cyl, s), s[:, ::-1])
+    assert part_scale(cyl, s[0]).tolist() == [1.2, 0.9, 1.1]
+    jnp = pytest.importorskip("jax.numpy")
+    assert np.array_equal(np.asarray(part_scale(cyl, jnp.asarray(s, jnp.float32))),
+                          s[:, ::-1].astype(np.float32))
+    with pytest.raises(ValueError, match="not axis-aligned"):
+        part_scale(Part("box", (0.01, 0.01, 0.01), quat=_TURNED), s)
+
+
+def _compiled(model, body: int) -> dict[str, np.ndarray]:
+    """Read geometry and inertia fields from the compiled reference block."""
+    (g,) = np.flatnonzero(model.geom_bodyid == body)
+    assert model.body_bvhnum[body] == 1
+    return {"size": model.geom_size[g], "rbound": model.geom_rbound[g], "aabb": model.geom_aabb[g, 3:],
+            "inertia": model.body_inertia[body], "bvh": model.bvh_aabb[model.body_bvhadr[body], 3:],
+            "centre": np.r_[model.geom_aabb[g, :3], model.bvh_aabb[model.body_bvhadr[body], :3]]}
+
+
+def _assert_matches(geo: Geometry, compiled: dict[str, np.ndarray]) -> None:
+    for name in ("size", "rbound", "aabb", "inertia"):
+        np.testing.assert_allclose(getattr(geo, name)[0], compiled[name], rtol=1e-9, atol=0, err_msg=name)
+    np.testing.assert_allclose(geo.aabb[0], compiled["bvh"], rtol=1e-9, atol=0)
+    assert not compiled["centre"].any()
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_scaled_geometry_at_scale_one_is_the_compiled_block(station, name):
+    spec = block(name)
+    model, _, body, _ = _scene(station, spec)
+    _assert_matches(scaled_geometry(spec, np.ones((1, 3)), spec.mass), _compiled(model, body))
+    assert model.body_mass[body] == pytest.approx(spec.mass, rel=1e-12)
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_scaled_geometry_is_the_compiled_scaled_block(station, name):
+    """Computed geometry and inertia match a reference object compiled at the scaled dimensions."""
+    spec = block(name)
+    scale = np.asarray(SCALES[name])
+    mass = spec.mass * float(np.prod(scale))
+    model, _, body, _ = _scene(station, spec, scale)
+    _assert_matches(scaled_geometry(spec, scale[None], np.array([mass])), _compiled(model, body))
+    assert model.body_mass[body] == pytest.approx(mass, rel=1e-12)
+    nominal, _, b0, _ = _scene(station, spec)
+    np.testing.assert_allclose(model.body_iquat[body], nominal.body_iquat[b0], atol=1e-12)
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_every_catalog_block_can_scale(name):
+    check_scalable(block(name))
+
+
+def test_scaled_geometry_refuses_what_it_cannot_scale():
+    with pytest.raises(ValueError, match="radial scales must be equal"):
+        scaled_geometry(block("cylinder"), [[1.0, 1.1, 0.9]], 0.02)
+    with pytest.raises(ValueError, match="one-part block"):
+        scaled_geometry(_two_parts(), [[1.0, 1.0, 1.0]], 0.02)
+    cuboid, size, one = block("cuboid"), (0.01, 0.01, 0.01), [[1.0, 1.0, 1.0]]
+    with pytest.raises(ValueError, match="centred on its body"):
+        scaled_geometry(replace(cuboid, parts=(Part("box", size, pos=(0.01, 0.0, 0.0)),)), one, 0.02)
+    with pytest.raises(ValueError, match="not axis-aligned"):
+        scaled_geometry(replace(cuboid, parts=(Part("box", size, quat=_TURNED),)), one, 0.02)
+    with pytest.raises(ValueError, match="no size rule for a 'sphere' part"):
+        scaled_geometry(replace(cuboid, parts=(Part("sphere", size),)), one, 0.02)
+
+
+def test_the_scale_keeps_the_symmetry_the_spec_declares():
+    """Scale sharing follows part axes and yaw symmetry independently of the block name."""
+    s = np.array([[1.1], [0.9], [1.2]])
+    square = box_block("a", (30.0, 30.0, 50.0), 10.0, yaw_period=math.pi / 2)
+    assert symmetric_scale(np, square, *s).tolist() == [[1.1, 1.1, 1.2]]
+    cuboid = box_block("b", (50.0, 30.0, 20.0), 10.0, yaw_period=math.pi)
+    assert symmetric_scale(np, cuboid, *s).tolist() == [[1.1, 0.9, 1.2]]
+    assert symmetric_scale(np, replace(block("cube"), yaw_period=math.pi), *s).tolist() == [[1.1, 0.9, 1.2]]
+    lying = cylinder_block("c", 50.0, 20.0, 10.0, yaw_period=math.pi)
+    assert symmetric_scale(np, lying, *s).tolist() == [[1.1, 0.9, 0.9]]
+    about_x = (math.sqrt(0.5), math.sqrt(0.5), 0.0, 0.0)
+    along_y = replace(lying, parts=(Part("cylinder", (0.01, 0.025, 0.0), quat=about_x),))
+    assert symmetric_scale(np, along_y, *s).tolist() == [[1.1, 0.9, 1.1]]
+    standing = replace(lying, parts=(Part("cylinder", (0.01, 0.025, 0.0)),))
+    assert symmetric_scale(np, standing, *s).tolist() == [[1.1, 1.1, 1.2]]
+    with pytest.raises(ValueError, match="one-part block"):
+        symmetric_scale(np, _two_parts(), *s)
+
+
+def test_side_changes_in_millimetres_scale_the_catalog_blocks_symmetrically():
+    """Side changes [mm] give scale factors of 1 + d / L. Shared axes follow the block's symmetry."""
+    t = 2.0
+    d = np.array([[t, -t], [-t, t], [t, -t]])                   # (body axis, world) side changes [mm]
+    # Expected sides [mm] share x/y changes for cubes and y/z changes for cylinders.
+    want = {"cube": [[31.0, 31.0, 31.0], [27.0, 27.0, 27.0]],
+            "cuboid": [[62.0, 27.0, 16.0], [58.0, 31.0, 12.0]],
+            "cylinder": [[62.0, 27.0, 27.0], [58.0, 31.0, 31.0]]}
+    assert set(want) == set(blocks.classic_world.BLOCKS)
+    for name, sides in want.items():
+        spec = block(name)
+        nominal = 2000.0 * np.asarray(spec.half_size)               # [mm]
+        scale = scale_from_mm(np, spec, *d)
+        assert scale.shape == (2, 3)
+        np.testing.assert_allclose(nominal * scale, sides, rtol=1e-12, err_msg=name)
+        assert scale_from_mm(np, spec, *np.zeros((3, 2))).tolist() == [[1.0, 1.0, 1.0]] * 2
+    cube, cylinder = scale_from_mm(np, block("cube"), *d), scale_from_mm(np, block("cylinder"), *d)
+    assert np.array_equal(cube[:, 0], cube[:, 1]) and np.array_equal(cylinder[:, 1], cylinder[:, 2])

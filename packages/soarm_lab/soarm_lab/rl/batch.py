@@ -21,6 +21,9 @@ Warp silently drops rows beyond the budget. Check peak usage when adding collisi
 
 Perception and gripper speed limits follow the same rules as `env.ArmEnv`.
 
+Each world can scale its block's dimensions, mass, inertia and collision geometry.
+Collision geometry is stored per world only when a size tolerance is enabled.
+
 Set `XLA_PYTHON_CLIENT_PREALLOCATE=false` if JAX's memory reservation leaves too little for Warp.
 """
 
@@ -33,10 +36,11 @@ import jax.numpy as jnp
 import mujoco
 import numpy as np
 
+from .. import blocks
 from .. import sim as sc
 from ..station import Station
 from . import tasks as tk
-from .env import TARGET_SIZE, object_geoms, scene_config
+from .env import SIZE_KEYS, TARGET_SIZE, object_geoms, scene_config, sized_block
 from .jax_policy import devices
 from .randomize import Randomization
 from .tasks.base import sample_start_jax
@@ -45,11 +49,15 @@ from .tasks.base import sample_start_jax
 CONTACTS = {"so101": (48, 288), "a1x": (64, 384)}
 #: Randomized model fields are stored separately for each world.
 FIELDS = ("actuator_gainprm", "actuator_biasprm", "dof_damping", "dof_armature", "dof_frictionloss",
-          "body_mass", "body_inertia", "geom_friction")
+          "body_mass", "body_inertia", "geom_friction", "geom_size", "geom_aabb", "geom_rbound")
 #: `set_const` recomputes these fields separately for each world.
 DERIVED = ("body_invweight0", "dof_invweight0")
 #: Object fields are omitted from randomization when the task has no object.
-CUBE_FIELDS = ("body_mass", "body_inertia", "geom_friction")
+CUBE_FIELDS = ("body_mass", "body_inertia", "geom_friction", "geom_size", "geom_aabb", "geom_rbound")
+#: Geometry fields stored per world when size randomization is enabled.
+SIZE_FIELDS = ("geom_size", "geom_aabb", "geom_rbound")
+#: Integer fields returned by `Randomization.sample`.
+INT_DRAWS = ("delay", "cube_delay", "cube_period")
 #: Physics arrays needed for rewards and observations.
 PHYSICS = ("qpos", "qvel", "site_xpos", "xpos", "xmat", "sensordata")
 #: Reach goals are sampled from a pool built at initialization.
@@ -101,6 +109,8 @@ class BatchEnv:
         #: JAX outputs and Warp physics use corresponding devices.
         self.device, self.wp_device = devices(device)
         self.rand = randomization if randomization is not None else Randomization()
+        #: Block specification for size randomization, or None when disabled.
+        self.block = sized_block(self.task, self.rand)
         # Dynamics use the same host sampler as ArmEnv. Other randomness uses the JAX state key.
         self.np_rng = np.random.default_rng(seed)
 
@@ -114,15 +124,16 @@ class BatchEnv:
 
         cube = self.task.cube is not None
         nconmax, njmax = contact_budget(self.task, spec.name)
+        batched = tuple(k for k in FIELDS if self.block is not None or k not in SIZE_FIELDS)
         with wp.ScopedDevice(self.wp_device):
-            self.m = mjw.put_model(mjm, batch_sizes={k: N for k in (*FIELDS, *DERIVED)})
+            self.m = mjw.put_model(mjm, batch_sizes={k: N for k in (*batched, *DERIVED)})
             if hasattr(self.m.opt, "warn_overflow"):
                 # Suppress repeated warnings when the solver reaches its iteration limit.
                 self.m.opt.warn_overflow = 0
             self.d = mjw.put_data(mjm, scene.data, nworld=N, nconmax=nconmax, njmax=njmax)
 
         # Object fields and sensors are needed only for tasks with an object.
-        self._fields = tuple(k for k in FIELDS if cube or k not in CUBE_FIELDS)
+        self._fields = tuple(k for k in batched if cube or k not in CUBE_FIELDS)
         self._reads = tuple(k for k in PHYSICS if cube or k != "sensordata")
         f32 = np.float32
         self.qadr = np.asarray(self.kin.qadr)
@@ -139,6 +150,7 @@ class BatchEnv:
         if cube:
             b = mjm.body(self.task.cube).id
             self.cube_body, self.cube_geoms = b, object_geoms(mjm, self.task.cube)
+            self.cube_mass = float(mjm.body_mass[b])
             self.yaw_period = float(self.task.block_spec.yaw_period)
             self.cube_qadr = int(mjm.jnt_qposadr[mjm.body_jntadr[b]])
             self.cube_dadr = int(mjm.jnt_dofadr[mjm.body_jntadr[b]])
@@ -186,6 +198,8 @@ class BatchEnv:
             "bias": np.zeros((N, 2), f32),
             # Maximum gripper actuator step for each world [rad per policy tick].
             "grip_rate": np.full(N, np.inf, f32),
+            # Block scale along body axes for each world, shape (N, 3).
+            "size": np.ones((N, 3), f32),
             # JAX owns fields that physics does not modify.
             "ctrl": self._read_one(self.d.ctrl),
             "fields": fields,
@@ -250,10 +264,22 @@ class BatchEnv:
             wp.synchronize_device()
         self._phys = self._read(self._reads)
 
+    def _draws(self) -> dict[str, np.ndarray]:
+        """Sample episode settings for each world and compute scaled geometry in float64 on the host."""
+        smp = self.rand.sample(self.np_rng, self.num_envs)
+        if self.block is None:
+            smp["size"] = np.ones((self.num_envs, 3))
+        else:
+            scale = blocks.scale_from_mm(np, self.block, *(smp[k] for k in SIZE_KEYS))
+            mass = self.cube_mass * smp["cube_mass"] * scale.prod(1)
+            geo = blocks.scaled_geometry(self.block, scale, mass)
+            smp.update(size=scale, block_mass=mass, block_inertia=geo.inertia, block_size=geo.size,
+                       block_rbound=geo.rbound, block_aabb=geo.aabb)
+        return {k: np.asarray(v, np.int32 if k in INT_DRAWS else np.float32) for k, v in smp.items()}
+
     def _reset_worlds(self, done: Array) -> None:
         """Start new episodes where `done` (N,) is true."""
-        smp = {k: np.asarray(v, np.int32 if k in ("delay", "cube_delay", "cube_period") else np.float32)
-               for k, v in self.rand.sample(self.np_rng, self.num_envs).items()}
+        smp = self._draws()
         old = self._read(("qpos", "qvel", "qacc_warmstart"))
         self.s, qpos, qvel, qacc = self._j_restart(self.s, old, done, jax.device_put(smp, self.device))
         wp, d, st = self.wp, self.d, self.s
@@ -318,21 +344,26 @@ class BatchEnv:
                 "seen_pos": jnp.where(upd[:, None], pos, s["seen_pos"]),
                 "seen_rot": jnp.where(upd[:, None, None], rot, s["seen_rot"])}
 
+    def _size(self, s: State) -> Array | None:
+        """Return block scales (N, 3). None preserves nominal arithmetic when size tolerance is disabled."""
+        return s["size"] if self.block is not None else None
+
     def _after(self, s: State, phys: dict[str, Array], action: Array):
         """Return updated state, reward, done flags, and info for the completed tick."""
         tsk = self.task
+        size = self._size(s)
         key, k_cube = jax.random.split(s["key"])
         t = s["t"] + 1
         st = self._state(phys, s["target"])
         carried, kw = s["carried"], {}
         if tsk.target:
-            carried = tk.carry_latch(jnp, tsk, carried, st["jaws"], st["cube_pos"], st["cube_rot"])
+            carried = tk.carry_latch(jnp, tsk, carried, st["jaws"], st["cube_pos"], st["cube_rot"], size)
             kw = dict(target=s["target"], cube_vel=st["cube_vel"], carried=carried,
                       grip_open=tk.grip_is_open(jnp, self.limits, s["q_cmd"]))
         rew, success, failure = tsk.reward(jnp, st["tcp"], action, s["prev_action"], goal=s["goal"],
                                           cube_pos=st.get("cube_pos"), cube_rot=st.get("cube_rot"),
                                           jaw_contacts=st.get("jaws"),
-                                          q_cmd=s["q_cmd"], limits=self.limits, **kw)
+                                          q_cmd=s["q_cmd"], limits=self.limits, size=size, **kw)
         streak, finished = tk.success_streak(jnp, tsk, s["streak"], success)
         s = {**s, "key": key, "t": t, "streak": streak, "carried": carried}
         if tsk.cube:
@@ -351,7 +382,7 @@ class BatchEnv:
         if not tsk.cube:
             info["distance"] = jnp.sqrt(((s["goal"] - st["tcp"]) ** 2).sum(1))
         else:
-            info["height"] = tsk.height(jnp, st["cube_pos"], st["cube_rot"])
+            info["height"] = tsk.height(jnp, st["cube_pos"], st["cube_rot"], size)
         if tsk.target:
             info["dist_target"] = jnp.sqrt(((st["cube_pos"][:, :2] - s["target"][:, :2]) ** 2).sum(1))
             info["carried"] = carried
@@ -384,8 +415,15 @@ class BatchEnv:
         put("dof_frictionloss", (slice(None), dof), nom["dof_frictionloss"][dof] * smp["frictionloss"][:, None])
         if self.task.cube:
             b, g, mass = self.cube_body, self.cube_geoms, smp["cube_mass"]
-            put("body_mass", (slice(None), b), nom["body_mass"][b] * mass)
-            put("body_inertia", (slice(None), b), nom["body_inertia"][b] * mass[:, None])
+            if self.block is None:
+                put("body_mass", (slice(None), b), nom["body_mass"][b] * mass)
+                put("body_inertia", (slice(None), b), nom["body_inertia"][b] * mass[:, None])
+            else:
+                put("body_mass", (slice(None), b), smp["block_mass"])
+                put("body_inertia", (slice(None), b), smp["block_inertia"])
+                put("geom_size", (slice(None), g[0]), smp["block_size"])
+                put("geom_rbound", (slice(None), g[0]), smp["block_rbound"])
+                put("geom_aabb", (slice(None), g[0], 1), smp["block_aabb"])
             put("geom_friction", (slice(None), g, 0), nom["geom_friction"][g, 0] * smp["cube_friction"][:, None])
         return {**s, "fields": f,
                 "delay_n": _sel(done, jnp.clip(smp["delay"], 0, self.Hd - 1), s["delay_n"]),
@@ -393,7 +431,8 @@ class BatchEnv:
                 "cube_p": _sel(done, smp["cube_period"], s["cube_p"]),
                 "bias": _sel(done, jnp.stack([smp["pose_bias_x"], smp["pose_bias_y"]], 1), s["bias"]),
                 "grip_rate": _sel(done, tk.grip_rate(jnp, self.task, self.limits, smp["grip_close_s"]),
-                                  s["grip_rate"])}
+                                  s["grip_rate"]),
+                "size": _sel(done, smp["size"], s["size"])}
 
     def _restart(self, s: State, old: dict[str, Array], done: Array, smp: dict[str, Array]):
         """Return new state, qpos, qvel, and qacc_warmstart with done worlds reset."""
@@ -402,7 +441,7 @@ class BatchEnv:
         key, k_q, k_g, k_r, k_b, k_yaw, k_t = jax.random.split(s["key"], 7)
         q0 = sample_start_jax(jax, tsk, self.limits, self.home, self.lo, self.hi, N, k_q, k_g)
         # Reset keys are ordered as gripper/goal, radius, bearing, yaw, and target.
-        sampled = tsk.sample_reset(jax, N, (k_g, k_r, k_b, k_yaw, k_t), goal_pool=self.goal_pool)
+        sampled = tsk.sample_reset(jax, N, (k_g, k_r, k_b, k_yaw, k_t), goal_pool=self.goal_pool, size=s["size"])
 
         qpos = jnp.broadcast_to(self.qpos0, (N, len(self.qpos0))).at[:, self.qadr].set(q0)
         for k, adr, gain in self.kin.mirror:            # Coupled joints follow the commanded joint.

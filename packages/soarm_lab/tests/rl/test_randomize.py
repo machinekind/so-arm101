@@ -31,9 +31,12 @@ def _base_draws(rng: np.random.Generator, r: Randomization, n: int = 1) -> None:
 
 
 def test_the_pose_and_jaw_options_are_off_by_default():
-    for r in (Randomization(), Randomization.none(), Randomization.nominal()):
+    around = Randomization.around(Dynamics())
+    for r in (Randomization(), Randomization.none(), Randomization.nominal(), around):
         assert (r.pose_bias_m, r.cube_min_delay, r.latch_m, r.grip_close) == (0.0, 0, 0.0, (1.0, 1.0))
-        assert {"pose_bias_m", "cube_min_delay", "latch_m", "grip_close"} <= set(asdict(r))
+        assert r.block_tolerance_mm == 0.0
+        keys = {"pose_bias_m", "cube_min_delay", "latch_m", "grip_close", "block_tolerance_mm"}
+        assert keys <= set(asdict(r))
     assert Dynamics().grip_close_s == 0.0
     none = Randomization.none()
     assert (none.kp, none.cube_friction, none.cube_delay, none.cube_period) == ((1.0, 1.0), (1.0, 1.0), 0, 1)
@@ -43,6 +46,7 @@ def test_the_pose_and_jaw_options_are_off_by_default():
     _base_draws(b, Randomization())
     assert a.bit_generator.state == b.bit_generator.state
     assert [smp[k].tolist() for k in ("pose_bias_x", "pose_bias_y", "grip_close_s")] == [[0.0]] * 3
+    assert [smp[k].tolist() for k in ("size_x", "size_y", "size_z")] == [[0.0]] * 3
     # A fixed closing time consumes no extra random draw.
     nominal = Randomization.nominal(Dynamics(grip_close_s=1.3))
     a, b = np.random.default_rng(0), np.random.default_rng(0)
@@ -77,6 +81,30 @@ def test_sample_draws_the_delay_bias_and_closing_time():
     assert free.sample(a, n)["grip_close_s"].tolist() == [0.0] * n
     _base_draws(b, free, n)
     assert a.bit_generator.state == b.bit_generator.state
+
+
+def test_a_size_tolerance_draws_three_side_changes_per_world_after_the_jaw():
+    """Side changes [mm] follow the existing draws. A zero tolerance consumes no extra random draws."""
+    n = 500
+    sized = replace(Randomization(), block_tolerance_mm=2.0)
+    a, b = np.random.default_rng(4), np.random.default_rng(4)
+    smp = sized.sample(a, n)
+    _base_draws(b, sized, n)
+    for k in ("size_x", "size_y", "size_z"):
+        assert np.array_equal(smp[k], b.uniform(-2.0, 2.0, n)), k
+        assert smp[k].min() >= -2.0 and smp[k].max() <= 2.0 and np.ptp(smp[k]) > 3.5
+    assert a.bit_generator.state == b.bit_generator.state
+    assert not np.array_equal(smp["size_x"], smp["size_y"])
+
+    assert replace(Randomization.none(), block_tolerance_mm=2.0).randomized
+    assert not Randomization.none().randomized
+    off = replace(sized, block_tolerance_mm=0.0)
+    a, b = np.random.default_rng(5), np.random.default_rng(5)
+    assert off.sample(a, 3)["size_z"].tolist() == [0.0] * 3
+    _base_draws(b, off, 3)
+    assert a.bit_generator.state == b.bit_generator.state
+    assert asdict(sized)["block_tolerance_mm"] == 2.0
+    assert "; wymiary klocka +-2.0 mm" in describe(sized) and "wymiary klocka" not in describe(off)
 
 
 def test_around_randomizes_the_measured_closing_time_only():
