@@ -31,6 +31,57 @@ from .randomize import Dynamics, describe, train_plan
 @dataclass
 class RandomizationConfig:
     spread: float = 1.0
+    # Maximum xy pose bias per episode [m]. Zero disables it.
+    pose_bias_m: float = 0.0
+    # Pose delay as [max] or [min, max] [policy ticks]. Null keeps the default range.
+    pose_delay: list[int] | None = None
+    # Maximum pose refresh period [policy ticks]. Null keeps the default.
+    pose_period: int | None = None
+    # Freeze the observed pose within this TCP-to-object distance [m]. Zero disables it.
+    latch_m: float = 0.0
+    # Full gripper closing time [s]. Null uses the station's value. Zero disables the servo speed limit.
+    grip_close_s: float | None = None
+
+    def __post_init__(self) -> None:
+        for key in ("pose_bias_m", "latch_m", "grip_close_s"):
+            value = getattr(self, key)
+            if value is not None and not value >= 0:
+                raise ValueError(f"randomization.{key} must be zero or more, is {value}")
+        if self.pose_delay is not None:
+            if len(self.pose_delay) not in (1, 2):
+                raise ValueError(f"randomization.pose_delay takes [max] or [min, max] ticks, not {self.pose_delay}")
+            lo, hi = self.delay_range
+            if not 0 <= lo <= hi:
+                raise ValueError(f"randomization.pose_delay needs 0 <= min <= max ticks, not {self.pose_delay}")
+        if self.pose_period is not None and self.pose_period < 1:
+            raise ValueError(f"randomization.pose_period needs at least 1 tick, not {self.pose_period}")
+
+    @property
+    def delay_range(self) -> tuple[int, int]:
+        """Return the inclusive pose delay range [policy ticks]. A single value sets the upper bound."""
+        delay = self.pose_delay or [0]
+        return (0, delay[0]) if len(delay) == 1 else (delay[0], delay[1])
+
+    def changes(self) -> dict[str, Any]:
+        """Return explicitly enabled perception overrides for `Randomization`."""
+        out: dict[str, Any] = {}
+        if self.pose_bias_m > 0:
+            out["pose_bias_m"] = self.pose_bias_m
+        if self.pose_delay is not None:
+            out["cube_min_delay"], out["cube_delay"] = self.delay_range
+        if self.pose_period is not None:
+            out["cube_period"] = self.pose_period
+        if self.latch_m > 0:
+            out["latch_m"] = self.latch_m
+        return out
+
+
+def randomization_plan(options: RandomizationConfig, dynamics: dict[str, Any] | None):
+    """Build training and evaluation randomization from station dynamics and overrides."""
+    dyn = Dynamics.from_dict(dynamics)
+    if options.grip_close_s is not None:
+        dyn = replace(dyn, grip_close_s=options.grip_close_s)
+    return train_plan(dyn, options.spread, options.changes())
 
 
 @dataclass
@@ -96,12 +147,12 @@ def mixed_env(task: tasks.LiftConfig, num_envs: int, **kwargs):
 
 
 def execute(a: DictConfig, *, task_selected: bool = False) -> int:
+    options = OmegaConf.to_object(a.randomization)
     st = Station.load(a.station)
     init, task = training_task(a, st.spec(), task_selected=task_selected)
     name = a.name or f"{task.name}-{time.strftime('%Y%m%d-%H%M%S')}"
     out = Path(a.out or policies_dir()) / name
-    dyn = Dynamics.from_dict(st.dynamics)
-    rand, evals = train_plan(dyn, a.randomization.spread)
+    rand, evals = randomization_plan(options, st.dynamics)
     cfg = instantiate(a.ppo, _convert_="object")
     cfg.hidden = tuple(cfg.hidden)
     if init is not None:

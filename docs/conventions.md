@@ -48,6 +48,7 @@ A test module that imports the twin declares `pytestmark = pytest.mark.twin`.
 It calls `pytest.importorskip("machinekind_twin")` before its twin imports, so it skips without the twin.
 The root `conftest.py` skips every test marked `twin` when the twin is not installed.
 It also skips tests marked `render` where MuJoCo cannot open an OpenGL context.
+Exclude CPU trainer tests marked `slow` with `-m "not slow"`.
 
 ```
 uv run pytest -q                       # both packages

@@ -19,6 +19,8 @@ Each physics launch finishes before its results are read.
 For tasks with an object, `CONTACTS` is multiplied by its number of collision parts.
 Warp silently drops rows beyond the budget. Check peak usage when adding collision geometry.
 
+Perception and gripper speed limits follow the same rules as `env.ArmEnv`.
+
 Set `XLA_PYTHON_CLIENT_PREALLOCATE=false` if JAX's memory reservation leaves too little for Warp.
 """
 
@@ -180,6 +182,10 @@ class BatchEnv:
             "cube_p": np.ones(N, np.int32),
             "seen_pos": np.zeros((N, 3), f32),
             "seen_rot": eye.copy(),
+            # Constant xy offset of the observed pose for each world [m].
+            "bias": np.zeros((N, 2), f32),
+            # Maximum gripper actuator step for each world [rad per policy tick].
+            "grip_rate": np.full(N, np.inf, f32),
             # JAX owns fields that physics does not modify.
             "ctrl": self._read_one(self.d.ctrl),
             "fields": fields,
@@ -288,23 +294,26 @@ class BatchEnv:
         executed = hist[(t - delay) % Hd, ar]
         executed = jnp.where((t >= delay)[:, None], executed, 0.0)
         q_cmd = tk.apply_action(jnp, self.task, self.limits, s["q_cmd"], executed)
-        ctrl = s["ctrl"].at[:, self.act].set(q_cmd)
+        # The servo speed limit applies independently of the command rate.
+        g = self.limits.grip
+        grip_act = self.act[g]
+        grip = tk.servo_follow(jnp, s["ctrl"][:, grip_act], q_cmd[:, g], s["grip_rate"])
+        ctrl = s["ctrl"].at[:, self.act].set(q_cmd).at[:, grip_act].set(grip)
         return {**s, "act_hist": hist, "q_cmd": q_cmd, "ctrl": ctrl}, ctrl, action
 
     def _perceive(self, s: State, st: dict[str, Array], key: Array) -> State:
-        """Record the object pose and refresh perception every `cube_p` ticks."""
+        """Refresh the delayed pose every `cube_p` ticks while the object is outside the occlusion radius."""
         H = self.H
         i = (s["hist_i"] + 1) % H
         hist_pos = s["hist_pos"].at[i].set(st["cube_pos"])
         hist_rot = s["hist_rot"].at[i].set(st["cube_rot"])
-        upd = (s["t"] % s["cube_p"]) == 0
+        upd = ((s["t"] % s["cube_p"]) == 0) & ~tk.occluded(jnp, st["tcp"], st["cube_pos"], self.rand.latch_m)
         idx = (i - s["cube_d"]) % H
         ar = jnp.arange(self.num_envs)
         pos, rot = hist_pos[idx, ar], hist_rot[idx, ar]
-        if self.rand.cube_noise > 0:
-            pos = pos.at[:, :2].add(self.rand.cube_noise * jax.random.normal(key, (self.num_envs, 2)))
-        if self.rand.fold_yaw:
-            rot = tk.fold_yaw(jnp, rot, self.yaw_period)
+        n, shape = self.rand.cube_noise, (self.num_envs, 2)
+        noise = n * jax.random.normal(key, shape) if n > 0 else jnp.zeros(shape, pos.dtype)
+        pos, rot = tk.perceived(jnp, pos, rot, s["bias"], noise, self.rand.fold_yaw, self.yaw_period)
         return {**s, "hist_i": i, "hist_pos": hist_pos, "hist_rot": hist_rot,
                 "seen_pos": jnp.where(upd[:, None], pos, s["seen_pos"]),
                 "seen_rot": jnp.where(upd[:, None, None], rot, s["seen_rot"])}
@@ -381,7 +390,10 @@ class BatchEnv:
         return {**s, "fields": f,
                 "delay_n": _sel(done, jnp.clip(smp["delay"], 0, self.Hd - 1), s["delay_n"]),
                 "cube_d": _sel(done, smp["cube_delay"], s["cube_d"]),
-                "cube_p": _sel(done, smp["cube_period"], s["cube_p"])}
+                "cube_p": _sel(done, smp["cube_period"], s["cube_p"]),
+                "bias": _sel(done, jnp.stack([smp["pose_bias_x"], smp["pose_bias_y"]], 1), s["bias"]),
+                "grip_rate": _sel(done, tk.grip_rate(jnp, self.task, self.limits, smp["grip_close_s"]),
+                                  s["grip_rate"])}
 
     def _restart(self, s: State, old: dict[str, Array], done: Array, smp: dict[str, Array]):
         """Return new state, qpos, qvel, and qacc_warmstart with done worlds reset."""
@@ -412,7 +424,9 @@ class BatchEnv:
                            jnp.stack([z0, z0, o1], -1)], -2)
             s["hist_pos"] = _sel_hist(done, p, s["hist_pos"])
             s["hist_rot"] = _sel_hist(done, R, s["hist_rot"])
-            s["seen_pos"] = _sel(done, p, s["seen_pos"])
+            # Reset observations include the pose bias without noise.
+            p_seen, _ = tk.perceived(jnp, p, R, s["bias"], jnp.zeros_like(s["bias"]), False, self.yaw_period)
+            s["seen_pos"] = _sel(done, p_seen, s["seen_pos"])
             s["seen_rot"] = _sel(done, tk.fold_yaw(jnp, R, self.yaw_period) if self.rand.fold_yaw else R,
                                  s["seen_rot"])
             if tsk.target:

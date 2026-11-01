@@ -26,6 +26,8 @@ datasets/
 
 # Station data: trained policies (soarm-lab train)
 workspace/
+# Stations exported into the checkout for a training run; the package's bundled stations are tracked
+/stations/
 
 # Local configuration
 configs/local.yaml

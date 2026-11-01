@@ -1,0 +1,12 @@
+# @package _global_
+defaults:
+  - lift_blocks
+  - _self_
+
+name: lift_late_pose
+randomization:
+  pose_bias_m: 0.03
+  pose_delay: [4, 40]
+  pose_period: 4
+  latch_m: 0.05
+  grip_close_s: 1.3

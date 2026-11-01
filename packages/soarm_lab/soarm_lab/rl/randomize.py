@@ -41,6 +41,8 @@ MAX_BAND = 0.6
 MAX_DELAY_BAND = 2.0
 #: The multiplier parameters that `around` widens by their band.
 MULTIPLIERS = ("kp", "damping", "armature", "frictionloss")
+#: Closing-time multiplier range before `around` scales its width by `spread`.
+GRIP_CLOSE_RANGE = (0.8, 1.25)
 
 
 @dataclass
@@ -53,6 +55,8 @@ class Dynamics:
     frictionloss: float = 1.0       # dry friction
     #: Delay from a command to the servo's motion [policy ticks].
     delay: float = 0.0
+    #: Full gripper closing time [s]. Zero disables the servo speed limit.
+    grip_close_s: float = 0.0
     #: Where these numbers come from: "menagerie" (nominal) or a description of the measurement.
     source: str = "menagerie"
     #: The identification's fit error [deg], if there was one.
@@ -99,18 +103,27 @@ class Randomization:
     obs_noise_deg: float = 0.3
     #: Action delay: drawn from {min_delay .. max_delay} ticks per episode.
     max_delay: int = 1
-    #: The cube as the twin's camera perception gives it, not as physics knows it: the position from
-    #: {0 .. cube_delay} ticks ago, refreshed every {1 .. cube_period} ticks, with noise [m], and the
-    #: rotation folded to +-45 deg (the cube has a 90 deg symmetry). Measured: a policy trained on the
-    #: truth lifted 7 of 20 cubes with a 10 Hz / 150 ms perception.
+    #: Maximum pose delay [policy ticks], sampled per episode from `cube_min_delay` through this value.
     cube_delay: int = 3
+    #: Maximum refresh period [policy ticks], sampled per episode from 1 through this value.
     cube_period: int = 3
+    #: Standard deviation of xy pose noise [m].
     cube_noise: float = 0.002
+    #: Fold observed yaw by the object's symmetry period.
     fold_yaw: bool = True
     #: The centre of the ranges: the nominal from identification, by default the Menagerie model.
     centre: Dynamics = field(default_factory=Dynamics)
     #: The smallest action delay [ticks]; without randomization = max_delay = the measured one.
     min_delay: int = 0
+    #: Maximum constant xy pose bias per episode [m]. Zero disables it without drawing random values.
+    pose_bias_m: float = 0.0
+    #: Minimum pose delay [policy ticks].
+    cube_min_delay: int = 0
+    #: Freeze the observed pose within this true TCP-to-object distance [m].
+    #: Zero disables it.
+    latch_m: float = 0.0
+    #: Closing-time multiplier range, sampled per episode when `centre.grip_close_s` is positive.
+    grip_close: tuple[float, float] = (1.0, 1.0)
 
     @staticmethod
     def none() -> Randomization:
@@ -177,21 +190,26 @@ class Randomization:
             out.min_delay, out.max_delay = 0, hi
         else:
             out.min_delay = out.max_delay = int(round(dyn.delay))
+        if dyn.grip_close_s > 0:
+            out.grip_close = widen(GRIP_CLOSE_RANGE)
         return out
 
     @property
     def randomized(self) -> bool:
         """Whether the dynamics are sampled (and not only set to the centre)."""
-        ranges = (self.kp, self.damping, self.armature, self.frictionloss, self.cube_mass, self.cube_friction)
+        ranges = (self.kp, self.damping, self.armature, self.frictionloss, self.cube_mass, self.cube_friction,
+                  self.grip_close)
         return any(hi > lo for lo, hi in ranges) or self.max_delay > self.min_delay
 
     def sample(self, rng: np.random.Generator, n: int) -> dict[str, np.ndarray]:
-        """Draws for `n` worlds: multipliers, delays and the cube's refresh period [ticks].
+        """Sample dynamics and perception settings as arrays of shape (n,).
 
-        The arm's dynamics multipliers are already multiplied by the centre.
+        Delays and refresh periods use policy ticks. `pose_bias_x` and `pose_bias_y` use metres.
+        Arm multipliers and `grip_close_s` [s] include the centre values.
+        Disabled pose bias and a fixed closing time consume no extra random draws.
         """
         c = self.centre
-        return {
+        out = {
             "kp": c.kp * rng.uniform(*self.kp, n),
             "damping": c.damping * rng.uniform(*self.damping, n),
             "armature": c.armature * rng.uniform(*self.armature, n),
@@ -199,14 +217,28 @@ class Randomization:
             "cube_mass": rng.uniform(*self.cube_mass, n),
             "cube_friction": rng.uniform(*self.cube_friction, n),
             "delay": rng.integers(min(self.min_delay, self.max_delay), self.max_delay + 1, n),
-            "cube_delay": rng.integers(0, self.cube_delay + 1, n),
+            "cube_delay": rng.integers(min(self.cube_min_delay, self.cube_delay), self.cube_delay + 1, n),
             "cube_period": rng.integers(1, max(1, self.cube_period) + 1, n),
         }
+        if self.pose_bias_m > 0:
+            r = rng.uniform(0.0, self.pose_bias_m, n)
+            a = rng.uniform(-np.pi, np.pi, n)
+            out["pose_bias_x"], out["pose_bias_y"] = r * np.cos(a), r * np.sin(a)
+        else:
+            out["pose_bias_x"], out["pose_bias_y"] = np.zeros(n), np.zeros(n)
+        lo, hi = self.grip_close
+        mult = rng.uniform(lo, hi, n) if c.grip_close_s > 0 and hi > lo else np.full(n, lo)
+        out["grip_close_s"] = c.grip_close_s * mult
+        return out
 
 
-def train_plan(dyn: Dynamics, spread: float):
-    """Use measured dynamics and evaluate nominally, plus randomly when spread is positive."""
-    rand = Randomization.around(dyn, spread)
+def train_plan(dyn: Dynamics, spread: float, changes: dict[str, Any] | None = None):
+    """Build training randomization and nominal evaluation from measured dynamics.
+
+    `changes` overrides training fields. Randomized evaluation shares the training settings
+    when any dynamics range varies.
+    """
+    rand = replace(Randomization.around(dyn, spread), **(changes or {}))
     evals = [("bez randomizacji", "cpu_nominal", Randomization.nominal(dyn))]
     if rand.randomized:
         evals.append(("z randomizacja", "cpu_rand", rand))
@@ -217,6 +249,12 @@ def describe(rand: Randomization) -> str:
     """Describe the dynamics, randomization and cube perception for CLI output."""
     c = rand.centre
     delay = f"{rand.min_delay}" if rand.min_delay == rand.max_delay else f"{rand.min_delay}-{rand.max_delay}"
-    return (f"dynamika: {c.source} (kp x{c.kp:.2f}, tlumienie x{c.damping:.2f}, opoznienie {delay} takt.); "
-            f"randomizacja: {'tak' if rand.randomized else 'brak'}; "
-            f"percepcja kostki: {'jak z kamer' if rand.fold_yaw or rand.cube_delay else 'idealna'}")
+    jaw = f", zamykanie chwytaka {c.grip_close_s:.2f} s" if c.grip_close_s > 0 else ""
+    seen = f", przesuniecie do {rand.pose_bias_m * 100:.0f} cm" if rand.pose_bias_m > 0 else ""
+    lo, period = min(rand.cube_min_delay, rand.cube_delay), max(1, rand.cube_period)
+    seen += f", opoznienie pozy {lo}-{rand.cube_delay} takt., odswiezanie co 1-{period} takt."
+    if rand.latch_m > 0:
+        seen += f", zatrzask pod dlonia < {rand.latch_m * 100:.0f} cm"
+    return (f"dynamika: {c.source} (kp x{c.kp:.2f}, tlumienie x{c.damping:.2f}, opoznienie {delay} takt."
+            f"{jaw}); randomizacja: {'tak' if rand.randomized else 'brak'}; "
+            f"percepcja kostki: {'jak z kamer' if rand.fold_yaw or rand.cube_delay else 'idealna'}{seen}")

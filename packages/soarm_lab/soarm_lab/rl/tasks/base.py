@@ -140,6 +140,38 @@ def fold_yaw(xp, R, period):
     return xp.stack(rows, -2)
 
 
+def perceived(xp, pos, rot, bias, noise, fold: bool, period: float):
+    """Apply perception errors to a delayed pose, returning position (N, 3) and rotation (N, 3, 3).
+
+    `bias` and `noise` have shape (N, 2) and use metres. The z coordinate stays unchanged.
+    `fold` folds yaw by `period` [rad].
+    """
+    xy = pos[..., :2] + bias + noise
+    return _cat(xp, [xy, pos[..., 2:]]), (fold_yaw(xp, rot, period) if fold else rot)
+
+
+def occluded(xp, tcp, cube_pos, latch_m: float):
+    """Return an (N,) occlusion mask within `latch_m` [m] of the true TCP. Nonpositive values disable it."""
+    if latch_m <= 0:
+        return xp.zeros(tcp.shape[:-1], dtype=bool)
+    return _norm(tcp - cube_pos) < latch_m
+
+
+def grip_rate(xp, task: TaskBase, limits: Limits, close_s):
+    """Return maximum gripper steps (N,) [rad per policy tick] for full closing times `close_s` [s].
+
+    Nonpositive closing times give an infinite speed limit.
+    """
+    g = limits.grip
+    span = float(limits.hi[g] - limits.lo[g])
+    return xp.where(close_s > 0, span / (xp.maximum(close_s, 1e-9) * task.control_hz), xp.inf)
+
+
+def servo_follow(xp, ctrl, target, rate):
+    """Move `ctrl` toward `target` by at most `rate` [rad]. An infinite rate gives `target` exactly."""
+    return _clip(xp, target, ctrl - rate, ctrl + rate)
+
+
 def limit_cost(xp, task: TaskBase, limits: Limits, q_cmd):
     na = limits.n_arm
     lo, hi = _as(xp, limits.lo[:na], q_cmd), _as(xp, limits.hi[:na], q_cmd)
