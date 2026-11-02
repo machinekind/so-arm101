@@ -164,7 +164,7 @@ def test_lift_success_needs_a_fresh_cube_and_a_holding_jaw():
     s = strategy("lift", {5: -1.0})                     # the gripper closes, the arm stays
     held = dict(SPEC.home, gripper=25.0)                  # the jaw blocked on the cube
     s.start(run_info(), obs(held))
-    lifted = [0.2, 0.0, s.task.cube_half + s.task.lift_height + 0.02]
+    lifted = [0.2, 0.0, s.task.block_spec.half_size[2] + s.task.lift_height + 0.02]
     for k in range(10):
         s.act(obs(held, t=0.05 * k, objects=cube(lifted, "ostatnie widziane")))
     assert not s.status.success                          # a stale pose
@@ -199,7 +199,7 @@ def lift_success(s: PolicyStrategy, objects: dict[str, ObjectPose], ticks: int =
 def test_lift_success_needs_a_young_cube_pose():
     """A pose older than `max_pose_age_s` never counts, whatever its source says."""
     s = strategy("lift", {5: -1.0})
-    lifted = [0.2, 0.0, s.task.cube_half + s.task.lift_height + 0.02]
+    lifted = [0.2, 0.0, s.task.block_spec.half_size[2] + s.task.lift_height + 0.02]
     assert s.config.max_pose_age_s == 1.0
     # The default keeps today's camera path: the twin says "kamery" only up to 1 s after capture.
     assert lift_success(s, cube(lifted, "kamery", age_s=0.66))
@@ -215,7 +215,7 @@ def test_lift_success_needs_a_young_cube_pose():
 def test_lift_success_from_last_seen_only_when_the_operator_allows_it():
     """A slow detector (a language model) publishes "ostatnie widziane"; it counts only when allowed."""
     s = strategy("lift", {5: -1.0})
-    lifted = [0.2, 0.0, s.task.cube_half + s.task.lift_height + 0.02]
+    lifted = [0.2, 0.0, s.task.block_spec.half_size[2] + s.task.lift_height + 0.02]
     assert not s.config.allow_last_seen
     assert not lift_success(s, cube(lifted, "ostatnie widziane", age_s=0.1))
     s = strategy("lift", {5: -1.0}, allow_last_seen=True, max_pose_age_s=15.0)
@@ -241,3 +241,91 @@ def test_the_run_ends_after_a_training_episode():
     assert s.status.stopped_because == "koniec epizodu"
     s.stop("przerwana: STOP z panelu")
     assert s.status.stopped_because == "przerwana: STOP z panelu"
+
+
+VARIANTS = ("cube", "cuboid", "cylinder")
+
+
+def block_policy(own: str = "cuboid", action: dict[int, float] | None = None) -> Policy:
+    """Build a constant lift policy with variants and yaw folding enabled."""
+    pol = constant_policy(tk.make_task("lift", variants=VARIANTS, block=own), action)
+    pol.meta.randomization = {"fold_yaw": True}
+    return pol
+
+
+def seen(label: str, position, yaw_deg: float = 0.0, rotation=None, source: str = "kamery"):
+    """Return an object pose under `label`, using `rotation` or a yaw angle [deg]."""
+    c, s_ = np.cos(np.radians(yaw_deg)), np.sin(np.radians(yaw_deg))
+    R = np.array([[c, -s_, 0.0], [s_, c, 0.0], [0.0, 0.0, 1.0]]) if rotation is None else rotation
+    return {label: ObjectPose(position=np.asarray(position, float), rotation=R, source=source)}
+
+
+def test_a_policy_with_variants_sees_its_block_appended():
+    """The saved variant's descriptor follows the lift observation."""
+    s = PolicyStrategy(policy=block_policy("cuboid"))
+    s.start(run_info(), obs(dict(SPEC.home)))
+    vec = s.observation(dict(SPEC.home), seen("cube", [0.2, 0.05, 0.0125]))
+    assert vec.shape == (tk.OBS_DIMS["lift"] + 6,) == (39,) and vec.dtype == np.float32
+    np.testing.assert_array_equal(vec[33:], s.task.descriptor())
+    plain = PolicyStrategy(policy=constant_policy(tk.make_task("lift")))
+    plain.start(run_info(), obs(dict(SPEC.home)))
+    want = plain.observation(dict(SPEC.home), seen("cube", [0.2, 0.05, 0.0125]))
+    np.testing.assert_allclose(vec[:33], want)
+
+
+def test_the_settings_object_name_overrides_the_policys_own():
+    """Selecting an object updates its pose source, descriptor, and yaw symmetry."""
+    s = PolicyStrategy(PolicySettings(object_name="cylinder"), policy=block_policy("cuboid"))
+    assert s.task.block == "cylinder" and s.policy.task.block == "cuboid"
+    s.start(run_info(), obs(dict(SPEC.home)))
+    both = {**seen("cube", [0.25, 0.0, 0.0125]), **seen("cylinder", [0.2, 0.05, 0.0125], yaw_deg=100.0)}
+    vec = s.observation(dict(SPEC.home), both)
+    np.testing.assert_array_equal(vec[33:], s.task.descriptor())
+    np.testing.assert_allclose(vec[15:18], [0.2, 0.05, 0.0125])
+    # Cylinder yaw folds into [-90, 90) degrees.
+    np.testing.assert_allclose(vec[21:23], [np.cos(np.radians(-80.0)), np.sin(np.radians(-80.0))], atol=1e-6)
+    # Missing named poses fall back to the cube entry.
+    vec = s.observation(dict(SPEC.home), seen("cube", [0.25, 0.0, 0.0125]))
+    np.testing.assert_allclose(vec[15:18], [0.25, 0.0, 0.0125])
+    with pytest.raises(ValueError, match="'pyramid' is not one of the policy's variants"):
+        PolicyStrategy(PolicySettings(object_name="pyramid"), policy=block_policy())
+    with pytest.raises(ValueError, match="needs a task with an object"):
+        PolicyStrategy(PolicySettings(object_name="cube"), policy=constant_policy(tk.make_task("reach")))
+
+
+def test_a_policy_without_variants_may_read_any_entry():
+    """An unconditioned policy reads the named pose with its saved task geometry."""
+    s = PolicyStrategy(PolicySettings(object_name="red block"), policy=constant_policy(tk.make_task("lift")))
+    assert s.task == s.policy.task
+    s.start(run_info(), obs(dict(SPEC.home)))
+    both = {**seen("cube", [0.25, 0.0, 0.015]), **seen("red block", [0.2, 0.05, 0.015])}
+    vec = s.observation(dict(SPEC.home), both)
+    assert vec.shape == (33,)
+    np.testing.assert_allclose(vec[15:18], [0.2, 0.05, 0.015])
+
+
+def test_by_default_it_reads_the_policys_own_block():
+    s = PolicyStrategy(policy=block_policy("cuboid"))
+    s.start(run_info(), obs(dict(SPEC.home)))
+    both = {**seen("cube", [0.25, 0.0, 0.0125]), **seen("cuboid", [0.2, 0.05, 0.0125])}
+    np.testing.assert_allclose(s.observation(dict(SPEC.home), both)[15:18], [0.2, 0.05, 0.0125])
+
+
+def test_lift_success_counts_the_blocks_lowest_point():
+    """Standing the cuboid on end lowers its bottom below the lift threshold."""
+    s = PolicyStrategy(PolicySettings(object_name="cuboid"), policy=block_policy("cube", {5: -1.0}))
+    centre = [0.2, 0.0, 0.08]
+    standing = np.array([[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]])  # Body x is vertical.
+    assert lift_success(s, seen("cuboid", centre))
+    assert not lift_success(s, seen("cuboid", centre, rotation=standing))
+    assert "5.0 cm nad blatem" in s._note()
+
+
+def test_lift_success_counts_a_tilted_cubes_lowest_point():
+    """Tilting a cube lowers its corner below the lift threshold."""
+    s = strategy("lift", {5: -1.0})
+    tilt = np.array([[1.0, 0.0, 0.0], [0.0, np.sqrt(0.5), -np.sqrt(0.5)], [0.0, np.sqrt(0.5), np.sqrt(0.5)]])
+    centre = [0.2, 0.0, 0.015 + s.task.lift_height + 0.002]
+    assert lift_success(s, cube(centre, "kamery"))
+    tilted = {"cube": ObjectPose(position=np.asarray(centre), rotation=tilt, source="kamery")}
+    assert not lift_success(s, tilted)

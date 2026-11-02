@@ -1,9 +1,14 @@
 SO-101 robot model and meshes
 
 soarm/robot/so101.xml and all 19 STL meshes in soarm/robot/assets/ are
-copied without modification from MuJoCo Menagerie, robotstudio_so101,
+copied from MuJoCo Menagerie, robotstudio_so101,
 commit ac6b2b09983786f3036cab1000221017fa2193b4:
 https://github.com/google-deepmind/mujoco_menagerie/tree/ac6b2b09983786f3036cab1000221017fa2193b4/robotstudio_so101
+
+The meshes are unmodified. Machinekind modified so101.xml: the solver runs
+20 iterations (was 10) and 50 line search iterations (was 20), and the
+gripper's contact geoms use solimp 0.9 0.995 0.001 (was MuJoCo's default).
+The file carries a notice of the change.
 
 The upstream README credits The Robot Studio SO101 robot and includes
 the attribution "developed by I2RT Robotics".

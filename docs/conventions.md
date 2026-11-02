@@ -25,7 +25,7 @@ Running a policy needs no jax, torch, hydra or omegaconf.
 The strategies, the policy file, evaluation and the `soarm-lab` commands other than `train` and `convert`
 import numpy, never jax, optax or torch.
 Training needs the optional extra `soarm-lab[train]`: PPO in JAX and optax on MuJoCo Warp, with the CUDA 12
-build of jax on Linux. Only the trainer's modules import jax themselves: `rl.ppo`, `rl.jax_policy` and `rl.batch`.
+build of jax on Linux. Only `rl.ppo`, `rl.jax_policy`, `rl.batch` and `rl.mixed` import jax directly.
 `rl.experiment` imports Hydra and OmegaConf only on the `train` command path.
 `rl.tasks.base`, `rl.tasks.reach`, `rl.tasks.lift` and `rl.tasks.pickplace` define the tasks with NumPy.
 torch is the optional extra `soarm-lab[torch]`, only for `soarm-lab convert`, which turns a checkpoint of

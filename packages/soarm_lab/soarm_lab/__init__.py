@@ -1,20 +1,11 @@
-"""SO-101 training: RL tasks, CPU and GPU environments, PPO, the policies and their strategy for the twin.
+"""Simulation, training, and policy strategies for the SO-101.
 
-* `station`: a measured station as the twin exports it (`twin export <folder>`), read with
-  plain `mujoco`; `stations/sim` is bundled.
-* `robot`, `kinematics`: the SO-101 description from `soarm` and its kinematics (degrees <-> MJCF).
-* `sim`: the compiled station scene with the task's objects.
-* `rl`: tasks, the Gymnasium environment (CPU), the MuJoCo Warp batch (GPU), PPO, policies, evaluation,
-  domain randomization. `policies/` holds the base policies `reach-v3` and `lift-v3` as `policy.npz`.
-* `strategies`: the lab's strategies for the twin, one module per approach; `strategies.policy` runs a
-  policy (entry point `machinekind_twin.strategies`: `policy`).
-* `cli`: the `soarm-lab` command (`train`, `eval`, `policies`, `convert`).
+`station` reads exported twin stations. `sim` builds scenes with task objects.
+`robot` and `kinematics` provide the arm model and coordinate conversions.
+`blocks` provides named geometry catalogs. `rl` provides tasks, environments, PPO, and evaluation.
+`strategies` implements the twin's strategy API. `cli` exposes the `soarm-lab` commands.
 
-Running a policy needs numpy only. Training needs the extra `soarm-lab[train]`: PPO in JAX and optax
-(`rl.ppo`, `rl.jax_policy`) on MuJoCo Warp (`rl.batch`). torch is the optional extra `soarm-lab[torch]`,
-only for the converter of old torch checkpoints (`rl.torch_policy`).
-
-Nothing here imports the twin (`machinekind_twin`). The twin hands the station over as data and runs the
-strategy through its own `StrategyRunner`. The strategy follows the twin's plugin contracts,
-`machinekind_twin_api.strategy`.
+Policy inference uses NumPy. Training requires the `soarm-lab[train]` extra.
+The `soarm-lab[torch]` extra converts older PyTorch checkpoints.
+The package depends on the twin's plugin API and receives station data from the twin.
 """

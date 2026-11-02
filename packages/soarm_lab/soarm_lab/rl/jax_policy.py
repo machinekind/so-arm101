@@ -116,6 +116,25 @@ def mlp(layers: JaxLayers, x: jax.Array) -> jax.Array:
     return x
 
 
+def widen_inputs(layers: JaxLayers, n_in: int) -> JaxLayers:
+    """Extend the first layer to `n_in` inputs with appended zero-weight columns."""
+    (weight, bias), rest = layers[0], layers[1:]
+    extra = n_in - weight.shape[1]
+    if extra < 0:
+        raise ValueError(f"the layers take {weight.shape[1]} inputs, more than {n_in}")
+    weight = jnp.concatenate([weight, jnp.zeros((weight.shape[0], extra), weight.dtype)], axis=1)
+    return [(weight, bias), *rest]
+
+
+def widen_norm(norm: Norm, dim: int) -> Norm:
+    """Extend normalization to `dim` inputs with appended mean-0, variance-1 entries."""
+    extra = dim - norm.mean.shape[0]
+    if extra < 0:
+        raise ValueError(f"the normalizer has {norm.mean.shape[0]} entries, more than {dim}")
+    return Norm(jnp.concatenate([norm.mean, jnp.zeros(extra, norm.mean.dtype)]),
+                jnp.concatenate([norm.var, jnp.ones(extra, norm.var.dtype)]), norm.count, norm.clip)
+
+
 def to_policy(meta: PolicyMeta, norm: Norm, actor: JaxLayers, critic: JaxLayers | None = None) -> Policy:
     """The numpy policy with these weights (sharing `meta`), and the critic's if given."""
     pol = Policy(meta)

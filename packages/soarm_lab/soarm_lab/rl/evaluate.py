@@ -12,14 +12,18 @@ from typing import Any
 import numpy as np
 
 from ..station import Station
+from . import tasks as tk
 from .env import ArmEnv
 from .policy import Policy
 from .randomize import Dynamics, Randomization
 
 
 def evaluate(policy: Policy, episodes: int = 50, *, randomization: Randomization | None = None,
-             station: Station | None = None, seed: int = 10_000, on_frame=None) -> dict[str, Any]:
+             station: Station | None = None, seed: int = 10_000, on_frame=None,
+             variant: str | None = None) -> dict[str, Any]:
     """Success rates and median end distance or height of `policy` over `episodes` CPU episodes.
+
+    `variant` selects a task variant for evaluation.
 
     `randomization=None` is the nominal arm: the dynamics from `station.dynamics` (identification)
     without spread, so "CPU without randomization" tells about the measured arm, not the Menagerie
@@ -30,6 +34,10 @@ def evaluate(policy: Policy, episodes: int = 50, *, randomization: Randomization
     if policy.meta.robot != spec.name:
         raise RuntimeError(f"polityka uczona na {policy.meta.robot}, stanowisko ma {spec.name}")
     task = policy.task
+    if variant is not None:
+        if not isinstance(task, tk.LiftConfig):
+            raise ValueError(f"the task {task.name} has no variants")
+        task = task.with_variant(variant)
     rand = randomization if randomization is not None else \
         Randomization.nominal(Dynamics.from_dict(station.dynamics) if station is not None else None)
     env = ArmEnv(task, station=station, randomization=rand, render_mode="rgb_array" if on_frame else None)
@@ -58,4 +66,6 @@ def evaluate(policy: Policy, episodes: int = 50, *, randomization: Randomization
     out[key] = float(np.median(final) * 1000)
     if place:                                          # pickplace: cube to target (xy) at the episode's end
         out["final_place_mm"] = float(np.median(place) * 1000)
+    if variant is not None:
+        out["variant"] = variant
     return out

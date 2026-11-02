@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import fields, replace
 from typing import Any
 
+from ...blocks import block
 from ...robot import RobotSpec
 from .base import (
     Limits,
@@ -35,13 +36,29 @@ def make_task(name: str = "reach", spec: RobotSpec | None = None, **overrides) -
     return replace(base, **{k: tuple(v) if isinstance(v, list) else v for k, v in overrides.items()})
 
 
+def _stored_cube(data: dict[str, Any]) -> dict[str, str]:
+    """Map legacy cube dimensions and mass to the default block, rejecting unmatched values."""
+    spec = block(LiftConfig().block)
+    want = {"cube_half": spec.half_size[2], "cube_mass": spec.mass}
+    stored = {k: data[k] for k in want if k in data}
+    if not stored:
+        return {}
+    if any(value != want[k] for k, value in stored.items()):
+        raise ValueError(f"the stored task has {stored}, which is not the block {spec.name} ({want}); "
+                         "there is no block to load it as")
+    return {"block": spec.name}
+
+
 def task_from_dict(data: dict[str, Any]) -> TaskConfig:
     """Load owned fields and fill missing ones from the task factory."""
     name = data.get("name")
     if name not in _CONFIGS:
         raise ValueError(f"unknown task name: {name!r}")
     owned = {f.name for f in fields(_CONFIGS[name])} - {"name"}
-    return make_task(name, **{k: v for k, v in data.items() if k in owned})
+    kept = {k: v for k, v in data.items() if k in owned}
+    if "block" in owned and "block" not in data:
+        kept.update(_stored_cube(data))
+    return make_task(name, **kept)
 
 
 OBS_DIMS = {name: make_task(name).obs_dim for name in TASKS}

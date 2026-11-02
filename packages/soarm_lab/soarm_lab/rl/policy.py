@@ -76,8 +76,7 @@ class PolicyMeta:
     iterations: int = 0
     success: float = float("nan")
     randomization: dict[str, Any] = field(default_factory=dict)
-    #: Evaluation results by key: "gpu" (the trainer's own, `ppo`), "cpu_nominal" and "cpu_rand"
-    #: (`soarm-lab train` evaluates on the CPU after training).
+    #: Evaluations use "gpu", "cpu_nominal", "cpu_rand", or per-variant keys from `variant_key`.
     evals: dict[str, Any] = field(default_factory=dict)
     notes: str = ""
     #: The arm the policy was trained on (`RobotSpec.name`). A `meta.json` without it is an SO-101's.
@@ -85,6 +84,11 @@ class PolicyMeta:
 
     def task_config(self) -> tk.TaskConfig:
         return tk.task_from_dict(self.task)
+
+
+def variant_key(key: str, variant: str) -> str:
+    """Return a per-variant evaluation key such as `cpu_<variant>` or `cpu_rand_<variant>`."""
+    return f"cpu_{variant}" if key == "cpu_nominal" else f"{key}_{variant}"
 
 
 class TorchCheckpoint(ValueError):
@@ -224,7 +228,8 @@ def list_policies(root: str | Path = DEFAULT_DIR) -> list[dict[str, Any]]:
                 out[meta_path.parent.name] = {
                     "path": str(weights), "name": meta_path.parent.name, "task": meta["task"]["name"],
                     "success": meta.get("success"), "created": meta.get("created", ""),
-                    "steps": meta.get("steps", 0), "evals": meta.get("evals", {}), "bundled": bundled}
+                    "steps": meta.get("steps", 0), "evals": meta.get("evals", {}), "bundled": bundled,
+                    "variants": meta["task"].get("variants", [])}
     return sorted(out.values(), key=lambda m: m["created"], reverse=True)
 
 

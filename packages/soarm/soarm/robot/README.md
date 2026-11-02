@@ -7,9 +7,12 @@ joint names, limits, the home pose and gripper mapping.
 The MJCF and meshes come from
 [MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie/tree/ac6b2b09983786f3036cab1000221017fa2193b4/robotstudio_so101)
 (commit `ac6b2b0`), under the original
-[Apache-2.0 license](LICENSE). `so101.xml` and all 19 meshes in `assets/` are
-unchanged from that commit. The upstream README includes the attribution
-"developed by I2RT Robotics".
+[Apache-2.0 license](LICENSE). All 19 meshes in `assets/` are unchanged from
+that commit. Machinekind modified `so101.xml` from the Menagerie original.
+Solver iterations increased from 10 to 20, and line search iterations from 20
+to 50. The gripper's contact geoms use `solimp="0.9 0.995 0.001"`.
+These settings limit jaw penetration and help the solver converge on stiff
+contacts. The upstream README includes the attribution "developed by I2RT Robotics".
 
 Menagerie derives the model from
 [TheRobotStudio's SO-101 simulation](https://github.com/TheRobotStudio/SO-ARM100/tree/aec17bbc256d1a7342d53aaa4950595d4c30b40d/Simulation/SO101),

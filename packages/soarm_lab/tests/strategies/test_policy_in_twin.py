@@ -55,9 +55,9 @@ def drive(twin: Twin, runner: StrategyRunner, seconds: float) -> None:
 
 
 def add_cube(twin: Twin, task) -> None:
-    h = task.cube_half
-    twin.configure(objects=[twin_scene.Box("cube", (h, h, h), (0.2, 0.0), rgba=(0.85, 0.25, 0.2, 1.0),
-                                           mass=task.cube_mass)], grasp_sensors=["cube"])
+    spec = task.block_spec
+    cube = twin_scene.Box("cube", spec.half_size, (0.2, 0.0), rgba=(0.85, 0.25, 0.2, 1.0), mass=spec.mass)
+    twin.configure(objects=[cube], grasp_sensors=["cube"])
 
 
 def sim_cube(twin: Twin) -> dict[str, ObjectPose]:
@@ -89,8 +89,9 @@ def test_its_settings_become_the_panel_form():
     fields = {field.name: field for field in load_strategy(NAME).fields}
 
     assert list(fields) == ["policy", "max_tracking_deg", "episode_limit", "wait_for_cube_s",
-                            "max_pose_age_s", "allow_last_seen", "goal_x", "goal_y", "goal_z"]
+                            "max_pose_age_s", "allow_last_seen", "goal_x", "goal_y", "goal_z", "object_name"]
     assert fields["policy"].kind is str and fields["policy"].default == "reach-v3"
+    assert fields["object_name"].kind is str and fields["object_name"].default == ""
     assert fields["episode_limit"].kind is bool and fields["episode_limit"].default is True
     floats = ("max_tracking_deg", "wait_for_cube_s", "max_pose_age_s", "goal_x")
     assert all(fields[name].kind is float for name in floats)
@@ -180,7 +181,7 @@ def test_lift_v3_lifts_the_simulated_cube(twin):
 
     cube = sim_cube(twin)["cube"].position
     assert runner.status.stopped_because == "zadanie wykonane", (runner.status, strategy.status)
-    assert cube[2] - strategy.task.cube_half > strategy.task.lift_height
+    assert cube[2] - strategy.task.block_spec.half_size[2] > strategy.task.lift_height
     assert twin.owner is None
 
 

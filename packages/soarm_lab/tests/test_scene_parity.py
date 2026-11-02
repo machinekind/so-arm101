@@ -32,3 +32,8 @@ def test_the_scene_matches_the_one_the_twin_builds(twin_robots):
         assert getattr(lab_model, name) == pytest.approx(getattr(twin_model, name), abs=1e-5), name
     for option in ("timestep", "integrator", "cone", "impratio", "iterations", "ls_iterations"):
         assert getattr(lab_model.opt, option) == getattr(twin_model.opt, option), option
+    # Both scenes must preserve the robot description's arm contact settings.
+    bodies = lab_model.geom_bodyid
+    arm = [g for g in range(lab_model.ngeom) if lab_model.body(bodies[g]).name.startswith("robot/")]
+    for name in ("geom_priority", "geom_condim", "geom_solref", "geom_solimp"):
+        assert getattr(lab_model, name)[arm] == pytest.approx(getattr(twin_model, name)[arm]), name

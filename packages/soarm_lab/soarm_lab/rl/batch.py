@@ -1,65 +1,25 @@
-"""The GPU batch environment: thousands of MuJoCo Warp worlds, observations as JAX arrays.
+"""MuJoCo Warp environments with JAX observations on `env.device`.
 
     env = BatchEnv("reach", num_envs=4096)
-    obs = env.reset()                                  # (N, obs_dim) on the GPU
-    obs, rew, done, info = env.step(actions)           # actions (N, act_dim) in [-1, 1]
+    obs = env.reset()                         # (N, obs_dim)
+    obs, rew, done, info = env.step(actions)   # actions (N, act_dim) in [-1, 1]
 
-The same scene and the same formulas (`tasks`) as `env.ArmEnv` on the CPU; the only difference is
-where the physics runs. On an RTX A4500 the cube scene did about 1.1 million physics steps per
-second with 8192 worlds (measured with the torch version of this module; the physics is the same).
-One world stepped with zero actions follows CPU MuJoCo within 0.00001 deg per joint over 40 ticks
-(2 s) on Warp's CPU device (float32 against float64); the torch version measured 0.001 deg after 2 s
-on an RTX A4500. `tests/rl/test_batch.py` holds both devices to 0.01 deg.
+Requires the `soarm-lab[train]` extra. `device="cpu"` runs physics on Warp's CPU device.
+The scene and task formulas are shared with `env.ArmEnv`.
 
-The convention follows legged_gym / rsl_rl: environments reset themselves, `done` marks the end of an
-episode in this step, and the returned observation already belongs to the new episode.
-`info["time_outs"]` says which worlds ended on the time limit or on a success streak
-(`task.end_on_success`, then `info["finished"]` too): PPO bootstraps them with the state value
-instead of zero.
+Worlds reset inside `step`. A true `done` marks the episode that just ended.
+The returned observation belongs to the new episode. `info["time_outs"]` marks time limits
+and success streaks for value bootstrapping. `info["finished"]` marks success streaks.
 
-This is the environment of the JAX trainer (`ppo`): it needs the `soarm-lab[train]` extra (jax,
-mujoco-warp), no torch. Everything it returns is a plain JAX array on `env.device`.
+Physics arrays are copied into JAX so later physics steps cannot overwrite them.
+Writes copy whole arrays back into Warp. Each write waits for JAX readers and writers.
+Each physics launch finishes before its results are read.
 
-JAX and Warp meet through DLPack. The physics state lives in Warp arrays (`env.d`, `env.m`). It is
-read into JAX as COPIES (a zero-copy `jax.dlpack.from_dlpack` view, copied at once): an aliasing view would be
-overwritten by the next physics launch, and JAX's jit may hand an input straight back as an output.
-That is N x a few hundred floats per step, nothing next to the physics. Writes go the other way as
-WHOLE arrays: the complete new `qpos` (`jnp.where(done, new, old)`), `qvel`, `ctrl` and so on, wrapped
-by `wp.from_dlpack` and copied with `wp.copy`, so there are no scatter kernels. The model fields of
-the randomization are written the same way. What physics never changes (`ctrl`, `mocap_pos`, the
-model fields) is kept in JAX in the env's state and never read back.
+`contact_budget` returns per-world limits for contacts (`nconmax`) and constraint rows (`njmax`).
+For tasks with an object, `CONTACTS` is multiplied by its number of collision parts.
+Warp silently drops rows beyond the budget. Check peak usage when adding collision geometry.
 
-Synchronization is explicit, as it was with torch: the JAX arrays a launch reads or overwrites are
-waited for (`jax.block_until_ready`) before the copies into Warp, and Warp's device is synchronized
-after the physics (two synchronizations per policy step, negligible next to tens of milliseconds of
-physics). `wp.from_dlpack` passes JAX the Warp stream to wait on, so DLPack alone should order the
-copies on the GPU; the explicit wait does not depend on that, and it holds on the CPU device too,
-where JAX's dispatch is asynchronous as well.
-
-The physics is one captured CUDA graph of `substeps` steps plus the kinematics. On `device="cpu"`
-the same steps run as a plain loop on Warp's CPU device, without a graph: mujoco_warp runs there
-(about 3 ms per physics step for 4 worlds on an M-series Mac; the first run compiles the kernels,
-~20 s, then Warp caches them). It is for tests and debugging, not for training.
-
-Memory: JAX preallocates 75 % of the GPU's memory when its backend starts, and Warp's worlds live
-in the rest. If `put_data` runs out of memory, start with `XLA_PYTHON_CLIENT_PREALLOCATE=false`.
-
-The per-step computation is three jitted pure functions over the env's state (a dict of JAX
-arrays, with the random key): `_act` (the action delay ring buffer, `tasks.apply_action`, the
-control), `_after` (the state from the physics arrays, reward, success streak, cube perception,
-the broken-world guard, done) and `_observe`; the reset of the done worlds is a fourth one
-(`_restart`), run only in steps where some world ended. The formulas are the ones in `tasks`,
-called with `xp=jax.numpy`.
-
-pickplace: the place target is a mocap pad (`d.mocap_pos`, separate in every world) without
-collisions, so the contact budget is the same as in lift. The carry latch and target sampling
-live in `tasks.pickplace`. Both environments use the same carry latch.
-
-The contact budget per world (`CONTACTS`: nconmax, njmax) for the tasks with a cube. Measured in
-CPU MuJoCo (the most in one physics step, over random episodes and a scripted pickplace expert):
-SO-101 24 contacts / 142 constraint rows (expert, grasp), A1X 12 / 49. MuJoCo Warp generates mesh
-contacts (the convex hulls of the A1X links) differently from the CPU, so the A1X gets a margin of
-64 / 384, still to be confirmed on a GPU (`int(env.d.ncon.numpy().max())` after 200 steps).
+Set `XLA_PYTHON_CLIENT_PREALLOCATE=false` if JAX's memory reservation leaves too little for Warp.
 """
 
 from __future__ import annotations
@@ -74,24 +34,23 @@ import numpy as np
 from .. import sim as sc
 from ..station import Station
 from . import tasks as tk
-from .env import TARGET_SIZE, scene_config
+from .env import TARGET_SIZE, object_geoms, scene_config
 from .jax_policy import devices
 from .randomize import Randomization
 from .tasks.base import sample_start_jax
 
-#: (nconmax, njmax) per world in the tasks with a cube; without a cube (reach) 16 / 64. See the module
-#: docstring.
-CONTACTS = {"so101": (32, 192), "a1x": (64, 384)}
-#: The model fields randomization changes, separate in every world (`put_model(batch_sizes=)`).
+#: Contact and constraint-row limits per object part in each world.
+CONTACTS = {"so101": (48, 288), "a1x": (64, 384)}
+#: Randomized model fields are stored separately for each world.
 FIELDS = ("actuator_gainprm", "actuator_biasprm", "dof_damping", "dof_armature", "dof_frictionloss",
           "body_mass", "body_inertia", "geom_friction")
-#: The fields `set_const` recomputes from them: batched too, never written here.
+#: `set_const` recomputes these fields separately for each world.
 DERIVED = ("body_invweight0", "dof_invweight0")
-#: The fields of the cube; reach has no cube and leaves them alone.
+#: Object fields are omitted from randomization when the task has no object.
 CUBE_FIELDS = ("body_mass", "body_inertia", "geom_friction")
-#: What `_after` and `_observe` read from the physics after a launch.
+#: Physics arrays needed for rewards and observations.
 PHYSICS = ("qpos", "qvel", "site_xpos", "xpos", "xmat", "sensordata")
-#: The number of reach goals drawn once at construction (`tasks.sample_goals`), then picked at random.
+#: Reach goals are sampled from a pool built at initialization.
 GOAL_POOL = 20000
 
 Array = jax.Array
@@ -109,13 +68,22 @@ def _warp():
 
 
 def _sel(done: Array, new: Array, old: Array) -> Array:
-    """`new` in the worlds that are `done` (N,), `old` elsewhere; the world is the first axis."""
+    """Select `new` where `done` (N,) is true along the first axis."""
     return jnp.where(done.reshape((-1,) + (1,) * (old.ndim - 1)), new, old)
 
 
 def _sel_hist(done: Array, new: Array, old: Array) -> Array:
-    """`_sel` for a history (H, N, ...): the world is the second axis, `new` (N, ...) fills every slot."""
+    """Fill all history slots (H, N, ...) with `new` (N, ...) in done worlds."""
     return jnp.where(done.reshape((1, -1) + (1,) * (old.ndim - 2)), new[None], old)
+
+
+def contact_budget(task: tk.TaskConfig, robot: str) -> tuple[int, int]:
+    """Return per-world contact and constraint-row limits for the task and robot."""
+    if task.cube is None:
+        return 16, 64
+    ncon, nefc = CONTACTS.get(robot, CONTACTS["so101"])
+    parts = len(task.block_spec.parts)
+    return ncon * parts, nefc * parts
 
 
 class BatchEnv:
@@ -128,13 +96,10 @@ class BatchEnv:
         spec = station.spec()
         self.task = task if isinstance(task, tk.TaskConfig) else tk.make_task(task, spec=spec)
         self.num_envs = N = int(num_envs)
-        #: The JAX device of everything the env returns, and the Warp device of the physics.
+        #: JAX outputs and Warp physics use corresponding devices.
         self.device, self.wp_device = devices(device)
         self.rand = randomization if randomization is not None else Randomization()
-        # The dynamics are drawn on the host with `Randomization.sample`, the function ArmEnv draws
-        # them with, for all N worlds in a step where some world resets (only those take them):
-        # one definition of the distribution, ~9 x N numbers per reset step. Everything else
-        # (start poses, cubes, targets, goals, noise) comes from the JAX key in the state.
+        # Dynamics use the same host sampler as ArmEnv. Other randomness uses the JAX state key.
         self.np_rng = np.random.default_rng(seed)
 
         scene = sc.build(scene_config(self.task, station))
@@ -146,16 +111,15 @@ class BatchEnv:
         mujoco.mj_forward(mjm, scene.data)
 
         cube = self.task.cube is not None
-        nconmax, njmax = CONTACTS.get(spec.name, CONTACTS["so101"]) if cube else (16, 64)
+        nconmax, njmax = contact_budget(self.task, spec.name)
         with wp.ScopedDevice(self.wp_device):
             self.m = mjw.put_model(mjm, batch_sizes={k: N for k in (*FIELDS, *DERIVED)})
             if hasattr(self.m.opt, "warn_overflow"):
-                # In MuJoCo a solver iteration overflow usually means "stop here", not an error;
-                # the CPU does not complain about it. Here it would print every step.
+                # Suppress repeated warnings when the solver reaches its iteration limit.
                 self.m.opt.warn_overflow = 0
             self.d = mjw.put_data(mjm, scene.data, nworld=N, nconmax=nconmax, njmax=njmax)
 
-        # The fields this env writes: the arm's always, the cube's in the tasks with a cube.
+        # Object fields and sensors are needed only for tasks with an object.
         self._fields = tuple(k for k in FIELDS if cube or k not in CUBE_FIELDS)
         self._reads = tuple(k for k in PHYSICS if cube or k != "sensordata")
         f32 = np.float32
@@ -172,7 +136,8 @@ class BatchEnv:
         self.goal_pool = None
         if cube:
             b = mjm.body(self.task.cube).id
-            self.cube_body, self.cube_geom = b, mjm.geom(self.task.cube).id
+            self.cube_body, self.cube_geoms = b, object_geoms(mjm, self.task.cube)
+            self.yaw_period = float(self.task.block_spec.yaw_period)
             self.cube_qadr = int(mjm.jnt_qposadr[mjm.body_jntadr[b]])
             self.cube_dadr = int(mjm.jnt_dofadr[mjm.body_jntadr[b]])
             self.jaw_adr = np.array([mjm.sensor(f"{self.task.cube}_jaw{k}").adr[0] for k in range(2)])
@@ -186,33 +151,28 @@ class BatchEnv:
             self.goal_pool = jax.device_put(pool.astype(f32), self.device)
 
         nj = self.task.act_dim
-        # Action delay: the latest actions in a ring buffer, each world with its own delay of
-        # {min_delay .. max_delay} ticks, like the queue in ArmEnv. A single slot would cap the
-        # delay at 0/1 tick: after an identification of 1.4 ticks (max_delay 3) training would
-        # never see a delay of 2-3 ticks, while the CPU evaluation does.
+        # The action history covers the largest sampled delay in policy ticks.
         self.Hd = int(self.rand.max_delay) + 1
         self.noise = float(np.radians(self.rand.obs_noise_deg))
-        # Cube perception (see Randomization.cube_*): the history in a ring buffer, the delay and
-        # the refresh period separate for every world.
+        # Object poses have a separate delay and refresh period in each world.
         self.H = int(self.rand.cube_delay) + 1
         fields = {k: self._read_one(getattr(self.m, k)) for k in self._fields}
-        #: The nominal model fields (every world has them after `put_model`): randomization multiplies
-        #: these, never the current values, so the multipliers never pile up.
+        #: Randomization scales nominal fields to avoid accumulating multipliers across resets.
         self.nominal = {k: np.asarray(v[0]) for k, v in fields.items()}
         eye = np.broadcast_to(np.eye(3, dtype=f32), (N, 3, 3))
         state: State = {
             "key": jax.random.key(seed),
             "goal": np.zeros((N, 3), f32),
-            # pickplace: the place target on the table top (z = 0), in the base frame.
+            # The place target uses the base frame with the table top at z = 0.
             "target": np.zeros((N, 3), f32),
-            # pickplace: the "cube carried" latch (`tasks.carry_latch`).
+            # Records whether the object has been carried during this episode.
             "carried": np.zeros(N, bool),
             "q_cmd": np.broadcast_to(self.home, (N, nj)).copy(),
             "prev_action": np.zeros((N, nj), f32),
             "act_hist": np.zeros((self.Hd, N, nj), f32),
             "delay_n": np.zeros(N, np.int32),
             "t": np.zeros(N, np.int32),
-            "streak": np.zeros(N, np.int32),                     # success ticks in a row
+            "streak": np.zeros(N, np.int32),                     # consecutive success ticks
             "hist_pos": np.zeros((self.H, N, 3), f32),
             "hist_rot": np.broadcast_to(eye, (self.H, N, 3, 3)).copy(),
             "hist_i": np.int32(0),
@@ -220,14 +180,14 @@ class BatchEnv:
             "cube_p": np.ones(N, np.int32),
             "seen_pos": np.zeros((N, 3), f32),
             "seen_rot": eye.copy(),
-            # The JAX copies of what physics never changes: written whole into Warp, never read back.
+            # JAX owns fields that physics does not modify.
             "ctrl": self._read_one(self.d.ctrl),
             "fields": fields,
         }
         if self.task.target:
-            # pickplace: positions of the mocap bodies (N, nmocap, 3): the target pad.
+            # Mocap body positions have shape (N, nmocap, 3).
             state["mocap_pos"] = self._read_one(self.d.mocap_pos)
-        #: The env's state: JAX arrays on `device` and the random key, replaced by every jitted step.
+        #: Jitted steps replace this JAX state on `device`.
         self.s: State = jax.device_put(state, self.device)
         self._phys: dict[str, Array] = {}
 
@@ -237,7 +197,7 @@ class BatchEnv:
         self._j_restart = jax.jit(self._restart)
 
         with wp.ScopedDevice(self.wp_device):
-            mjw.step(self.m, self.d)                      # compiles the kernels (once, then cached)
+            mjw.step(self.m, self.d)                      # Compile and cache physics kernels.
             wp.synchronize_device()
             self.graph = None
             if wp.get_device().is_cuda:
@@ -247,23 +207,18 @@ class BatchEnv:
 
     # ------------------------------------------------------------ warp <-> jax
     def _read_one(self, a) -> Array:
-        # A zero-copy view first, then a copy made by JAX: `from_dlpack(copy=True)` works on the
-        # CPU backend but the CUDA PJRT plugin refuses it ("does not support HostBufferSemantics
-        # other than ... kImmutableZeroCopy"; jax 0.11.2). The copy is what `_phys` keeps, and
-        # `_write` waits for it before the next launch overwrites the buffer it was taken from.
+        # Copy the DLPack view before Warp reuses its buffer. CUDA requires a separate JAX copy.
         return jnp.copy(jax.dlpack.from_dlpack(a))
 
     def _read(self, names) -> dict[str, Array]:
-        """Copies of the Warp arrays `names` of `d`, vector dimensions last (`site_xpos` (N, nsite, 3))."""
+        """Copy named physics arrays into JAX with vector dimensions last, e.g. (N, nsite, 3)."""
         return {k: self._read_one(getattr(self.d, k)) for k in names}
 
     def _write(self, pairs: list[tuple[Any, Array]], wait: Any = ()) -> None:
-        """Whole JAX arrays into their Warp arrays (`(dst, src)`, the same shape with vector dims last).
+        """Copy `(dst, src)` pairs from JAX into Warp with matching shapes and vector dimensions last.
 
-        First the wait: for the JAX copies of the last read and for `wait` (the copies these writes
-        overwrite the source of), and for the arrays written (jit dispatch is asynchronous). The
-        caller synchronizes Warp after its launch, while `pairs` still holds the JAX arrays the
-        copies read.
+        Wait for JAX readers and sources before copying. `wait` covers additional readers of the
+        destination buffers. The caller must keep the sources alive until Warp finishes.
         """
         jax.block_until_ready((self._phys, wait, [src for _, src in pairs]))
         wp = self.wp
@@ -273,12 +228,11 @@ class BatchEnv:
     def _steps(self) -> None:
         for _ in range(self.task.substeps):
             self.mjw.step(self.m, self.d)
-        # As in ArmEnv.step: after the steps xpos/site_xpos are from before the last integration,
-        # so the kinematics run again: the TCP and the cube from the same q as the observed angles.
+        # Refresh poses after integration so they match the observed joint angles.
         self.mjw.kinematics(self.m, self.d)
 
     def _physics(self, ctrl: Array) -> None:
-        """One policy tick of physics with the control `ctrl` (N, nu), then a fresh read."""
+        """Advance physics by one policy tick using `ctrl` (N, nu) and read the results."""
         wp = self.wp
         with wp.ScopedDevice(self.wp_device):
             pairs = [(self.d.ctrl, ctrl)]
@@ -291,7 +245,7 @@ class BatchEnv:
         self._phys = self._read(self._reads)
 
     def _reset_worlds(self, done: Array) -> None:
-        """New episodes in the worlds that are `done` (N,); the others keep their state."""
+        """Start new episodes where `done` (N,) is true."""
         smp = {k: np.asarray(v, np.int32 if k in ("delay", "cube_delay", "cube_period") else np.float32)
                for k, v in self.rand.sample(self.np_rng, self.num_envs).items()}
         old = self._read(("qpos", "qvel", "qacc_warmstart"))
@@ -300,8 +254,7 @@ class BatchEnv:
         with wp.ScopedDevice(self.wp_device):
             fields = [(getattr(self.m, k), st["fields"][k]) for k in self._fields]
             self._write(fields)
-            # Without it the contacts of a cube with a changed mass are computed "for another cube"
-            # (body_invweight0); on the CPU that shoots the cube away (see env.ModelFields.apply).
+            # Contact calculations need constants recomputed after mass and armature changes.
             self.mjw.set_const(self.m, d)
             state = [(d.qpos, qpos), (d.qvel, qvel), (d.qacc_warmstart, qacc), (d.ctrl, st["ctrl"])]
             if self.task.target:
@@ -321,16 +274,15 @@ class BatchEnv:
             out["jaws"] = phys["sensordata"][:, self.jaw_adr]
             if self.task.target:
                 a = self.cube_dadr
-                out["cube_vel"] = phys["qvel"][:, a:a + 3] @ R          # R^T v as rows (as in ArmEnv)
+                out["cube_vel"] = phys["qvel"][:, a:a + 3] @ R          # Base-frame velocity as row vectors.
                 out["target"] = target
         return out
 
     def _act(self, s: State, action: Array) -> tuple[State, Array, Array]:
-        """The executed action and the new joint targets: (state, control (N, nu), clipped action)."""
+        """Return updated state, delayed control (N, nu), and the clipped input action."""
         action = jnp.clip(action.astype(jnp.float32), -1.0, 1.0)
         Hd, ar = self.Hd, jnp.arange(self.num_envs)
-        # The action from `delay_n` ticks ago; zero in the episode's first ticks (like the queue of
-        # zeros on the CPU).
+        # Use zero actions until the sampled delay has elapsed.
         t, delay = s["t"], s["delay_n"]
         hist = s["act_hist"].at[t % Hd, ar].set(action)
         executed = hist[(t - delay) % Hd, ar]
@@ -340,7 +292,7 @@ class BatchEnv:
         return {**s, "act_hist": hist, "q_cmd": q_cmd, "ctrl": ctrl}, ctrl, action
 
     def _perceive(self, s: State, st: dict[str, Array], key: Array) -> State:
-        """A new entry in the cube history, and a refresh of what the policy sees (every `cube_p` ticks)."""
+        """Record the object pose and refresh perception every `cube_p` ticks."""
         H = self.H
         i = (s["hist_i"] + 1) % H
         hist_pos = s["hist_pos"].at[i].set(st["cube_pos"])
@@ -352,37 +304,36 @@ class BatchEnv:
         if self.rand.cube_noise > 0:
             pos = pos.at[:, :2].add(self.rand.cube_noise * jax.random.normal(key, (self.num_envs, 2)))
         if self.rand.fold_yaw:
-            rot = tk.fold_yaw(jnp, rot)
+            rot = tk.fold_yaw(jnp, rot, self.yaw_period)
         return {**s, "hist_i": i, "hist_pos": hist_pos, "hist_rot": hist_rot,
                 "seen_pos": jnp.where(upd[:, None], pos, s["seen_pos"]),
                 "seen_rot": jnp.where(upd[:, None, None], rot, s["seen_rot"])}
 
     def _after(self, s: State, phys: dict[str, Array], action: Array):
-        """Reward, done and info of the tick just simulated: (state, rew, done, info)."""
+        """Return updated state, reward, done flags, and info for the completed tick."""
         tsk = self.task
         key, k_cube = jax.random.split(s["key"])
         t = s["t"] + 1
         st = self._state(phys, s["target"])
         carried, kw = s["carried"], {}
         if tsk.target:
-            carried = tk.carry_latch(jnp, tsk, carried, st["jaws"], st["cube_pos"])
+            carried = tk.carry_latch(jnp, tsk, carried, st["jaws"], st["cube_pos"], st["cube_rot"])
             kw = dict(target=s["target"], cube_vel=st["cube_vel"], carried=carried,
                       grip_open=tk.grip_is_open(jnp, self.limits, s["q_cmd"]))
         rew, success, failure = tsk.reward(jnp, st["tcp"], action, s["prev_action"], goal=s["goal"],
-                                          cube_pos=st.get("cube_pos"), jaw_contacts=st.get("jaws"),
+                                          cube_pos=st.get("cube_pos"), cube_rot=st.get("cube_rot"),
+                                          jaw_contacts=st.get("jaws"),
                                           q_cmd=s["q_cmd"], limits=self.limits, **kw)
         streak, finished = tk.success_streak(jnp, tsk, s["streak"], success)
         s = {**s, "key": key, "t": t, "streak": streak, "carried": carried}
         if tsk.cube:
             s = self._perceive(s, st, k_cube)
-        # Guard: a world that blew up anyway ends its episode without reward before its numbers
-        # poison the gradient.
+        # End unstable episodes with zero reward before their values enter training.
         qvel = phys["qvel"]
         broken = ~jnp.isfinite(qvel).all(1) | (jnp.abs(qvel).max(1) > 100.0)
         rew = jnp.where(broken, 0.0, rew)
         s["prev_action"] = action
-        # A success streak ends the episode like the time limit: PPO bootstraps the state value
-        # (see `tasks.success_streak`), otherwise not finishing would pay.
+        # Bootstrap success truncations so ending an episode does not reduce its value.
         time_out = (t >= tsk.episode_steps) | finished
         terminated = failure | broken
         done = terminated | time_out
@@ -391,7 +342,7 @@ class BatchEnv:
         if not tsk.cube:
             info["distance"] = jnp.sqrt(((s["goal"] - st["tcp"]) ** 2).sum(1))
         else:
-            info["height"] = st["cube_pos"][:, 2] - tsk.cube_half
+            info["height"] = tsk.height(jnp, st["cube_pos"], st["cube_rot"])
         if tsk.target:
             info["dist_target"] = jnp.sqrt(((st["cube_pos"][:, :2] - s["target"][:, :2]) ** 2).sum(1))
             info["carried"] = carried
@@ -410,7 +361,7 @@ class BatchEnv:
         return {**s, "key": key}, obs
 
     def _randomize(self, s: State, done: Array, smp: dict[str, Array]) -> State:
-        """New dynamics for the done worlds: multipliers of the nominal values (`set_const` follows)."""
+        """Apply sampled multipliers to nominal dynamics in done worlds."""
         f, nom, act, dof = dict(s["fields"]), self.nominal, self.act, self.dadr
 
         def put(name, idx, value):
@@ -423,38 +374,38 @@ class BatchEnv:
         put("dof_armature", (slice(None), dof), nom["dof_armature"][dof] * smp["armature"][:, None])
         put("dof_frictionloss", (slice(None), dof), nom["dof_frictionloss"][dof] * smp["frictionloss"][:, None])
         if self.task.cube:
-            b, g, mass = self.cube_body, self.cube_geom, smp["cube_mass"]
+            b, g, mass = self.cube_body, self.cube_geoms, smp["cube_mass"]
             put("body_mass", (slice(None), b), nom["body_mass"][b] * mass)
             put("body_inertia", (slice(None), b), nom["body_inertia"][b] * mass[:, None])
-            put("geom_friction", (slice(None), g, 0), nom["geom_friction"][g, 0] * smp["cube_friction"])
+            put("geom_friction", (slice(None), g, 0), nom["geom_friction"][g, 0] * smp["cube_friction"][:, None])
         return {**s, "fields": f,
                 "delay_n": _sel(done, jnp.clip(smp["delay"], 0, self.Hd - 1), s["delay_n"]),
                 "cube_d": _sel(done, smp["cube_delay"], s["cube_d"]),
                 "cube_p": _sel(done, smp["cube_period"], s["cube_p"])}
 
     def _restart(self, s: State, old: dict[str, Array], done: Array, smp: dict[str, Array]):
-        """The done worlds' new episodes: (state, qpos, qvel, qacc_warmstart), whole arrays for Warp."""
+        """Return new state, qpos, qvel, and qacc_warmstart with done worlds reset."""
         s = self._randomize(s, done, smp)
         tsk, N = self.task, self.num_envs
         key, k_q, k_g, k_r, k_b, k_yaw, k_t = jax.random.split(s["key"], 7)
         q0 = sample_start_jax(jax, tsk, self.limits, self.home, self.lo, self.hi, N, k_q, k_g)
-        # Reset keys are ordered as gripper/goal, radius, bearing, yaw and target.
+        # Reset keys are ordered as gripper/goal, radius, bearing, yaw, and target.
         sampled = tsk.sample_reset(jax, N, (k_g, k_r, k_b, k_yaw, k_t), goal_pool=self.goal_pool)
 
         qpos = jnp.broadcast_to(self.qpos0, (N, len(self.qpos0))).at[:, self.qadr].set(q0)
-        for k, adr, gain in self.kin.mirror:            # coupled joints (e.g. the A1X's second jaw)
+        for k, adr, gain in self.kin.mirror:            # Coupled joints follow the commanded joint.
             qpos = qpos.at[:, adr].set(gain * q0[:, k])
         if tsk.cube:
             p, yaw = sampled["cube_pos"], sampled["cube_yaw"]
             qb = self.q_base
-            # a rotation about z in the base frame, then into the world: q_base * q_yaw
+            # Compose base-frame yaw into world coordinates as q_base * q_yaw.
             cw, sw = jnp.cos(yaw / 2), jnp.sin(yaw / 2)
             quat = jnp.stack([qb[0] * cw - qb[3] * sw, qb[1] * cw + qb[2] * sw,
                               qb[2] * cw - qb[1] * sw, qb[0] * sw + qb[3] * cw], 1)
             a = self.cube_qadr
             qpos = qpos.at[:, a:a + 3].set(p @ self.R_b.T + self.t_b)
             qpos = qpos.at[:, a + 3:a + 7].set(quat)
-            # The first detection at the start: the cube lies still, so the whole history is one pose.
+            # Fill perception history with the initial pose.
             z0, o1 = jnp.zeros_like(yaw), jnp.ones_like(yaw)
             R = jnp.stack([jnp.stack([jnp.cos(yaw), -jnp.sin(yaw), z0], -1),
                            jnp.stack([jnp.sin(yaw), jnp.cos(yaw), z0], -1),
@@ -462,9 +413,10 @@ class BatchEnv:
             s["hist_pos"] = _sel_hist(done, p, s["hist_pos"])
             s["hist_rot"] = _sel_hist(done, R, s["hist_rot"])
             s["seen_pos"] = _sel(done, p, s["seen_pos"])
-            s["seen_rot"] = _sel(done, tk.fold_yaw(jnp, R) if self.rand.fold_yaw else R, s["seen_rot"])
+            s["seen_rot"] = _sel(done, tk.fold_yaw(jnp, R, self.yaw_period) if self.rand.fold_yaw else R,
+                                 s["seen_rot"])
             if tsk.target:
-                # The target on the table top (z = 0) in the base frame; the mocap pad follows it.
+                # The pad centre sits half its thickness above the target at base-frame z = 0.
                 target = sampled["target"]
                 pad = target.at[:, 2].set(TARGET_SIZE[2])
                 mocap = s["mocap_pos"].at[:, self.target_mocap].set(pad @ self.R_b.T + self.t_b)
@@ -486,13 +438,13 @@ class BatchEnv:
 
     # ------------------------------------------------------------------ api
     def reset(self) -> Array:
-        """New episodes in every world: the observations (N, obs_dim)."""
+        """Start new episodes in every world and return observations (N, obs_dim)."""
         self._reset_worlds(jax.device_put(jnp.ones(self.num_envs, bool), self.device))
         self.s, obs = self._j_observe(self.s, self._phys)
         return obs
 
     def step(self, action: Array) -> tuple[Array, Array, Array, dict[str, Array]]:
-        """One policy tick in every world: (obs, rew, done, info); done worlds start anew inside."""
+        """Return (obs, rew, done, info) after one policy tick and reset done worlds."""
         action = jax.device_put(jnp.asarray(action), self.device)
         self.s, ctrl, action = self._j_act(self.s, action)
         self._physics(ctrl)

@@ -1,21 +1,20 @@
-"""The lab's command line: `soarm-lab <command>` (training, evaluation and policies, on twin stations).
+"""Command-line training, evaluation, policy listing, and model execution.
 
-    soarm-lab train task=reach                      # train PPO and evaluate on CPU
-    soarm-lab train task=lift station=$HOME/stations/desk1        # train on an exported station
-    soarm-lab train experiment=lift_finetune         # fine-tune a bundled policy
-    soarm-lab train --cfg job                        # show the composed configuration
-    soarm-lab eval lift-v3 --rand                    # evaluate a policy in plain MuJoCo
-    soarm-lab policies                               # bundled policies and those trained here, with results
-    soarm-lab convert old/policy.pt                  # a torch checkpoint -> policy.npz
-    soarm-lab dream models                           # Dream Labs: the checkpoints the account may run
-    soarm-lab dream sim --prompt "pick up the cube"  # Dream-1 in the simulation
-    soarm-lab dream arm --prompt "pick up the cube" --camera scene=0 --camera wrist=1   # on the arm
+    soarm-lab train task=reach
+    soarm-lab train experiment=<name>
+    soarm-lab train --cfg job
+    soarm-lab eval <policy> --rand
+    soarm-lab eval <policy> --variant <name>
+    soarm-lab policies
+    soarm-lab convert old/policy.pt
+    soarm-lab dream models
+    soarm-lab dream sim --prompt "pick up the cube"
 
 `station` for training and `--station` for evaluation select an exported station folder
-(`scene.xml`, `assets/`, `station.json`) or a bundled station name (`sim` by default). `eval` and `policies` need neither jax nor torch.
-`train` is PPO in JAX on MuJoCo Warp: it needs the `train` extra (jax, on Linux its CUDA build, optax,
-mujoco-warp) and no torch. `convert` needs the `torch` extra. `dream` needs the `dream` extra and a Dream
-Labs API key (`dream_run`).
+or a bundled station name. The default is `sim`.
+`train` requires the `train` extra. `convert` requires the `torch` extra.
+`dream` requires the `dream` extra and a Dream Labs API key.
+Evaluation and policy listing use NumPy.
 """
 
 from __future__ import annotations
@@ -30,6 +29,20 @@ def _station(a: argparse.Namespace):
     return Station.load(a.station)
 
 
+def _variants_summary(evals: dict, variants: list[str]) -> str:
+    """Summarize mean and worst CPU success, preferring randomized evaluations when available."""
+    from .rl.policy import variant_key
+
+    for key, label in (("cpu_rand", "z rand."), ("cpu_nominal", "bez rand.")):
+        got = {v: evals[variant_key(key, v)].get("success") for v in variants if variant_key(key, v) in evals}
+        got = {v: s for v, s in got.items() if s is not None}
+        if got:
+            worst = min(got, key=got.__getitem__)
+            mean = sum(got.values()) / len(got)
+            return f"warianty {label} srednio {mean:5.1%}, najslabszy {worst} {got[worst]:5.1%}"
+    return ""
+
+
 def _eval(a: argparse.Namespace) -> int:
     from .rl.evaluate import evaluate
     from .rl.policy import Policy, find_policy
@@ -40,8 +53,8 @@ def _eval(a: argparse.Namespace) -> int:
     pol = Policy.load(path)
     # Randomization around the station's measured dynamics, as in training, not around Menagerie.
     rand = Randomization.around(Dynamics.from_dict(st.dynamics)) if a.rand else None
-    res = evaluate(pol, a.episodes, randomization=rand, station=st, seed=a.seed)
-    print(f"{path}: {res}")
+    res = evaluate(pol, a.episodes, randomization=rand, station=st, seed=a.seed, variant=a.variant)
+    print(f"{path}{f' ({a.variant})' if a.variant else ''}: {res}")
     return 0
 
 
@@ -59,9 +72,10 @@ def _policies(a: argparse.Namespace) -> int:
 
     for p in items:
         where = "bazowa" if p["bundled"] else "uczona"
+        variants = _variants_summary(p["evals"], p["variants"])
         print(f"  {p['name']:32s} {p['task']:9s} {where:6s} GPU {p['success'] or 0:5.1%}  "
               f"CPU bez/z rand. {pct('cpu_nominal')} / {pct('cpu_rand')}  "
-              f"{p['steps'] / 1e6:6.1f} M  {p['created']}")
+              f"{p['steps'] / 1e6:6.1f} M  {p['created']}{f'  {variants}' if variants else ''}")
     for pt in torch_checkpoints(a.dir or policies_dir()):
         print(f"  {pt.parent.name:32s} tylko policy.pt (torch): soarm-lab convert {pt}")
     return 0
@@ -149,6 +163,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--rand", action="store_true", help="z randomizacja dziedziny")
     p.add_argument("--seed", type=int, default=10_000, help="ziarno pierwszego epizodu")
     p.add_argument("--station", default="sim", help=station_help)
+    p.add_argument("--variant", default=None, help="evaluate on this variant of the policy; default: its own block")
     p.set_defaults(fn=_eval)
 
     p = sub.add_parser("policies", help="polityki bazowe i uczone, z wynikami")
