@@ -164,6 +164,7 @@ class ArmEnv(gym.Env):
             self.cube_dadr = m.jnt_dofadr[m.body_jntadr[self.fields.cube_body]]
             self.jaw_adr = [m.sensor(f"{self.task.cube}_jaw{k}").adr[0] for k in range(2)]
             self.yaw_period = self.task.block_spec.yaw_period
+            self.end_period = self.task.end_period
         if self.task.target:
             self.target_mocap = int(m.body_mocapid[m.body(self.task.target).id])
 
@@ -229,7 +230,7 @@ class ArmEnv(gym.Env):
         n = self.rand.cube_noise
         noise = self.np_random.normal(0.0, n, 2) if n > 0 else np.zeros(2)
         pos, rot = tk.perceived(np, pos[None], rot[None], self._bias[None], noise[None], self.rand.fold_yaw,
-                                self.yaw_period)
+                                self.yaw_period, self.end_period)
         self._cube_seen = (pos[0], rot[0])
 
     # ------------------------------------------------------------ gym
@@ -262,9 +263,8 @@ class ArmEnv(gym.Env):
             if "cube" in options:
                 pos, quat = np.asarray(options["cube"][0], float), np.asarray(options["cube"][1], float)
             else:
-                p, qt = tk.sample_cubes(self.task, rng, 1)
+                p, qt = tk.sample_cubes(self.task, rng, 1, self.size[None])
                 pos, quat = p[0], qt[0]
-                pos[2] = self.task.rest_heights(self.size)
             self.set_cube(pos, quat)
             m.geom_rgba[self.fields.cube_geoms] = blocks.random_rgba(self._colours)
             if self.task.target:

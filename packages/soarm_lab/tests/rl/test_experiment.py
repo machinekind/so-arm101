@@ -121,6 +121,33 @@ def test_the_late_pose_experiment_extends_the_block_training():
     assert "block_tolerance_mm" not in off.changes()
 
 
+def test_the_standing_experiment_extends_the_block_training():
+    cfg, base = config("experiment=lift_standing"), config("experiment=lift_blocks")
+    assert cfg.name == "lift_standing" and cfg.init == base.init == "lift-v3"
+    assert cfg.ppo == base.ppo and cfg.task == base.task and cfg.randomization == base.randomization
+    assert OmegaConf.to_container(cfg.task_overrides) == {**OmegaConf.to_container(base.task_overrides),
+                                                          "standing_fraction": 0.25}
+    init, task = training_task(cfg, load_robot(), task_selected=True)
+    assert init is not None and init.task.standing_fraction == 0.0
+    variants = ("cube", "cuboid", "cylinder")
+    assert task == replace(init.task, variants=variants, block="cube", standing_fraction=0.25)
+    assert task.obs_dim == init.meta.obs_dim + len(variants) + 3
+    assert [t.stands for t in task.variant_tasks()] == [False, True, True]
+    assert training_task(base, load_robot(), task_selected=True)[1].standing_fraction == 0.0
+
+
+def test_the_standing_fraction_reaches_the_task_and_is_checked():
+    cfg = config("task=lift", "+task_overrides.standing_fraction=1.0")
+    assert training_task(cfg, load_robot())[1].standing_fraction == 1.0
+    cfg = config("task=pickplace", "task.standing_fraction=0.5")
+    assert composed_task(cfg, load_robot()).standing_fraction == 0.5
+    cfg = config("experiment=lift_standing", "task_overrides.standing_fraction=1.5")
+    with pytest.raises(ValueError, match="standing_fraction must be within"):
+        training_task(cfg, load_robot())
+    with pytest.raises(ValueError, match="unknown task overrides"):
+        training_task(config("task=reach", "+task_overrides.standing_fraction=0.5"), load_robot())
+
+
 def test_the_randomization_keys_are_off_by_default():
     assert options().changes() == {}
     rand, _ = randomization_plan(options(), {})
@@ -384,6 +411,7 @@ else:
     (["init=lift-v3", "ppo=fine_tune"], True),
     (["experiment=lift_finetune"], True),
     (["experiment=lift_late_pose"], True),
+    (["experiment=lift_standing"], True),
     (["experiment=lift_finetune", "ppo=default"], False),
 ])
 def test_init_requires_the_fine_tuning_ppo_group(tmp_path, overrides, accepted):

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from ... import blocks
 from ...kinematics import RobotKinematics
 
 
@@ -140,14 +141,32 @@ def fold_yaw(xp, R, period):
     return xp.stack(rows, -2)
 
 
-def perceived(xp, pos, rot, bias, noise, fold: bool, period: float):
+def fold_resting(xp, R, period, end_period=None):
+    """Fold rotations (..., 3, 3) by the symmetry of the resting face.
+
+    Body x within 45 degrees of vertical selects a standing pose with yaw folded by `end_period` [rad].
+    Zero removes standing yaw. All other poses use `fold_yaw` with `period` [rad].
+    None disables the standing fold.
+    """
+    lying = fold_yaw(xp, R, period)
+    if end_period is None:
+        return lying
+    if end_period > 0:
+        yaw = blocks.yaw_on_end(xp, R)
+        yaw = (yaw + end_period / 2) % end_period - end_period / 2
+    else:
+        yaw = xp.zeros_like(R[..., 0, 0])
+    return xp.where(blocks.is_on_end(xp, R)[..., None, None], blocks.rotation_on_end(xp, yaw), lying)
+
+
+def perceived(xp, pos, rot, bias, noise, fold: bool, period: float, end_period: float | None = None):
     """Apply perception errors to a delayed pose, returning position (N, 3) and rotation (N, 3, 3).
 
     `bias` and `noise` have shape (N, 2) and use metres. The z coordinate stays unchanged.
-    `fold` folds yaw by `period` [rad].
+    When `fold` is True, `fold_resting` uses `period` and `end_period` [rad].
     """
     xy = pos[..., :2] + bias + noise
-    return _cat(xp, [xy, pos[..., 2:]]), (fold_yaw(xp, rot, period) if fold else rot)
+    return _cat(xp, [xy, pos[..., 2:]]), (fold_resting(xp, rot, period, end_period) if fold else rot)
 
 
 def occluded(xp, tcp, cube_pos, latch_m: float):

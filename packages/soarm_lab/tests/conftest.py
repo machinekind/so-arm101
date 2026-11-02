@@ -20,6 +20,20 @@ def twin_robots():
     robots.get_spec.cache_clear()
 
 
+@pytest.fixture
+def square_end(monkeypatch):
+    """Register a block with a square end and its long axis along body x. Return its name."""
+    import math
+
+    from soarm_lab import blocks
+
+    size = (60.0, 25.0, 25.0)
+    mass = blocks.classic_world.DENSITY * math.prod(size)
+    spec = blocks.box_block("square_end", size, mass, yaw_period=math.pi)
+    monkeypatch.setitem(blocks.classic_world.BLOCKS, spec.name, spec)
+    return spec.name
+
+
 @pytest.fixture(scope="module")
 def station():
     """The bundled simulated station `sim`."""

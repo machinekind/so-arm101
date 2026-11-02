@@ -113,6 +113,13 @@ Set the experiment's `task_overrides.variants` to the ordered names and
 `task_overrides.block` to its default variant. `ppo.num_envs` must be divisible by
 the number of variants. Training samples each block's position, yaw and side lengths at random.
 
+## Start some episodes with a standing block
+
+`task_overrides.standing_fraction` is the probability that an episode starts with
+the block on its end. It defaults to 0. The `lift_standing` experiment sets it to
+0.25. A cube always lies. The policy sees a standing block's rotation with yaw
+folded by its end face's symmetry.
+
 ## Train with the stand's pose errors
 
 `lift_late_pose` extends `lift_blocks` with pose errors and a gripper closing time.

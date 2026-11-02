@@ -193,3 +193,60 @@ def bottom_height(xp, spec: BlockSpec, pos, rot, scale=None):
         value = centre - reach
         lowest = value if lowest is None else xp.minimum(lowest, value)
     return pos[..., 2] + lowest
+
+
+def can_stand(spec: BlockSpec) -> bool:
+    """Return whether the block is longer along body x than body z."""
+    return spec.half_size[0] > spec.half_size[2]
+
+
+def end_yaw_period(spec: BlockSpec) -> float:
+    """Return the yaw symmetry period [rad] with body x vertical.
+
+    Zero means all yaw angles look alike. A square box end repeats every quarter turn.
+    Other box ends repeat every half turn. Multiple or off-centre parts use a full turn.
+    """
+    if len(spec.parts) != 1 or any(spec.parts[0].pos):
+        return 2.0 * math.pi
+    part = spec.parts[0]
+    if part.kind == "cylinder" and _axis_map(tuple(part.quat))[2] == 0:
+        return 0.0
+    if part.kind == "box" and math.isclose(spec.half_size[1], spec.half_size[2]):
+        return math.pi / 2
+    return math.pi
+
+
+def rest_height(xp, spec: BlockSpec, scale, on_end=None):
+    """Return resting heights of body origins (...) [m] for body-axis scales `scale` (..., 3).
+
+    `on_end` (...) selects body x up. Other blocks have body z up. None selects body z up for all blocks.
+    """
+    lying = spec.half_size[2] * scale[..., 2]
+    return lying if on_end is None else xp.where(on_end, spec.half_size[0] * scale[..., 0], lying)
+
+
+def quat_on_end(xp, quat):
+    """Compose `quat` (..., 4) with a -90 degree turn about body y.
+
+    Quaternions use (w, x, y, z). A yaw-only input gives body x up.
+    """
+    w, x, y, z = quat[..., 0], quat[..., 1], quat[..., 2], quat[..., 3]
+    return math.sqrt(0.5) * xp.stack([w + y, x + z, y - w, z - x], -1)
+
+
+def rotation_on_end(xp, yaw):
+    """Return rotations (..., 3, 3) with body x up, turned by `yaw` (...) [rad] about the vertical."""
+    c, s = xp.cos(yaw), xp.sin(yaw)
+    z, o = xp.zeros_like(c), xp.ones_like(c)
+    rows = [xp.stack([z, -s, -c], -1), xp.stack([z, c, -s], -1), xp.stack([o, z, z], -1)]
+    return xp.stack(rows, -2)
+
+
+def yaw_on_end(xp, rot):
+    """Read yaw (...) [rad] from body y in rotations (..., 3, 3) produced by `rotation_on_end`."""
+    return xp.arctan2(-rot[..., 0, 1], rot[..., 1, 1])
+
+
+def is_on_end(xp, rot):
+    """Return a mask (...) of rotations (..., 3, 3) with the body x axis within 45 degrees of vertical."""
+    return xp.abs(rot[..., 2, 0]) >= math.sqrt(0.5)

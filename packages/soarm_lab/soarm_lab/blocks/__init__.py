@@ -11,18 +11,26 @@ from .spec import (
     Geometry,
     bottom_height,
     box_block,
+    can_stand,
     check_scalable,
     cylinder_block,
+    end_yaw_period,
+    is_on_end,
     part_scale,
+    quat_on_end,
+    rest_height,
+    rotation_on_end,
     scale_from_mm,
     scaled_geometry,
     scene_object,
     symmetric_scale,
+    yaw_on_end,
 )
 
-__all__ = ["WOOD", "BlockSpec", "Geometry", "block", "bottom_height", "box_block", "check_scalable",
-           "cylinder_block", "part_scale", "random_rgba", "scale_from_mm", "scaled_geometry", "scene_object",
-           "symmetric_scale"]
+__all__ = ["WOOD", "BlockSpec", "Geometry", "block", "bottom_height", "box_block", "can_stand",
+           "check_scalable", "cylinder_block", "end_yaw_period", "is_on_end", "part_scale", "quat_on_end",
+           "random_rgba", "rest_height", "rotation_on_end", "scale_from_mm", "scaled_geometry",
+           "scene_object", "symmetric_scale", "yaw_on_end"]
 
 #: The default cube preserves the bundled policies' geometry.
 _CUBE_3CM = box_block("cube3cm", (30.0, 30.0, 30.0), 30.0, yaw_period=math.pi / 2)

@@ -1,0 +1,8 @@
+# @package _global_
+defaults:
+  - lift_blocks
+  - _self_
+
+name: lift_standing
+task_overrides:
+  standing_fraction: 0.25
