@@ -45,7 +45,7 @@ from typing import Any
 import numpy as np
 
 from ..paths import policies_dir
-from . import task as tk
+from . import tasks as tk
 
 #: Policies trained here. In a checkout of the repository, relative to its root (`soarm_lab.paths`).
 DEFAULT_DIR = policies_dir()
@@ -84,15 +84,7 @@ class PolicyMeta:
     robot: str = "so101"
 
     def task_config(self) -> tk.TaskConfig:
-        # Fields missing from an older `meta.json` (e.g. `end_on_success`) take the task's value from
-        # `make_task`, not the class default of zero: an older lift policy then stops after success on
-        # the arm like a new one, and one fine-tuned from it gets the current penalties. Without
-        # `n_joints` it is an SO-101 (6).
-        data = {**asdict(tk.make_task(self.task.get("name", "reach"))), **self.task}
-        for k, v in data.items():
-            if isinstance(v, list):
-                data[k] = tuple(v)
-        return tk.TaskConfig(**data)
+        return tk.task_from_dict(self.task)
 
 
 class TorchCheckpoint(ValueError):

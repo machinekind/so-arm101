@@ -18,7 +18,7 @@ pytest.importorskip("mujoco_warp", reason="mujoco-warp is not installed (the `tr
 
 import jax.numpy as jnp  # noqa: E402
 
-from soarm_lab.rl import task as tk  # noqa: E402
+from soarm_lab.rl import tasks as tk  # noqa: E402
 from soarm_lab.rl.batch import BatchEnv  # noqa: E402
 from soarm_lab.rl.env import ArmEnv  # noqa: E402
 from soarm_lab.rl.policy import Policy  # noqa: E402
@@ -67,8 +67,8 @@ def test_a_short_training_run_saves_a_policy(tmp_path, capsys):
     """`soarm-lab train` is the JAX trainer's (`rl/ppo.py`); here it runs on the batch env and saves."""
     from soarm_lab.cli import main
 
-    assert main(["train", "--task", "reach", "--envs", "256", "--iters", "2", "--eval-episodes", "1",
-                 "--out", str(tmp_path), "--name", "smoke"]) == 0
+    assert main(["train", "task=reach", "ppo.num_envs=256", "ppo.iterations=2", "eval_episodes=1",
+                 f"out={tmp_path}", "name=smoke"]) == 0
     pol = Policy.load(tmp_path / "smoke" / "policy.npz")
     assert pol.critic is not None                                    # for fine-tuning
     assert pol.meta.iterations == 2 and set(pol.meta.evals) >= {"gpu", "cpu_nominal"}

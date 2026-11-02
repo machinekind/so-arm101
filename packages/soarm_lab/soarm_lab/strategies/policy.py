@@ -16,7 +16,7 @@ simulation and on hardware alike. Nothing here imports the twin. `Strategy`, `Ru
 The policy runs in numpy (`rl.policy.Policy`); the strategy needs no torch.
 
 The loop does exactly what the training environment does - the observation from `task.observe`, the
-action through `task.apply_action` - only the angles come from the servos, not from physics. Claiming the
+action through `tasks.apply_action` - only the angles come from the servos, not from physics. Claiming the
 arm, the thread, STOP and Home belong to the twin's `StrategyRunner`. The strategy adds the guards a real
 arm needs and the training environment does not have:
 
@@ -46,12 +46,13 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import cast
 
 import numpy as np
 from machinekind_twin_api.strategy import Action, ObjectPose, Observation, RunInfo, Strategy
 
 from ..kinematics import RobotKinematics
-from ..rl import task as tk
+from ..rl import tasks as tk
 from ..rl.policy import Policy, find_policy
 from ..robot import load_robot
 
@@ -118,7 +119,7 @@ class PolicyStatus:
     carried: bool = False
 
 
-def project_goal(task: tk.TaskConfig, goal: np.ndarray) -> np.ndarray:
+def project_goal(task: tk.ReachConfig, goal: np.ndarray) -> np.ndarray:
     """`goal` projected onto the area `sample_goals` draws reach goals from.
 
     The radius from the base axis within `goal_radius`, the height within `goal_height`, x > 0.05 m.
@@ -136,7 +137,7 @@ def project_goal(task: tk.TaskConfig, goal: np.ndarray) -> np.ndarray:
     return g
 
 
-def project_target(task: tk.TaskConfig, goal: np.ndarray) -> np.ndarray:
+def project_target(task: tk.PickPlaceConfig, goal: np.ndarray) -> np.ndarray:
     """The pickplace place target from `goal` (base frame): onto the table (z = 0) and the target ring.
 
     The radius from the base axis within `target_radius`, the bearing within `target_bearing`: the ring
@@ -193,7 +194,7 @@ class PolicyStrategy(Strategy[PolicySettings]):
         self._cube_age = 0.0
         self._grip_prev: float | None = None
         self._streak_grip = 0.0
-        #: pickplace: the cube was carried (as `task.carry_latch` in training), and where it was when the
+        #: pickplace: the cube was carried (as `tasks.carry_latch` in training), and where it was when the
         #: success streak began.
         self._carried = False
         self._streak_cube: np.ndarray | None = None
@@ -226,13 +227,13 @@ class PolicyStrategy(Strategy[PolicySettings]):
     @goal.setter
     def goal(self, value) -> None:
         g = np.asarray(value, float)
-        if self.task.name == "reach":
-            p = project_goal(self.task, g)
+        if not self.task.cube:
+            p = project_goal(cast(tk.ReachConfig, self.task), g)
             self.status.goal_clamped = bool(np.linalg.norm(p - g) > 1e-4)
             g = p
         elif self.task.target:
             # The place target lies on the table: z = 0 is not clamping but the definition.
-            p = project_target(self.task, g)
+            p = project_target(cast(tk.PickPlaceConfig, self.task), g)
             self.status.goal_clamped = bool(np.linalg.norm(p[:2] - g[:2]) > 1e-4)
             g = p
         self._goal = g
@@ -240,7 +241,7 @@ class PolicyStrategy(Strategy[PolicySettings]):
     @property
     def target(self) -> np.ndarray:
         """pickplace: the place target (base frame, z = 0), `goal` projected by `project_target`."""
-        return project_target(self.task, self._goal)
+        return project_target(cast(tk.PickPlaceConfig, self.task), self._goal)
 
     # ------------------------------------------------------------------- start
 
@@ -343,7 +344,7 @@ class PolicyStrategy(Strategy[PolicySettings]):
                 cube_rot = tk.fold_yaw(np, cube_rot)
         if self.task.target:
             target = self.target[None]
-        obs = tk.observe(np, self.task, self.limits, q[None], self.q_cmd[None], tcp[None],
+        obs = self.task.observe(np, self.limits, q[None], self.q_cmd[None], tcp[None],
                          self.prev_action[None], goal=self.goal[None], cube_pos=cube_pos[None],
                          cube_rot=cube_rot[None], target=target)
         return obs[0].astype(np.float32)
@@ -381,9 +382,9 @@ class PolicyStrategy(Strategy[PolicySettings]):
         st.step += 1
         st.stopped_because = ""
         st.last_action = action.tolist()
-        if self.task.name == "reach":
+        if not self.task.cube:
             st.distance = float(np.linalg.norm(self.goal - self.kin.tcp(measured)[:3, 3]))
-            st.success = st.distance < self.task.success_dist
+            st.success = st.distance < cast(tk.ReachConfig, self.task).success_dist
         elif self.task.target:
             st.success = self._placed(holding)
             st.carried = self._carried
@@ -398,7 +399,8 @@ class PolicyStrategy(Strategy[PolicySettings]):
             if holding and st.success_streak > 0 and q[self.g] < self._streak_grip - self.grip_creep:
                 holding = False
             st.success = bool(self._cube is not None and self._cube_fresh() and holding
-                              and self._cube[2] - self.task.cube_half > self.task.lift_height)
+                              and self._cube[2] - cast(tk.LiftConfig, self.task).cube_half
+                              > cast(tk.LiftConfig, self.task).lift_height)
             if st.success and st.success_streak == 0:
                 self._streak_grip = float(q[self.g])
         st.success_streak = st.success_streak + 1 if st.success else 0
@@ -416,7 +418,7 @@ class PolicyStrategy(Strategy[PolicySettings]):
         carried before this tick, and it has not moved by `PLACE_STILL` since the streak began. The latch:
         simulation truth or "w dloni" from the tracker, higher above the table than `lift_height`.
         """
-        cube, src, task = self._cube, self._cube_src, self.task
+        cube, src, task = self._cube, self._cube_src, cast(tk.PickPlaceConfig, self.task)
         if cube is None:
             return False
         if src is None and self.simulated:
@@ -503,7 +505,7 @@ class PolicyStrategy(Strategy[PolicySettings]):
 
     def _note(self) -> str:
         st = self.status
-        if self.task.name == "reach":
+        if not self.task.cube:
             txt = f"do celu {st.distance * 1000:.0f} mm" + (" (w celu)" if st.success else "")
             return txt + (" - cel przyciety do obszaru z treningu" if st.goal_clamped else "")
         if self.task.target:
@@ -511,5 +513,5 @@ class PolicyStrategy(Strategy[PolicySettings]):
             return txt + (" - cel przesuniety na obszar z treningu" if st.goal_clamped else "")
         if self._cube is None:
             return ""
-        height = 100 * (float(self._cube[2]) - self.task.cube_half)
+        height = 100 * (float(self._cube[2]) - cast(tk.LiftConfig | tk.PickPlaceConfig, self.task).cube_half)
         return f"kostka {height:.1f} cm nad blatem ({self._cube_src or 'bez zrodla'})"

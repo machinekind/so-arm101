@@ -1,0 +1,16 @@
+defaults:
+  - train_schema
+  - task: reach
+  - ppo: default
+  - randomization: default
+  - experiment: null
+  - override hydra/job_logging: none
+  - override hydra/hydra_logging: none
+  - _self_
+
+hydra:
+  job:
+    chdir: false
+  output_subdir: null
+  run:
+    dir: .

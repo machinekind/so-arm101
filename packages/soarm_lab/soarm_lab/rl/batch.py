@@ -4,7 +4,7 @@
     obs = env.reset()                                  # (N, obs_dim) on the GPU
     obs, rew, done, info = env.step(actions)           # actions (N, act_dim) in [-1, 1]
 
-The same scene and the same formulas (`task`) as `env.ArmEnv` on the CPU; the only difference is
+The same scene and the same formulas (`tasks`) as `env.ArmEnv` on the CPU; the only difference is
 where the physics runs. On an RTX A4500 the cube scene did about 1.1 million physics steps per
 second with 8192 worlds (measured with the torch version of this module; the physics is the same).
 One world stepped with zero actions follows CPU MuJoCo within 0.00001 deg per joint over 40 ticks
@@ -45,16 +45,15 @@ Memory: JAX preallocates 75 % of the GPU's memory when its backend starts, and W
 in the rest. If `put_data` runs out of memory, start with `XLA_PYTHON_CLIENT_PREALLOCATE=false`.
 
 The per-step computation is three jitted pure functions over the env's state (a dict of JAX
-arrays, with the random key): `_act` (the action delay ring buffer, `task.apply_action`, the
+arrays, with the random key): `_act` (the action delay ring buffer, `tasks.apply_action`, the
 control), `_after` (the state from the physics arrays, reward, success streak, cube perception,
 the broken-world guard, done) and `_observe`; the reset of the done worlds is a fourth one
-(`_restart`), run only in steps where some world ended. The formulas are the ones in `task`,
+(`_restart`), run only in steps where some world ended. The formulas are the ones in `tasks`,
 called with `xp=jax.numpy`.
 
 pickplace: the place target is a mocap pad (`d.mocap_pos`, separate in every world) without
-collisions, so the contact budget is the same as in lift. The "cube carried" latch (`carried` in the
-state) is the same `task.carry_latch` that `env.ArmEnv` uses, and target sampling (`_sample_targets`)
-follows the same rule as `task.sample_targets`.
+collisions, so the contact budget is the same as in lift. The carry latch and target sampling
+live in `tasks.pickplace`. Both environments use the same carry latch.
 
 The contact budget per world (`CONTACTS`: nconmax, njmax) for the tasks with a cube. Measured in
 CPU MuJoCo (the most in one physics step, over random episodes and a scripted pickplace expert):
@@ -74,10 +73,11 @@ import numpy as np
 
 from .. import sim as sc
 from ..station import Station
-from . import task as tk
+from . import tasks as tk
 from .env import TARGET_SIZE, scene_config
 from .jax_policy import devices
 from .randomize import Randomization
+from .tasks.base import sample_start_jax
 
 #: (nconmax, njmax) per world in the tasks with a cube; without a cube (reach) 16 / 64. See the module
 #: docstring.
@@ -91,7 +91,7 @@ DERIVED = ("body_invweight0", "dof_invweight0")
 CUBE_FIELDS = ("body_mass", "body_inertia", "geom_friction")
 #: What `_after` and `_observe` read from the physics after a launch.
 PHYSICS = ("qpos", "qvel", "site_xpos", "xpos", "xmat", "sensordata")
-#: The number of reach goals drawn once at construction (`task.sample_goals`), then picked at random.
+#: The number of reach goals drawn once at construction (`tasks.sample_goals`), then picked at random.
 GOAL_POOL = 20000
 
 Array = jax.Array
@@ -169,6 +169,7 @@ class BatchEnv:
         self.qpos0 = mjm.qpos0.astype(f32)
         self.lo, self.hi = self.limits.lo.astype(f32), self.limits.hi.astype(f32)
         self.home = self.limits.home.astype(f32)
+        self.goal_pool = None
         if cube:
             b = mjm.body(self.task.cube).id
             self.cube_body, self.cube_geom = b, mjm.geom(self.task.cube).id
@@ -204,7 +205,7 @@ class BatchEnv:
             "goal": np.zeros((N, 3), f32),
             # pickplace: the place target on the table top (z = 0), in the base frame.
             "target": np.zeros((N, 3), f32),
-            # pickplace: the "cube carried" latch (`task.carry_latch`).
+            # pickplace: the "cube carried" latch (`tasks.carry_latch`).
             "carried": np.zeros(N, bool),
             "q_cmd": np.broadcast_to(self.home, (N, nj)).copy(),
             "prev_action": np.zeros((N, nj), f32),
@@ -367,7 +368,7 @@ class BatchEnv:
             carried = tk.carry_latch(jnp, tsk, carried, st["jaws"], st["cube_pos"])
             kw = dict(target=s["target"], cube_vel=st["cube_vel"], carried=carried,
                       grip_open=tk.grip_is_open(jnp, self.limits, s["q_cmd"]))
-        rew, success, failure = tk.reward(jnp, tsk, st["tcp"], action, s["prev_action"], goal=s["goal"],
+        rew, success, failure = tsk.reward(jnp, st["tcp"], action, s["prev_action"], goal=s["goal"],
                                           cube_pos=st.get("cube_pos"), jaw_contacts=st.get("jaws"),
                                           q_cmd=s["q_cmd"], limits=self.limits, **kw)
         streak, finished = tk.success_streak(jnp, tsk, s["streak"], success)
@@ -381,13 +382,13 @@ class BatchEnv:
         rew = jnp.where(broken, 0.0, rew)
         s["prev_action"] = action
         # A success streak ends the episode like the time limit: PPO bootstraps the state value
-        # (see `task.success_streak`), otherwise not finishing would pay.
+        # (see `tasks.success_streak`), otherwise not finishing would pay.
         time_out = (t >= tsk.episode_steps) | finished
         terminated = failure | broken
         done = terminated | time_out
         info = {"success": success, "time_outs": time_out & ~terminated, "broken": broken,
                 "finished": finished & ~terminated}
-        if tsk.name == "reach":
+        if not tsk.cube:
             info["distance"] = jnp.sqrt(((s["goal"] - st["tcp"]) ** 2).sum(1))
         else:
             info["height"] = st["cube_pos"][:, 2] - tsk.cube_half
@@ -403,45 +404,10 @@ class BatchEnv:
         if self.noise > 0:
             q = q + self.noise * jax.random.normal(k_noise, q.shape)
         cube = self.task.cube is not None
-        obs = tk.observe(jnp, self.task, self.limits, q, s["q_cmd"], st["tcp"], s["prev_action"],
+        obs = self.task.observe(jnp, self.limits, q, s["q_cmd"], st["tcp"], s["prev_action"],
                          goal=s["goal"], cube_pos=s["seen_pos"] if cube else None,
                          cube_rot=s["seen_rot"] if cube else None, target=s["target"])
         return {**s, "key": key}, obs
-
-    def _sample_targets(self, key: Array, cube_p: Array) -> Array:
-        """pickplace targets (N, 3) for the cubes `cube_p` (N, 3), as `task.sample_targets` draws them.
-
-        The same rule: polar sampling, rows too close to their cube drawn again (only those), at most
-        `TARGET_TRIES` times, then a target on the outer radius at the far end of the bearing range.
-        A bounded loop (`lax.while_loop`), so it stays inside jit; it stops when no row is left.
-        """
-        tsk = self.task
-        n = cube_p.shape[0]
-
-        def bad_rows(out):
-            return jnp.sqrt(((out[:, :2] - cube_p[:, :2]) ** 2).sum(1)) <= tsk.target_min_sep
-
-        def draw(carry):
-            i, out, bad = carry
-            kr, kb = jax.random.split(jax.random.fold_in(key, i))
-            r = jax.random.uniform(kr, (n,), minval=tsk.target_radius[0], maxval=tsk.target_radius[1])
-            b = jax.random.uniform(kb, (n,), minval=tsk.target_bearing[0], maxval=tsk.target_bearing[1])
-            new = jnp.stack([r * jnp.cos(b), r * jnp.sin(b), jnp.zeros_like(r)], 1)
-            out = jnp.where(bad[:, None], new, out)
-            return i + 1, out, bad_rows(out)
-
-        def more(carry):
-            i, _, bad = carry
-            return (i < tk.TARGET_TRIES) & bad.any()
-
-        init = (jnp.int32(0), jnp.zeros((n, 3), cube_p.dtype), jnp.ones(n, bool))
-        _, out, bad = jax.lax.while_loop(more, draw, init)
-        cb = jnp.arctan2(cube_p[:, 1], cube_p[:, 0])
-        lo, hi = tsk.target_bearing
-        far = jnp.where(cb > 0.5 * (lo + hi), lo, hi)
-        r = tsk.target_radius[1]
-        fallback = jnp.stack([r * jnp.cos(far), r * jnp.sin(far), jnp.zeros_like(far)], 1)
-        return jnp.where(bad[:, None], fallback, out)
 
     def _randomize(self, s: State, done: Array, smp: dict[str, Array]) -> State:
         """New dynamics for the done worlds: multipliers of the nominal values (`set_const` follows)."""
@@ -471,24 +437,15 @@ class BatchEnv:
         s = self._randomize(s, done, smp)
         tsk, N = self.task, self.num_envs
         key, k_q, k_g, k_r, k_b, k_yaw, k_t = jax.random.split(s["key"], 7)
-        u = jax.random.uniform
-        lo, hi = self.lo, self.hi
-        noise = np.radians(tsk.start_noise_deg)
-        na, g = self.limits.n_arm, self.limits.grip
-        q0 = jnp.broadcast_to(self.home, (N, len(self.home)))
-        q0 = q0.at[:, :na].add(u(k_q, (N, na), minval=-noise, maxval=noise))
-        if tsk.cube:
-            q0 = q0.at[:, g].set(lo[g] + u(k_g, (N,), minval=0.6, maxval=1.0) * (hi[g] - lo[g]))
-        q0 = jnp.clip(q0, lo, hi)
+        q0 = sample_start_jax(jax, tsk, self.limits, self.home, self.lo, self.hi, N, k_q, k_g)
+        # Reset keys are ordered as gripper/goal, radius, bearing, yaw and target.
+        sampled = tsk.sample_reset(jax, N, (k_g, k_r, k_b, k_yaw, k_t), goal_pool=self.goal_pool)
 
         qpos = jnp.broadcast_to(self.qpos0, (N, len(self.qpos0))).at[:, self.qadr].set(q0)
         for k, adr, gain in self.kin.mirror:            # coupled joints (e.g. the A1X's second jaw)
             qpos = qpos.at[:, adr].set(gain * q0[:, k])
         if tsk.cube:
-            r = u(k_r, (N,), minval=tsk.cube_radius[0], maxval=tsk.cube_radius[1])
-            b = u(k_b, (N,), minval=tsk.cube_bearing[0], maxval=tsk.cube_bearing[1])
-            p = jnp.stack([r * jnp.cos(b), r * jnp.sin(b), jnp.full_like(r, tsk.cube_half)], 1)
-            yaw = u(k_yaw, (N,), minval=-np.pi, maxval=np.pi)
+            p, yaw = sampled["cube_pos"], sampled["cube_yaw"]
             qb = self.q_base
             # a rotation about z in the base frame, then into the world: q_base * q_yaw
             cw, sw = jnp.cos(yaw / 2), jnp.sin(yaw / 2)
@@ -508,14 +465,13 @@ class BatchEnv:
             s["seen_rot"] = _sel(done, tk.fold_yaw(jnp, R) if self.rand.fold_yaw else R, s["seen_rot"])
             if tsk.target:
                 # The target on the table top (z = 0) in the base frame; the mocap pad follows it.
-                target = self._sample_targets(k_t, p)
+                target = sampled["target"]
                 pad = target.at[:, 2].set(TARGET_SIZE[2])
                 mocap = s["mocap_pos"].at[:, self.target_mocap].set(pad @ self.R_b.T + self.t_b)
                 s["target"] = _sel(done, target, s["target"])
                 s["mocap_pos"] = _sel(done, mocap, s["mocap_pos"])
         else:
-            k = jax.random.randint(k_g, (N,), 0, self.goal_pool.shape[0])
-            s["goal"] = _sel(done, self.goal_pool[k], s["goal"])
+            s["goal"] = _sel(done, sampled["goal"], s["goal"])
         s.update(key=key,
                  ctrl=_sel(done, s["ctrl"].at[:, self.act].set(q0), s["ctrl"]),
                  q_cmd=_sel(done, q0, s["q_cmd"]),

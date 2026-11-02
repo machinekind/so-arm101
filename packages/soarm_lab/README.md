@@ -24,22 +24,7 @@ policy inference uses NumPy. Neither requires JAX, PyTorch or a GPU.
 See [policy provenance](soarm_lab/policies/README.md) for their upstream
 checkpoints, training history and conversion to NumPy.
 
-## Train a policy
-
-GPU training is PPO in JAX on MuJoCo Warp. It requires a CUDA-capable GPU and the
-`train` extra, which installs JAX (with CUDA 12 on Linux), optax and MuJoCo Warp.
-It does not use PyTorch:
-
-```bash
-uv run --package soarm-lab --extra train soarm-lab train --task reach
-```
-
-Tasks are `reach`, `lift` and `pickplace`. Use `--init lift-v3` to fine-tune the
-bundled lift policy. Training ends with CPU evaluation; `--help` lists training options.
-
-Trained policies are saved under `workspace/policies/<name>/` in a checkout.
-Set `SOARM_LAB_POLICIES` to choose another directory. Commands accept a policy
-name or a path to `policy.npz`; local names take precedence over bundled ones.
+See the [policies README](soarm_lab/policies/README.md#train-a-policy) for training, experiments and bundled policy provenance.
 
 ## Use a measured station
 
@@ -51,7 +36,7 @@ uv run soarm-lab eval lift-v3 --station ~/stations/desk1
 ```
 
 The export contains `scene.xml`, mesh `assets/` and `station.json` with the setup's
-measurements. Pass the same `--station` option when training to use the measured
+measurements. Set `station=$HOME/stations/desk1` when training to use the measured
 servo dynamics as the centre of domain randomization. Without it, commands use
 the bundled `sim` station. [Station](soarm_lab/station.py) also exposes a Python API.
 

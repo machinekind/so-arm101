@@ -39,7 +39,7 @@ import numpy as np
 
 from ..station import Station
 from . import jax_policy as jp
-from . import task as tk
+from . import tasks as tk
 from .jax_policy import jax, jnp
 from .policy import POLICY_FILE, Policy, PolicyMeta
 from .randomize import Randomization
@@ -165,7 +165,7 @@ def train(task: str | tk.TaskConfig, cfg: PPOConfig | None = None, *, station: S
     if init is not None:
         if init.meta.robot != spec.name:
             raise RuntimeError(f"polityka uczona na {init.meta.robot}, stanowisko ma {spec.name}")
-        tsk = init.task                                # the task it was trained on
+        tsk = task if isinstance(task, tk.TaskConfig) else init.task
     rand = randomization if randomization is not None else Randomization()
     if make_env is None:
         from .batch import BatchEnv

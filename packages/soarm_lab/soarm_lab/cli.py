@@ -1,8 +1,9 @@
 """The lab's command line: `soarm-lab <command>` (training, evaluation and policies, on twin stations).
 
-    soarm-lab train --task reach                     # a PPO policy on the GPU (MuJoCo Warp) + CPU evaluation
-    soarm-lab train --task lift --station ~/desk1    # ... on the station from `twin export ~/desk1`
-    soarm-lab train --task pickplace                 # ... the cube carried onto a target on the table
+    soarm-lab train task=reach                      # train PPO and evaluate on CPU
+    soarm-lab train task=lift station=$HOME/stations/desk1        # train on an exported station
+    soarm-lab train experiment=lift_finetune         # fine-tune a bundled policy
+    soarm-lab train --cfg job                        # show the composed configuration
     soarm-lab eval lift-v3 --rand                    # evaluate a policy in plain MuJoCo
     soarm-lab policies                               # bundled policies and those trained here, with results
     soarm-lab convert old/policy.pt                  # a torch checkpoint -> policy.npz
@@ -10,8 +11,8 @@
     soarm-lab dream sim --prompt "pick up the cube"  # Dream-1 in the simulation
     soarm-lab dream arm --prompt "pick up the cube" --camera scene=0 --camera wrist=1   # on the arm
 
-`--station` is a folder the twin exported (`scene.xml`, `assets/`, `station.json`) or the name of a
-station bundled with the package (`sim`, the default). `eval` and `policies` need neither jax nor torch.
+`station` for training and `--station` for evaluation select an exported station folder
+(`scene.xml`, `assets/`, `station.json`) or a bundled station name (`sim` by default). `eval` and `policies` need neither jax nor torch.
 `train` is PPO in JAX on MuJoCo Warp: it needs the `train` extra (jax, on Linux its CUDA build, optax,
 mujoco-warp) and no torch. `convert` needs the `torch` extra. `dream` needs the `dream` extra and a Dream
 Labs API key (`dream_run`).
@@ -27,91 +28,6 @@ def _station(a: argparse.Namespace):
     from .station import Station
 
     return Station.load(a.station)
-
-
-def _train_plan(dyn, no_rand: bool, spread: float):
-    """(training randomization, [(label, key in meta.evals, evaluation randomization)]).
-
-    Training without randomization (`--no-rand`) is the measured dynamics with zero spread, not
-    `Randomization.none()`: that is the Menagerie model with ideal perception, which would drop both the
-    identified dynamics and the cube perception model. The randomized evaluation runs only when training
-    was randomized: otherwise a second nominal evaluation would land in `cpu_rand`, and the panel would
-    show it as robustness to randomization.
-    """
-    from .rl.randomize import Randomization
-
-    rand = Randomization.around(dyn, 0.0 if no_rand else spread)
-    evals = [("bez randomizacji", "cpu_nominal", Randomization.nominal(dyn))]
-    if rand.randomized:
-        evals.append(("z randomizacja", "cpu_rand", rand))
-    return rand, evals
-
-
-def _describe(rand) -> str:
-    c = rand.centre
-    delay = f"{rand.min_delay}" if rand.min_delay == rand.max_delay else f"{rand.min_delay}-{rand.max_delay}"
-    return (f"dynamika: {c.source} (kp x{c.kp:.2f}, tlumienie x{c.damping:.2f}, opoznienie {delay} takt.); "
-            f"randomizacja: {'tak' if rand.randomized else 'brak'}; "
-            f"percepcja kostki: {'jak z kamer' if rand.fold_yaw or rand.cube_delay else 'idealna'}")
-
-
-def _train(a: argparse.Namespace) -> int:
-    import json
-    import time
-
-    from .paths import policies_dir
-    from .rl.evaluate import evaluate
-    from .rl.policy import POLICY_FILE
-    from .rl.ppo import PPOConfig, train
-    from .rl.randomize import Dynamics
-
-    st = _station(a)
-    name = a.name or f"{a.task}-{time.strftime('%Y%m%d-%H%M%S')}"
-    out = Path(a.out or policies_dir()) / name
-    dyn = Dynamics.from_dict(st.dynamics)
-    rand, evals = _train_plan(dyn, a.no_rand, a.spread)
-    cfg = PPOConfig(num_envs=a.envs, iterations=a.iters, seed=a.seed)
-    init = None
-    if a.init:
-        from .rl.policy import Policy, find_policy
-
-        init = Policy.load(find_policy(a.init))
-        a.task = init.task.name
-        cfg.init_std = 0.25                            # fine-tuning: less exploration at the start
-        cfg.critic_warmup = 30                         # for policies saved without a critic (see ppo)
-        print(f"Start z polityki {a.init} ({init.task.name})")
-    print(f"Trening {a.task} na stanowisku {st.folder}: {a.envs} swiatow x {a.iters} iteracji -> {out}")
-    print(f"  {_describe(rand)}{'' if a.no_rand else f', rozrzut x{a.spread}'}")
-
-    def show(p):
-        if p.iteration == 1 or p.iteration % 10 == 0 or p.status != "uczenie":
-            print(f"  it {p.iteration:4d}/{p.iterations}  {p.steps / 1e6:7.2f} M krokow  {p.fps / 1e3:5.0f} k/s  "
-                  f"sukces {p.success:5.1%}  nagroda {p.reward:7.2f}  {p.elapsed:5.0f} s", flush=True)
-
-    stop = None
-    if a.stop_file:
-        # Stopping from outside: a file. The policy as it is at that point is saved.
-        import threading
-
-        stop = threading.Event()
-        flag = Path(a.stop_file)
-
-        def watch():
-            while not stop.is_set():
-                if flag.exists():
-                    stop.set()
-                time.sleep(0.5)
-        threading.Thread(target=watch, daemon=True).start()
-    pol = train(a.task, cfg, station=st, randomization=rand, out_dir=out, on_progress=show, stop=stop,
-                init=init, device=a.device)
-    print("Ewaluacja na CPU (zwykle MuJoCo, inny silnik niz w treningu):")
-    for label, key, r in evals:
-        res = evaluate(pol, a.eval_episodes, randomization=r, station=st)
-        pol.meta.evals[key] = res
-        rounded = {k: round(v, 3) if isinstance(v, float) else v for k, v in res.items()}
-        print(f"  {label:17s} sukces {res['success']:5.1%}  ({json.dumps(rounded)})")
-    print(f"Zapisano {pol.save(out / POLICY_FILE)}")
-    return 0
 
 
 def _eval(a: argparse.Namespace) -> int:
@@ -135,7 +51,7 @@ def _policies(a: argparse.Namespace) -> int:
 
     items = list_policies(a.dir or policies_dir())
     if not items:
-        print("Brak polityk. Naucz pierwsza:  soarm-lab train --task reach")
+        print("Brak polityk. Naucz pierwsza:  soarm-lab train task=reach")
 
     def pct(key):
         v = p["evals"].get(key, {}).get("success")
@@ -208,7 +124,14 @@ def _dream_parser(sub) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    a = parser().parse_args(argv)
+    import sys
+
+    args = list(sys.argv[1:] if argv is None else argv)
+    if args and args[0] == "train":
+        from .rl.experiment import run
+
+        return run(args[1:])
+    a = parser().parse_args(args)
     return a.fn(a)
 
 
@@ -219,20 +142,6 @@ def parser() -> argparse.ArgumentParser:
                     "(domyslnie sim)")
 
     p = sub.add_parser("train", help="naucz polityke PPO na GPU (MuJoCo Warp)")
-    p.add_argument("--task", choices=("reach", "lift", "pickplace"), default="reach")
-    p.add_argument("--envs", type=int, default=4096, help="ile swiatow naraz")
-    p.add_argument("--iters", type=int, default=300)
-    p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--name", default=None, help="nazwa przebiegu (domyslnie zadanie + data)")
-    p.add_argument("--out", default=None, help="katalog polityk (domyslnie workspace/policies)")
-    p.add_argument("--station", default="sim", help=station_help)
-    p.add_argument("--no-rand", action="store_true", help="bez randomizacji dziedziny")
-    p.add_argument("--spread", type=float, default=1.0, help="szerokosc randomizacji wokol zmierzonej dynamiki")
-    p.add_argument("--eval-episodes", type=int, default=50)
-    p.add_argument("--stop-file", default=None, help="przerwij trening, gdy ten plik sie pojawi")
-    p.add_argument("--init", default=None, help="douczanie: start z tej polityki (nazwa albo policy.npz)")
-    p.add_argument("--device", default="cuda:0", help="device of JAX and MuJoCo Warp (default cuda:0)")
-    p.set_defaults(fn=_train)
 
     p = sub.add_parser("eval", help="ewaluacja polityki na CPU (zwykle MuJoCo)")
     p.add_argument("policy", help="nazwa polityki (np. lift-v3) albo sciezka do policy.npz")

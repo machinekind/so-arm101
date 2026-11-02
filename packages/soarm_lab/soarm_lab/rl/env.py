@@ -6,7 +6,7 @@
 
 This is the "one environment, plain MuJoCo" version: for checking policies, debugging the reward,
 `check_env` and SB3-style libraries. Training on thousands of worlds at once uses `batch.BatchEnv`
-on MuJoCo Warp; both compute the observation and the reward with the same functions from `task`.
+on MuJoCo Warp; both compute the observation and the reward with the same functions from `tasks`.
 
 The scene is built ONCE (293 ms on a laptop, 111 ms on an RTX A4500); a reset changes only the state
 and fields of the compiled model. The station (table, cameras, base pose) comes from the twin's export
@@ -24,7 +24,7 @@ import numpy as np
 from .. import sim as sc
 from ..kinematics import inverse, pose
 from ..station import Station
-from . import task as tk
+from . import tasks as tk
 from .randomize import Randomization
 
 #: The preview camera, added when the station has no cameras (`scene_config(view=True)`).
@@ -132,7 +132,7 @@ class ArmEnv(gym.Env):
         self.goal = np.zeros(3)
         #: pickplace: the place target on the table top (z = 0), in the base frame.
         self.target = np.zeros(3)
-        #: pickplace: the "cube was carried" latch (`task.carry_latch`), cleared in `reset`.
+        #: pickplace: the "cube was carried" latch (`tasks.carry_latch`), cleared in `reset`.
         self._carried = False
         self.q_cmd = self.limits.home.copy()
         self.prev_action = np.zeros(self.task.act_dim)
@@ -164,7 +164,7 @@ class ArmEnv(gym.Env):
     def _obs(self, s: dict[str, np.ndarray]) -> np.ndarray:
         q = s["q"] + np.radians(self.np_random.normal(0.0, self._noise, self.task.n_joints)) if self._noise > 0 else s["q"]
         cube_pos, cube_rot = self._cube_seen if self.task.cube else (np.zeros(3), np.eye(3))
-        obs = tk.observe(np, self.task, self.limits, q[None], self.q_cmd[None], s["tcp"][None],
+        obs = self.task.observe(np, self.limits, q[None], self.q_cmd[None], s["tcp"][None],
                          self.prev_action[None], goal=self.goal[None],
                          cube_pos=cube_pos[None], cube_rot=cube_rot[None], target=self.target[None])
         return obs[0].astype(np.float32)
@@ -206,7 +206,7 @@ class ArmEnv(gym.Env):
         q0 = np.asarray(options["q"], float) if "q" in options else tk.sample_start(self.task, self.limits, rng, 1)[0]
         self.kin.write_qpos(d.qpos, q0)
         d.ctrl[self.scene.act_ids] = q0
-        if self.task.name == "reach":
+        if not self.task.cube:
             self.goal = np.asarray(options["goal"], float) if "goal" in options else \
                 tk.sample_goals(self.kin, self.task, rng, 1)[0]
         else:
@@ -277,7 +277,7 @@ class ArmEnv(gym.Env):
             self._carried = bool(carried[0])
             kw = dict(target=self.target[None], cube_vel=s["cube_vel"][None], carried=carried,
                       grip_open=tk.grip_is_open(np, self.limits, self.q_cmd[None]))
-        r, success, failure = tk.reward(np, self.task, s["tcp"][None], action[None], self.prev_action[None],
+        r, success, failure = self.task.reward(np, s["tcp"][None], action[None], self.prev_action[None],
                                         goal=self.goal[None], cube_pos=s.get("cube_pos", np.zeros(3))[None],
                                         jaw_contacts=s.get("jaws", np.zeros(2))[None],
                                         q_cmd=self.q_cmd[None], limits=self.limits, **kw)
@@ -285,7 +285,7 @@ class ArmEnv(gym.Env):
         streak, finished = tk.success_streak(np, self.task, np.array([self._streak]), success)
         self._streak = int(streak[0])
         info = {"success": bool(success[0]), "finished": bool(finished[0])}
-        if self.task.name == "reach":
+        if not self.task.cube:
             info["distance"] = float(np.linalg.norm(self.goal - s["tcp"]))
         else:
             info["height"] = float(s["cube_pos"][2] - self.task.cube_half)
@@ -297,7 +297,7 @@ class ArmEnv(gym.Env):
             info["placed"] = bool(d_t < self.task.place_radius and info["height"] < self.task.place_height)
             info["released"] = bool(not info["grasped"] and kw["grip_open"][0])
         terminated = bool(failure[0])
-        # An end after a success streak is a truncation, like the time limit (see `task.success_streak`).
+        # An end after a success streak is a truncation, like the time limit (see `tasks.success_streak`).
         truncated = self.t >= self.task.episode_steps or info["finished"]
         self._perceive(s)
         return self._obs(s), float(r[0]), terminated, truncated, info

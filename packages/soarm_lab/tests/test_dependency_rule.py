@@ -123,10 +123,10 @@ assert main(["policies"]) == 0
 assert main(["eval", "reach-v3", "--episodes", "1"]) == 0
 """
 #: The training and conversion stacks: running a policy loads none of them.
-HEAVY = ("jax", "jaxlib", "optax", "torch")
+HEAVY = ("jax", "jaxlib", "optax", "torch", "hydra", "omegaconf")
 #: Without jax the trainer names its extra, without torch the converter names its own.
 EXTRA_COMMANDS = """
-for argv, extra in ((["train", "--iters", "1"], "train"), (["convert", "policy.pt"], "torch")):
+for argv, extra in ((["train", "ppo.iterations=1"], "train"), (["convert", "policy.pt"], "torch")):
     try:
         main(argv)
     except ImportError as exc:

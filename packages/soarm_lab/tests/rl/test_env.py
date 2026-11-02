@@ -1,4 +1,4 @@
-"""The lab's RL environments: numpy/torch agreement, Gymnasium ids, renders from the station's cameras."""
+"""The lab's RL environments: NumPy/JAX agreement, Gymnasium ids, renders from the station's cameras."""
 
 from __future__ import annotations
 
@@ -10,15 +10,16 @@ import pytest
 mujoco = pytest.importorskip("mujoco")
 gym = pytest.importorskip("gymnasium")
 
-from soarm_lab.rl import task as tk  # noqa: E402
+from soarm_lab.rl import tasks as tk  # noqa: E402
 from soarm_lab.rl.env import VIEW, ArmEnv  # noqa: E402
 from soarm_lab.rl.randomize import Randomization  # noqa: E402
 from soarm_lab.station import Station  # noqa: E402
 
 
-def test_observation_and_reward_are_the_same_in_numpy_and_torch():
+def test_observation_and_reward_are_the_same_in_numpy_and_jax():
     """One task definition for the CPU, the GPU and the arm: the formulas must not drift apart."""
-    torch = pytest.importorskip("torch")
+    jax = pytest.importorskip("jax")
+    jnp = pytest.importorskip("jax.numpy")
     task = tk.make_task("pickplace")
     env = ArmEnv(task, randomization=Randomization.none())
     lim = env.limits
@@ -46,20 +47,21 @@ def test_observation_and_reward_are_the_same_in_numpy_and_torch():
     vel[ok], jaws[ok], carried[ok], opened[ok] = 0.001, 0.0, True, True
 
     def run(xp, conv):
-        b = (lambda x: x) if xp is np else torch.as_tensor
-        obs = tk.observe(xp, task, lim, conv(q), conv(q_cmd), conv(tcp), conv(prev), goal=conv(goal),
+        b = (lambda x: x) if xp is np else jnp.asarray
+        obs = task.observe(xp, lim, conv(q), conv(q_cmd), conv(tcp), conv(prev), goal=conv(goal),
                          cube_pos=conv(cube), cube_rot=conv(rot), target=conv(target))
-        r, s, f = tk.reward(xp, task, conv(tcp), conv(act), conv(prev), goal=conv(goal), cube_pos=conv(cube),
+        r, s, f = task.reward(xp, conv(tcp), conv(act), conv(prev), goal=conv(goal), cube_pos=conv(cube),
                             jaw_contacts=conv(jaws), q_cmd=conv(q_cmd), limits=lim, target=conv(target),
                             cube_vel=conv(vel), carried=b(carried), grip_open=b(opened))
         nxt = tk.apply_action(xp, task, lim, conv(q_cmd), conv(act))
-        st, done = tk.success_streak(xp, task, streak if xp is np else torch.as_tensor(streak), s)
+        st, done = tk.success_streak(xp, task, streak if xp is np else jnp.asarray(streak), s)
         latch = tk.carry_latch(xp, task, b(carried), conv(jaws), conv(cube))
         grip = tk.grip_is_open(xp, lim, conv(q_cmd))
         return [np.asarray(x) for x in (obs, r, s, f, nxt, st, done, latch, grip)]
 
     a = run(np, lambda x: x)
-    b = run(torch, lambda x: torch.as_tensor(x, dtype=torch.float64))
+    with jax.enable_x64():
+        b = run(jnp, lambda x: jnp.asarray(x, dtype=jnp.float64))
     for x, y in zip(a, b):
         assert np.allclose(x, y, atol=1e-9)
     assert a[0].shape == (n, task.obs_dim)
