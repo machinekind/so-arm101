@@ -152,6 +152,7 @@ class BatchEnv:
             self.cube_body, self.cube_geoms = b, object_geoms(mjm, self.task.cube)
             self.cube_mass = float(mjm.body_mass[b])
             self.yaw_period = float(self.task.block_spec.yaw_period)
+            self.end_period = self.task.end_period
             self.cube_qadr = int(mjm.jnt_qposadr[mjm.body_jntadr[b]])
             self.cube_dadr = int(mjm.jnt_dofadr[mjm.body_jntadr[b]])
             self.jaw_adr = np.array([mjm.sensor(f"{self.task.cube}_jaw{k}").adr[0] for k in range(2)])
@@ -339,7 +340,8 @@ class BatchEnv:
         pos, rot = hist_pos[idx, ar], hist_rot[idx, ar]
         n, shape = self.rand.cube_noise, (self.num_envs, 2)
         noise = n * jax.random.normal(key, shape) if n > 0 else jnp.zeros(shape, pos.dtype)
-        pos, rot = tk.perceived(jnp, pos, rot, s["bias"], noise, self.rand.fold_yaw, self.yaw_period)
+        pos, rot = tk.perceived(jnp, pos, rot, s["bias"], noise, self.rand.fold_yaw, self.yaw_period,
+                                self.end_period)
         return {**s, "hist_i": i, "hist_pos": hist_pos, "hist_rot": hist_rot,
                 "seen_pos": jnp.where(upd[:, None], pos, s["seen_pos"]),
                 "seen_rot": jnp.where(upd[:, None, None], rot, s["seen_rot"])}
@@ -453,6 +455,9 @@ class BatchEnv:
             cw, sw = jnp.cos(yaw / 2), jnp.sin(yaw / 2)
             quat = jnp.stack([qb[0] * cw - qb[3] * sw, qb[1] * cw + qb[2] * sw,
                               qb[2] * cw - qb[1] * sw, qb[0] * sw + qb[3] * cw], 1)
+            standing = sampled["cube_standing"]
+            if standing is not None:
+                quat = jnp.where(standing[:, None], blocks.quat_on_end(jnp, quat), quat)
             a = self.cube_qadr
             qpos = qpos.at[:, a:a + 3].set(p @ self.R_b.T + self.t_b)
             qpos = qpos.at[:, a + 3:a + 7].set(quat)
@@ -461,13 +466,15 @@ class BatchEnv:
             R = jnp.stack([jnp.stack([jnp.cos(yaw), -jnp.sin(yaw), z0], -1),
                            jnp.stack([jnp.sin(yaw), jnp.cos(yaw), z0], -1),
                            jnp.stack([z0, z0, o1], -1)], -2)
+            if standing is not None:
+                R = jnp.where(standing[:, None, None], blocks.rotation_on_end(jnp, yaw), R)
             s["hist_pos"] = _sel_hist(done, p, s["hist_pos"])
             s["hist_rot"] = _sel_hist(done, R, s["hist_rot"])
             # Reset observations include the pose bias without noise.
             p_seen, _ = tk.perceived(jnp, p, R, s["bias"], jnp.zeros_like(s["bias"]), False, self.yaw_period)
             s["seen_pos"] = _sel(done, p_seen, s["seen_pos"])
-            s["seen_rot"] = _sel(done, tk.fold_yaw(jnp, R, self.yaw_period) if self.rand.fold_yaw else R,
-                                 s["seen_rot"])
+            seen = tk.fold_resting(jnp, R, self.yaw_period, self.end_period) if self.rand.fold_yaw else R
+            s["seen_rot"] = _sel(done, seen, s["seen_rot"])
             if tsk.target:
                 # The pad centre sits half its thickness above the target at base-frame z = 0.
                 target = sampled["target"]

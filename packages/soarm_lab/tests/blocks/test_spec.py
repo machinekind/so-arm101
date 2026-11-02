@@ -18,13 +18,20 @@ from soarm_lab.blocks import (  # noqa: E402
     block,
     bottom_height,
     box_block,
+    can_stand,
     check_scalable,
     cylinder_block,
+    end_yaw_period,
+    is_on_end,
     part_scale,
+    quat_on_end,
+    rest_height,
+    rotation_on_end,
     scale_from_mm,
     scaled_geometry,
     scene_object,
     symmetric_scale,
+    yaw_on_end,
 )
 from soarm_lab.kinematics import inverse  # noqa: E402
 from soarm_lab.station import Box, Part  # noqa: E402
@@ -312,3 +319,92 @@ def test_side_changes_in_millimetres_scale_the_catalog_blocks_symmetrically():
         assert scale_from_mm(np, spec, *np.zeros((3, 2))).tolist() == [[1.0, 1.0, 1.0]] * 2
     cube, cylinder = scale_from_mm(np, block("cube"), *d), scale_from_mm(np, block("cylinder"), *d)
     assert np.array_equal(cube[:, 0], cube[:, 1]) and np.array_equal(cylinder[:, 1], cylinder[:, 2])
+
+
+def test_a_block_can_stand_when_x_exceeds_z():
+    assert [name for name in NAMES if can_stand(block(name))] == ["cuboid", "cylinder"]
+    assert can_stand(box_block("b", (50.0, 30.0, 20.0), 10.0, yaw_period=math.pi))
+    assert not can_stand(box_block("b", (30.0, 30.0, 30.0), 10.0, yaw_period=math.pi / 2))
+    assert not can_stand(box_block("b", (20.0, 30.0, 40.0), 10.0, yaw_period=math.pi))
+
+
+def test_the_end_symmetry_comes_from_the_shape_not_the_name():
+    # Round ends look alike at every yaw.
+    # Square box ends repeat every quarter turn. Other box ends repeat every half turn.
+    period = {name: end_yaw_period(block(name)) for name in NAMES}
+    assert period == {"cube3cm": math.pi / 2, "cube": math.pi / 2, "cuboid": math.pi, "cylinder": 0.0}
+    square_end = box_block("b", (60.0, 25.0, 25.0), 10.0, yaw_period=math.pi)
+    assert end_yaw_period(square_end) == math.pi / 2
+    assert end_yaw_period(replace(square_end, name="cylinder")) == math.pi / 2
+    assert end_yaw_period(replace(block("cuboid"), name="cylinder")) == math.pi
+    assert end_yaw_period(replace(block("cylinder"), name="cuboid")) == 0.0
+    oblong = box_block("b", (50.0, 30.0, 20.0), 10.0, yaw_period=math.pi / 2)
+    assert end_yaw_period(oblong) == math.pi
+    # With body x up, a transverse cylinder has a rectangular outline from above.
+    across = replace(block("cylinder"), parts=(Part("cylinder", (0.0125, 0.025, 0.0)),))
+    assert end_yaw_period(across) == math.pi
+    assert end_yaw_period(_two_parts()) == 2.0 * math.pi
+    off_centre = Part("box", (0.03, 0.01, 0.01), pos=(0.0, 0.002, 0.0))
+    assert end_yaw_period(replace(block("cuboid"), parts=(off_centre,))) == 2.0 * math.pi
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_a_block_on_its_end_rests_on_the_table(name):
+    spec = block(name)
+    n = 8
+    yaw = np.linspace(-3.0, 3.0, n)
+    for scale in (np.ones((n, 3)), np.tile(SCALES[name], (n, 1))):
+        z = rest_height(np, spec, scale, np.ones(n, bool))
+        np.testing.assert_array_equal(z, spec.half_size[0] * scale[:, 0])
+        pos, R = np.c_[np.zeros((n, 2)), z], rotation_on_end(np, yaw)
+        np.testing.assert_allclose(bottom_height(np, spec, pos, R, scale), 0.0, atol=1e-15)
+        lying = spec.half_size[2] * scale[:, 2]
+        np.testing.assert_array_equal(rest_height(np, spec, scale), lying)
+        np.testing.assert_array_equal(rest_height(np, spec, scale, np.zeros(n, bool)), lying)
+        some = np.arange(n) % 2 == 0
+        np.testing.assert_array_equal(rest_height(np, spec, scale, some), np.where(some, z, lying))
+
+
+def test_the_pose_on_end_points_body_x_up():
+    yaw = np.random.default_rng(4).uniform(-np.pi, np.pi, 16)
+    R = rotation_on_end(np, yaw)
+    np.testing.assert_allclose(R[:, :, 0], np.tile([0.0, 0.0, 1.0], (16, 1)), atol=1e-15)
+    np.testing.assert_allclose(R @ R.transpose(0, 2, 1), np.tile(np.eye(3), (16, 1, 1)), atol=1e-14)
+    np.testing.assert_allclose(np.linalg.det(R), 1.0)
+    np.testing.assert_allclose(yaw_on_end(np, R), yaw, atol=1e-14)
+    np.testing.assert_allclose(R[0], _rot(2, yaw[0]) @ _rot(1, np.pi / 2), atol=1e-15)
+    assert is_on_end(np, R).all()
+
+
+def test_the_quaternion_on_end_is_the_rotation_on_end():
+    yaw = np.random.default_rng(5).uniform(-np.pi, np.pi, 16)
+    q = np.c_[np.cos(yaw / 2), np.zeros(16), np.zeros(16), np.sin(yaw / 2)]
+    turned = quat_on_end(np, q)
+    np.testing.assert_allclose(np.linalg.norm(turned, axis=1), 1.0)
+    want = rotation_on_end(np, yaw)
+    for k in range(16):
+        got = np.zeros(9)
+        mujoco.mju_quat2Mat(got, turned[k])
+        np.testing.assert_allclose(got.reshape(3, 3), want[k], atol=1e-14)
+
+
+def test_numpy_and_jax_compute_the_same_pose_on_end():
+    jnp = pytest.importorskip("jax.numpy")
+    rng = np.random.default_rng(6)
+    n = 32
+    yaw, on_end = rng.uniform(-np.pi, np.pi, n), rng.integers(0, 2, n).astype(bool)
+    scale = rng.uniform(0.8, 1.2, (n, 3))
+    q = rng.normal(size=(n, 4))
+    f = jnp.float32
+
+    def close(a, b):
+        assert b.dtype == np.float32 and a.shape == b.shape
+        np.testing.assert_allclose(np.asarray(b), a, rtol=1e-5, atol=1e-6)
+
+    close(rest_height(np, block("cuboid"), scale, on_end),
+          rest_height(jnp, block("cuboid"), jnp.asarray(scale, f), jnp.asarray(on_end)))
+    close(rotation_on_end(np, yaw), rotation_on_end(jnp, jnp.asarray(yaw, f)))
+    close(quat_on_end(np, q), quat_on_end(jnp, jnp.asarray(q, f)))
+    R = _random_rotations(rng, n)
+    assert np.array_equal(is_on_end(np, R), np.asarray(is_on_end(jnp, jnp.asarray(R, f))))
+    close(yaw_on_end(np, R), yaw_on_end(jnp, jnp.asarray(R, f)))

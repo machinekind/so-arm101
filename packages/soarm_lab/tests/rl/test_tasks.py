@@ -139,3 +139,100 @@ def test_variant_tasks_and_with_variant():
     assert tasks.make_task("reach").variant is None
 
 
+STANDING_BLOCKS = ("cuboid", "cylinder")
+
+
+def test_standing_starts_are_off_by_default_and_old_files_load_with_zero():
+    for name in ("lift", "pickplace"):
+        assert tasks.make_task(name).standing_fraction == 0.0
+        assert tasks.task_from_dict({"name": name}).standing_fraction == 0.0
+        assert not tasks.make_task(name, block="cuboid").stands
+    assert "standing_fraction" not in Policy.load(find_policy("lift-v3")).meta.task
+    assert Policy.load(find_policy("lift-v3")).task.standing_fraction == 0.0
+    with pytest.raises(TypeError):
+        tasks.make_task("reach", standing_fraction=0.5)
+
+
+def test_a_stored_standing_fraction_loads():
+    task = tasks.make_task("pickplace", block="cylinder", standing_fraction=0.25)
+    stored = {k: list(v) if isinstance(v, tuple) else v for k, v in asdict(task).items()}
+    assert tasks.task_from_dict(stored) == task
+    assert all(t.standing_fraction == 0.25 for t in tasks.make_task(
+        "lift", variants=("cube", "cuboid"), block="cube", standing_fraction=0.25).variant_tasks())
+
+
+@pytest.mark.parametrize("name", ["lift", "pickplace"])
+@pytest.mark.parametrize("value", [-0.01, 1.01, float("nan")])
+def test_the_standing_fraction_must_be_a_probability(name, value):
+    with pytest.raises(ValueError, match="standing_fraction must be within"):
+        tasks.make_task(name, standing_fraction=value)
+
+
+@pytest.mark.parametrize("value", [0.0, 0.5, 1.0])
+def test_the_standing_fraction_accepts_its_range(value):
+    assert tasks.make_task("lift", standing_fraction=value).standing_fraction == value
+
+
+def test_only_a_block_that_can_stand_takes_the_new_path(square_end):
+    periods = {"cube3cm": None, "cube": None, "cuboid": np.pi, square_end: np.pi / 2, "cylinder": 0.0}
+    for name, period in periods.items():
+        task = tasks.make_task("lift", block=name, standing_fraction=0.25)
+        assert task.end_period == period and task.stands == (period is not None)
+        assert tasks.make_task("lift", block=name).end_period is None
+
+
+def _old_sample_cubes(task, rng, n):
+    """Reproduce reset sampling before standing starts were added."""
+    r = rng.uniform(*task.cube_radius, n)
+    b = rng.uniform(*task.cube_bearing, n)
+    pos = np.stack([r * np.cos(b), r * np.sin(b), np.full(n, task.block_spec.half_size[2])], axis=1)
+    yaw = rng.uniform(-np.pi, np.pi, n)
+    return pos, np.stack([np.cos(yaw / 2), np.zeros(n), np.zeros(n), np.sin(yaw / 2)], axis=1)
+
+
+@pytest.mark.parametrize("name,fraction", [("cube3cm", 0.0), ("cube", 0.0), ("cuboid", 0.0),
+                                           ("cylinder", 0.0), ("cube3cm", 1.0), ("cube", 0.5)])
+def test_a_reset_that_cannot_stand_draws_and_computes_as_before(name, fraction):
+    task = tasks.make_task("lift", block=name, standing_fraction=fraction)
+    a, b = np.random.default_rng(11), np.random.default_rng(11)
+    got, want = tasks.sample_cubes(task, a, 8), _old_sample_cubes(task, b, 8)
+    assert np.array_equal(got[0], want[0]) and np.array_equal(got[1], want[1])
+    assert a.bit_generator.state == b.bit_generator.state
+
+
+def test_standing_draws_after_the_shared_draws():
+    n = 64
+    task = tasks.make_task("lift", block="cuboid", standing_fraction=0.5)
+    a, b = np.random.default_rng(12), np.random.default_rng(12)
+    pos, quat = tasks.sample_cubes(task, a, n)
+    plain_pos, plain_quat = _old_sample_cubes(task, b, n)
+    flags = b.uniform(size=n) < 0.5
+    assert a.bit_generator.state == b.bit_generator.state
+    assert 0 < flags.sum() < n
+    assert np.array_equal(pos[:, :2], plain_pos[:, :2])
+    half = task.block_spec.half_size
+    assert pos[:, 2].tolist() == np.where(flags, half[0], half[2]).tolist()
+    assert np.array_equal(quat[~flags], plain_quat[~flags])
+    w, x, y, z = quat.T
+    body_x_z = 2.0 * (x * z - w * y)
+    np.testing.assert_allclose(body_x_z, np.where(flags, 1.0, 0.0), atol=1e-12)
+    np.testing.assert_allclose(np.arctan2(x, w)[flags], np.arctan2(plain_quat[:, 3], plain_quat[:, 0])[flags])
+
+
+@pytest.mark.parametrize("fraction,lying,standing", [(1.0, False, True), (0.0, True, False)])
+def test_the_ends_of_the_standing_fraction(fraction, lying, standing):
+    for name in STANDING_BLOCKS:
+        task = tasks.make_task("lift", block=name, standing_fraction=fraction)
+        pos, _ = tasks.sample_cubes(task, np.random.default_rng(13), 32)
+        half = task.block_spec.half_size
+        assert (pos[:, 2] == half[0]).all() == standing and (pos[:, 2] == half[2]).all() == lying
+
+
+def test_the_sampled_height_scales_with_the_world():
+    task = tasks.make_task("lift", block="cuboid", standing_fraction=1.0)
+    size = np.random.default_rng(14).uniform(0.8, 1.2, (8, 3))
+    pos, _ = tasks.sample_cubes(task, np.random.default_rng(15), 8, size)
+    assert pos[:, 2].tolist() == (task.block_spec.half_size[0] * size[:, 0]).tolist()
+    lying = tasks.make_task("lift", block="cuboid")
+    pos, _ = tasks.sample_cubes(lying, np.random.default_rng(15), 8, size)
+    assert pos[:, 2].tolist() == (lying.block_spec.half_size[2] * size[:, 2]).tolist()

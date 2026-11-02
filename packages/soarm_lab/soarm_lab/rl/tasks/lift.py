@@ -36,8 +36,12 @@ class LiftConfig(TaskBase):
     lift_height: float = 0.06
     # Weight of squared arm actions during success.
     hold_still: float = 0.5
+    # Probability that an episode starts with the block standing on its end.
+    standing_fraction: float = 0.0
 
     def __post_init__(self) -> None:
+        if not 0.0 <= self.standing_fraction <= 1.0:
+            raise ValueError(f"standing_fraction must be within [0, 1], is {self.standing_fraction}")
         for name in (self.block, *self.variants):
             blocks.block(name)
         if len(set(self.variants)) != len(self.variants):
@@ -61,6 +65,16 @@ class LiftConfig(TaskBase):
     @property
     def block_spec(self) -> blocks.BlockSpec:
         return blocks.block(self.block)
+
+    @property
+    def stands(self) -> bool:
+        """Return whether standing starts are enabled for this block."""
+        return self.standing_fraction > 0 and blocks.can_stand(self.block_spec)
+
+    @property
+    def end_period(self) -> float | None:
+        """Return the end yaw period [rad], or None when standing starts are disabled."""
+        return blocks.end_yaw_period(self.block_spec) if self.stands else None
 
     @property
     def variant(self) -> str:
@@ -88,9 +102,12 @@ class LiftConfig(TaskBase):
         """Return lowest-point heights above the table (N,) [m] with body-axis scales `size` (N, 3)."""
         return blocks.bottom_height(xp, self.block_spec, cube_pos, cube_rot, size)
 
-    def rest_heights(self, size):
-        """Return resting heights of body origins (...) [m] for body-axis scales `size` (..., 3)."""
-        return self.block_spec.half_size[2] * size[..., 2]
+    def rest_heights(self, size, standing=None, xp=np):
+        """Return resting heights of body origins (...) [m] for body-axis scales `size` (..., 3).
+
+        `standing` (...) selects blocks with body x up. None keeps all blocks lying with body z up.
+        """
+        return blocks.rest_height(xp, self.block_spec, size, standing)
 
     def _observe_parts(self, xp, limits, q, q_cmd, tcp, cube_pos, cube_rot):
         parts = [normalize_q(xp, limits, q), normalize_q(xp, limits, q_cmd), tcp]
@@ -137,9 +154,11 @@ class LiftConfig(TaskBase):
         u = jax.random.uniform
         r = u(k_r, (n,), minval=self.cube_radius[0], maxval=self.cube_radius[1])
         b = u(k_b, (n,), minval=self.cube_bearing[0], maxval=self.cube_bearing[1])
-        p = jnp.stack([r * jnp.cos(b), r * jnp.sin(b), self.rest_heights(size)], 1)
         yaw = u(k_yaw, (n,), minval=-np.pi, maxval=np.pi)
-        return {"cube_pos": p, "cube_yaw": yaw}
+        # A separate key keeps position and yaw draws unchanged.
+        standing = u(jax.random.fold_in(k_yaw, 1), (n,)) < self.standing_fraction if self.stands else None
+        p = jnp.stack([r * jnp.cos(b), r * jnp.sin(b), self.rest_heights(size, standing, jnp)], 1)
+        return {"cube_pos": p, "cube_yaw": yaw, "cube_standing": standing}
 
     def for_spec(self, spec: RobotSpec):
         d = spec.desk
@@ -147,10 +166,18 @@ class LiftConfig(TaskBase):
                        cube_bearing=d.cube_bearing)
 
 
-def sample_cubes(task: LiftConfig, rng: np.random.Generator, n: int) -> tuple[np.ndarray, np.ndarray]:
+def sample_cubes(task: LiftConfig, rng: np.random.Generator, n: int, size=None) -> tuple[np.ndarray, np.ndarray]:
+    """Sample base-frame resting positions (n, 3) [m] and quaternions (n, 4) in (w, x, y, z) order.
+
+    `size` (n, 3) scales the body axes. None keeps the catalog dimensions.
+    """
     r = rng.uniform(*task.cube_radius, n)
     b = rng.uniform(*task.cube_bearing, n)
-    pos = np.stack([r * np.cos(b), r * np.sin(b), np.full(n, task.block_spec.half_size[2])], axis=1)
     yaw = rng.uniform(-np.pi, np.pi, n)
+    standing = rng.uniform(size=n) < task.standing_fraction if task.stands else None
+    height = task.rest_heights(np.ones((n, 3)) if size is None else size, standing)
+    pos = np.stack([r * np.cos(b), r * np.sin(b), height], axis=1)
     quat = np.stack([np.cos(yaw / 2), np.zeros(n), np.zeros(n), np.sin(yaw / 2)], axis=1)
+    if standing is not None:
+        quat = np.where(standing[:, None], blocks.quat_on_end(np, quat), quat)
     return pos, quat

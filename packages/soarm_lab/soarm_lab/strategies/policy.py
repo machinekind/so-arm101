@@ -339,7 +339,8 @@ class PolicyStrategy(Strategy[PolicySettings]):
             cube_pos, cube_rot = self._cube.copy(), self._cube_rot.copy()
             if self.policy.meta.randomization.get("fold_yaw", False):
                 # Apply the training yaw convention to every pose source.
-                cube_rot = tk.fold_yaw(np, cube_rot, cast(tk.LiftConfig, self.task).block_spec.yaw_period)
+                task = cast(tk.LiftConfig, self.task)
+                cube_rot = tk.fold_resting(np, cube_rot, task.block_spec.yaw_period, task.end_period)
         if self.task.target:
             target = self.target[None]
         obs = self.task.observe(np, self.limits, q[None], self.q_cmd[None], tcp[None],

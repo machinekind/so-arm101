@@ -18,6 +18,7 @@ import soarm
 
 pytest.importorskip("mujoco")
 
+from soarm_lab import blocks  # noqa: E402
 from soarm_lab.kinematics import RobotKinematics  # noqa: E402
 from soarm_lab.rl import tasks as tk  # noqa: E402
 from soarm_lab.rl.policy import Policy, PolicyMeta  # noqa: E402
@@ -274,6 +275,57 @@ def test_a_policy_with_variants_sees_its_block_appended():
     plain.start(run_info(), obs(dict(SPEC.home)))
     want = plain.observation(dict(SPEC.home), seen("cube", [0.2, 0.05, 0.0125]))
     np.testing.assert_allclose(vec[:33], want)
+
+
+def standing_policy(own: str = "cuboid") -> Policy:
+    """Build a constant lift policy configured for standing starts."""
+    variants = VARIANTS if own in VARIANTS else (*VARIANTS, own)
+    task = tk.make_task("lift", variants=variants, block=own, standing_fraction=0.25)
+    pol = constant_policy(task)
+    pol.meta.randomization = {"fold_yaw": True}
+    return pol
+
+
+def seen_rotation(policy: Policy, rotation: np.ndarray, **settings) -> np.ndarray:
+    """Return the first two rotation columns a strategy observes for `rotation`."""
+    s = PolicyStrategy(PolicySettings(**settings), policy=policy)
+    s.start(run_info(), obs(dict(SPEC.home)))
+    return s.observation(dict(SPEC.home), seen("cube", [0.2, 0.05, 0.04], rotation=rotation))[21:27]
+
+
+ON_END = blocks.rotation_on_end(np, np.radians(130.0))
+
+
+def test_a_policy_without_standing_starts_observes_what_it_always_did():
+    """A policy without standing starts uses yaw-only rotations for every pose."""
+    got = seen_rotation(block_policy("cuboid"), ON_END)
+    want = tk.fold_yaw(np, ON_END, np.pi)
+    np.testing.assert_array_equal(got, np.r_[want[:, 0], want[:, 1]].astype(np.float32))
+
+
+@pytest.mark.usefixtures("square_end")
+@pytest.mark.parametrize("own,yaw_deg", [("cuboid", -50.0), ("square_end", 40.0), ("cylinder", 0.0)])
+def test_a_policy_with_standing_starts_sees_the_block_on_its_end(own, yaw_deg):
+    """Standing yaw follows the end face's symmetry."""
+    got = seen_rotation(standing_policy(own), ON_END)
+    want = blocks.rotation_on_end(np, np.radians(yaw_deg))
+    np.testing.assert_allclose(got, np.r_[want[:, 0], want[:, 1]], atol=1e-6)
+
+
+def test_a_policy_with_standing_starts_keeps_the_fold_of_a_lying_block():
+    yaw = np.radians(130.0)
+    flat = np.array([[np.cos(yaw), -np.sin(yaw), 0.0], [np.sin(yaw), np.cos(yaw), 0.0], [0.0, 0.0, 1.0]])
+    np.testing.assert_array_equal(seen_rotation(standing_policy(), flat), seen_rotation(block_policy(), flat))
+    # An identity rotation from a detector counts as lying.
+    got = seen_rotation(standing_policy(), np.eye(3))
+    np.testing.assert_array_equal(got, seen_rotation(block_policy(), np.eye(3)))
+
+
+def test_a_cube_keeps_its_fold_in_a_policy_with_standing_starts():
+    np.testing.assert_array_equal(seen_rotation(standing_policy("cube"), ON_END),
+                                  seen_rotation(block_policy("cube"), ON_END))
+    np.testing.assert_array_equal(seen_rotation(standing_policy(), ON_END, object_name="cube"),
+                                  seen_rotation(block_policy(), ON_END, object_name="cube"))
 
 
 def test_the_settings_object_name_overrides_the_policys_own():

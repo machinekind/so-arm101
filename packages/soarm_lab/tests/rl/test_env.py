@@ -493,6 +493,124 @@ def test_the_target_pad_is_white():
         env.close()
 
 
+STANDING = ("cuboid", "cylinder")
+
+
+@pytest.mark.parametrize("name", ["lift", "pickplace"])
+@pytest.mark.parametrize("own", STANDING)
+def test_a_block_can_start_on_its_end(name, own):
+    task = tk.make_task(name, block=own, standing_fraction=1.0)
+    env = ArmEnv(task, randomization=Randomization.none())
+    try:
+        yaws = []
+        for seed in range(6):
+            env.reset(seed=seed)
+            s = env.state()
+            np.testing.assert_allclose(s["cube_rot"][:, 0], [0.0, 0.0, 1.0], atol=1e-12)
+            assert s["cube_pos"][2] == pytest.approx(block(own).half_size[0])
+            assert abs(task.height(np, s["cube_pos"][None], s["cube_rot"][None])[0]) < 1e-12
+            assert task.cube_radius[0] <= np.hypot(*s["cube_pos"][:2]) <= task.cube_radius[1]
+            yaws.append(blocks.yaw_on_end(np, s["cube_rot"]))
+        assert np.ptp(yaws) > np.pi / 2
+    finally:
+        env.close()
+
+
+@pytest.mark.parametrize("own", STANDING)
+def test_a_sized_block_stands_at_its_scaled_length(own):
+    task = tk.make_task("lift", block=own, standing_fraction=1.0)
+    env = ArmEnv(task, randomization=replace(Randomization.none(), block_tolerance_mm=5.0))
+    nominal = 2000.0 * block(own).half_size[0]                                 # Length [mm].
+    try:
+        for seed in range(4):
+            env.reset(seed=seed)
+            s = env.state()
+            length = nominal * env.size[0]
+            assert abs(length - nominal) <= 5.0 + 1e-9
+            assert s["cube_pos"][2] == pytest.approx(length / 2000.0, rel=1e-12)
+            assert abs(task.height(np, s["cube_pos"][None], s["cube_rot"][None], env.size[None])[0]) < 1e-12
+            for _ in range(10):
+                _, _, _, _, info = env.step(np.zeros(task.act_dim))
+            assert abs(info["height"]) < 5e-4
+    finally:
+        env.close()
+
+
+def test_some_episodes_start_on_their_end():
+    env = ArmEnv(tk.make_task("lift", block="cuboid", standing_fraction=0.25), randomization=Randomization.none())
+    try:
+        up = []
+        for seed in range(200):
+            env.reset(seed=seed)
+            up.append(env.state()["cube_rot"][2, 0] > 0.5)
+    finally:
+        env.close()
+    assert 0.15 < np.mean(up) < 0.35
+
+
+def test_a_cube_in_a_standing_task_lies_and_keeps_its_numbers():
+    obs = {}
+    for fraction in (0.0, 1.0):
+        env = ArmEnv(tk.make_task("lift", block="cube", standing_fraction=fraction), randomization=Randomization())
+        try:
+            obs[fraction], _ = env.reset(seed=4)
+            assert env.state()["cube_rot"][2, 2] == pytest.approx(1.0)
+            obs[fraction] = np.r_[obs[fraction], env.step(np.zeros(env.task.act_dim))[0]]
+        finally:
+            env.close()
+    assert np.array_equal(obs[0.0], obs[1.0])
+
+
+@pytest.mark.usefixtures("square_end")
+@pytest.mark.parametrize("own,period", [("cuboid", 180.0), ("square_end", 90.0), ("cylinder", 0.0)])
+def test_the_observation_shows_a_block_on_its_end(own, period):
+    task = tk.make_task("lift", block=own, standing_fraction=1.0)
+    env = ArmEnv(task, randomization=replace(Randomization.none(), fold_yaw=True))
+    try:
+        for seed in range(6):
+            obs, _ = env.reset(seed=seed)
+            np.testing.assert_allclose(obs[21:24], [0.0, 0.0, 1.0], atol=1e-6)
+            yaw = np.degrees(np.arctan2(-obs[24], obs[25]))
+            if period:
+                assert -period / 2 - 1e-3 <= yaw <= period / 2 + 1e-3
+            else:
+                assert yaw == 0.0
+            obs, *_ = env.step(np.zeros(task.act_dim))
+            np.testing.assert_allclose(obs[21:24], [0.0, 0.0, 1.0], atol=1e-6)
+    finally:
+        env.close()
+
+
+def _touches_the_arm(env: ArmEnv) -> bool:
+    """Return whether the block touches another body besides the table or floor."""
+    m, d = env.scene.model, env.scene.data
+    ours = {int(g) for g in env.fields.cube_geoms}
+    allowed = ours | {m.geom("table").id, m.geom("floor").id}
+    pairs = ({int(d.contact[k].geom1), int(d.contact[k].geom2)} for k in range(d.ncon))
+    return any(pair & ours and not pair <= allowed for pair in pairs)
+
+
+@pytest.mark.parametrize("own", STANDING)
+def test_a_standing_block_stays_standing_on_cpu_mujoco(own):
+    """Check stability for one simulated second with no arm contact."""
+    task = tk.make_task("lift", block=own, standing_fraction=1.0)
+    env = ArmEnv(task, randomization=Randomization.none())
+    try:
+        for seed in range(8):
+            env.reset(seed=seed)
+            start = env.state()
+            for _ in range(int(task.control_hz)):
+                env.step(np.zeros(task.act_dim))
+                assert not _touches_the_arm(env), seed
+            end = env.state()
+            tilt = np.degrees(np.arccos(np.clip(end["cube_rot"][2, 0], -1.0, 1.0)))
+            assert tilt < 0.5, seed
+            assert np.linalg.norm(end["cube_pos"][:2] - start["cube_pos"][:2]) < 1e-3, seed
+            assert abs(task.height(np, end["cube_pos"][None], end["cube_rot"][None])[0]) < 5e-4, seed
+    finally:
+        env.close()
+
+
 def test_gymnasium_ids_of_the_lab():
     """Importing `soarm_lab.rl` registers the lab's environments as `SoArmLab/*-v0`."""
     import soarm_lab.rl  # noqa: F401

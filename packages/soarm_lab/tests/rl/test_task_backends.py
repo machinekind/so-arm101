@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 
 pytest.importorskip("mujoco")
+jax = pytest.importorskip("jax")
 jnp = pytest.importorskip("jax.numpy")
 
 from soarm_lab import blocks  # noqa: E402
@@ -350,3 +351,160 @@ def test_numpy_and_jax_perceive_the_same_pose(limits):
     np.testing.assert_allclose(step, np.clip(target - ctrl, -rate, rate), atol=1e-15)
     assert np.array_equal(a["follow_inf"], target)
     assert np.array_equal(b["follow_inf"], target.astype(np.float32))
+
+
+def _turn(axis: int, angle) -> np.ndarray:
+    """Return a right-handed rotation (3, 3) about `axis` by `angle` [rad]."""
+    c, s = np.cos(angle), np.sin(angle)
+    i, j = (axis + 1) % 3, (axis + 2) % 3
+    R = np.eye(3)
+    R[i, i], R[i, j], R[j, i], R[j, j] = c, -s, s, c
+    return R
+
+
+def _tilted(bearing: float, angle_deg: float) -> np.ndarray:
+    """Tilt by `angle_deg` about a horizontal axis at `bearing` [rad]."""
+    return _turn(2, bearing) @ _turn(0, np.radians(angle_deg)) @ _turn(2, -bearing)
+
+
+def _resting_rotations() -> tuple[np.ndarray, np.ndarray]:
+    """Return rotations (K, 3, 3) and standing flags (K,).
+
+    Tilts cover both sides of the 45 degree threshold.
+    """
+    rng = np.random.default_rng(41)
+    out, on_end = [], []
+    for yaw, bearing in rng.uniform(-np.pi, np.pi, (12, 2)):
+        flat = _turn(2, yaw)
+        up, down = flat @ _turn(1, -np.pi / 2), flat @ _turn(1, np.pi / 2)
+        for R, flag in ((flat, False),
+                        (_tilted(bearing, 20.0) @ flat, False),
+                        (flat @ _turn(0, np.pi / 2), False),         # On a long side, body y vertical.
+                        (up, True),
+                        (down, True),
+                        (_tilted(bearing, 30.0) @ up, True),
+                        (_tilted(bearing, 44.9) @ up, True),
+                        (_tilted(bearing, 45.1) @ up, False),
+                        (_tilted(bearing, 44.9) @ down, True),
+                        (_tilted(bearing, 45.1) @ down, False)):
+            out.append(R)
+            on_end.append(flag)
+    return np.array(out), np.array(on_end)
+
+
+#: Each end shape maps to its lying and standing yaw periods [rad].
+ENDS = {"square": (np.pi, np.pi / 2), "round": (np.pi, 0.0), "oblong": (np.pi, np.pi),
+        "square-lying": (np.pi / 2, np.pi / 2)}
+
+
+@pytest.mark.parametrize("end", ENDS)
+def test_numpy_and_jax_fold_how_a_block_rests_under_jit(end):
+    period, end_period = ENDS[end]
+    R, on_end = _resting_rotations()
+    assert 0 < on_end.sum() < len(R)
+    a = tk.fold_resting(np, R, period, end_period)
+    fold = jax.jit(lambda r: tk.fold_resting(jnp, r, period, end_period))
+    b = fold(jnp.asarray(R, jnp.float32))
+    assert b.dtype == jnp.float32 and b.shape == a.shape == R.shape
+    np.testing.assert_allclose(np.asarray(b), a, rtol=1e-5, atol=2e-6)
+    assert np.array_equal(a[~on_end], tk.fold_yaw(np, R[~on_end], period))
+    np.testing.assert_allclose(a[on_end][:, :, 0], np.tile([0.0, 0.0, 1.0], (on_end.sum(), 1)), atol=1e-15)
+    np.testing.assert_allclose(a @ a.transpose(0, 2, 1), np.tile(np.eye(3), (len(R), 1, 1)), atol=1e-12)
+    two = np.stack([R, R[::-1]])
+    assert np.array_equal(tk.fold_resting(np, two, period, end_period)[1], a[::-1])
+    np.testing.assert_allclose(np.asarray(fold(jnp.asarray(two, jnp.float32)))[0], a, rtol=1e-5, atol=2e-6)
+    assert np.array_equal(np.stack([tk.fold_resting(np, r, period, end_period) for r in R]), a)
+    single = np.stack([np.asarray(fold(jnp.asarray(r, jnp.float32))) for r in R[:12]])
+    np.testing.assert_allclose(single, a[:12], rtol=1e-5, atol=2e-6)
+
+
+def test_the_end_face_sets_the_fold_of_a_standing_block():
+    yaw = np.radians(130.0)
+    R = blocks.rotation_on_end(np, np.array(yaw))
+    want = {np.pi / 2: 40.0, np.pi: -50.0, 0.0: 0.0}
+    for end_period, deg in want.items():
+        got = tk.fold_resting(np, R, np.pi, end_period)
+        np.testing.assert_allclose(got, blocks.rotation_on_end(np, np.radians(deg)), atol=1e-12)
+    # Either end face gives the same folded rotation.
+    for end_period in (np.pi / 2, np.pi):
+        for k in range(1, 4):
+            turned = _turn(2, k * end_period) @ R
+            np.testing.assert_allclose(tk.fold_resting(np, turned, np.pi, end_period),
+                                       tk.fold_resting(np, R, np.pi, end_period), atol=1e-12)
+        down = _turn(2, yaw) @ _turn(1, np.pi / 2)
+        np.testing.assert_allclose(tk.fold_resting(np, down, np.pi, end_period),
+                                   tk.fold_resting(np, R, np.pi, end_period), atol=1e-12)
+    for angle in (-2.0, 0.3, 1.7):
+        got = tk.fold_resting(np, _tilted(0.4, 30.0) @ _turn(2, angle) @ R, np.pi, 0.0)
+        assert np.array_equal(got, blocks.rotation_on_end(np, np.array(0.0)))
+    assert not np.allclose(tk.fold_resting(np, R, np.pi, np.pi / 2), tk.fold_yaw(np, R, np.pi / 2))
+
+
+def test_the_45_degree_boundary_counts_as_standing():
+    up = blocks.rotation_on_end(np, np.array(0.3))
+    for angle, on_end in ((44.99, True), (45.01, False)):
+        R = _tilted(0.7, angle) @ up
+        assert bool(blocks.is_on_end(np, R)) == on_end
+        assert bool(blocks.is_on_end(jnp, jnp.asarray(R, jnp.float32))) == on_end
+    assert bool(blocks.is_on_end(np, np.array([[0.0, 0.0, 0.0]] * 2 + [[np.sqrt(0.5), 0.0, 0.0]])))
+
+
+def test_without_an_end_period_the_fold_is_fold_yaw():
+    R, _ = _resting_rotations()
+    for period in (np.pi, np.pi / 2):
+        assert np.array_equal(tk.fold_resting(np, R, period), tk.fold_yaw(np, R, period))
+        assert np.array_equal(np.asarray(tk.fold_resting(jnp, jnp.asarray(R, jnp.float32), period)),
+                              np.asarray(tk.fold_yaw(jnp, jnp.asarray(R, jnp.float32), period)))
+    pos, zero = np.zeros((len(R), 3)), np.zeros((len(R), 2))
+    assert np.array_equal(tk.perceived(np, pos, R, zero, zero, True, np.pi)[1], tk.fold_yaw(np, R, np.pi))
+    folded = tk.perceived(np, pos, R, zero, zero, True, np.pi, np.pi / 2)[1]
+    assert np.array_equal(folded, tk.fold_resting(np, R, np.pi, np.pi / 2))
+    assert tk.perceived(np, pos, R, zero, zero, False, np.pi, np.pi / 2)[1] is R
+
+
+def test_the_standing_draw_leaves_the_other_draws_alone():
+    keys = tuple(jax.random.split(jax.random.key(3), 5))
+    size = jnp.asarray(np.random.default_rng(1).uniform(0.9, 1.1, (N, 3)), jnp.float32)
+    plain = tk.make_task("pickplace", block="cuboid").sample_reset(jax, N, keys, size)
+    half = tk.make_task("pickplace", block="cuboid", standing_fraction=0.5).sample_reset(jax, N, keys, size)
+    assert plain["cube_standing"] is None
+    assert np.array_equal(np.asarray(plain["cube_yaw"]), np.asarray(half["cube_yaw"]))
+    assert np.array_equal(np.asarray(plain["cube_pos"])[:, :2], np.asarray(half["cube_pos"])[:, :2])
+    assert np.array_equal(np.asarray(plain["target"]), np.asarray(half["target"]))
+    flags = np.asarray(half["cube_standing"])
+    assert flags.dtype == bool and 0 < flags.sum() < N
+    # Deriving a key gives a different draw from reusing the yaw key.
+    assert np.array_equal(flags, np.asarray(jax.random.uniform(jax.random.fold_in(keys[3], 1), (N,)) < 0.5))
+    assert not np.array_equal(flags, np.asarray(jax.random.uniform(keys[3], (N,)) < 0.5))
+    spec = blocks.block("cuboid")
+    on_end, lying = spec.half_size[0] * np.asarray(size[:, 0]), spec.half_size[2] * np.asarray(size[:, 2])
+    assert np.array_equal(np.asarray(half["cube_pos"])[:, 2], np.where(flags, on_end, lying))
+    assert np.array_equal(np.asarray(plain["cube_pos"])[:, 2], lying)
+    every = tk.make_task("lift", block="cuboid", standing_fraction=1.0).sample_reset(jax, N, keys, size)
+    assert np.asarray(every["cube_standing"]).all()
+    cube = tk.make_task("lift", block="cube").sample_reset(jax, N, keys, size)
+    no_end = tk.make_task("lift", block="cube", standing_fraction=1.0).sample_reset(jax, N, keys, size)
+    assert no_end["cube_standing"] is None
+    assert np.array_equal(np.asarray(cube["cube_pos"]), np.asarray(no_end["cube_pos"]))
+
+
+@pytest.mark.parametrize("own", ("cuboid", "cylinder"))
+def test_lift_success_counts_the_lowest_point_of_a_standing_block(own, station, limits):
+    task = tk.make_task("lift", spec=station.spec(), block=own, standing_fraction=0.25)
+    up = blocks.rotation_on_end(np, np.array([0.4]))
+    x = _pinned_batch(task, limits)
+    args = (np, x["tcp"][:1], x["act"][:1], x["prev"][:1])
+    kw = dict(jaw_contacts=np.ones((1, 2)), q_cmd=x["q_cmd"][:1], limits=limits)
+
+    def success(z, rot, size=None):
+        pos = np.array([[0.2, 0.0, z]])
+        return task.reward(*args, cube_pos=pos, cube_rot=rot, size=size, **kw)[1].tolist() == [True]
+
+    for size in (np.ones((1, 3)), np.array([[1.1, 0.9, 0.9]])):
+        rest = task.rest_heights(size, np.array([True]))[0]
+        np.testing.assert_allclose(task.height(np, np.array([[0.2, 0.0, rest]]), up, size), 0.0, atol=1e-15)
+        assert success(rest + task.lift_height + 0.001, up, size)
+        assert not success(rest + task.lift_height - 0.001, up, size)
+    # Equal centre heights can give different lift results for lying and standing poses.
+    z = task.block_spec.half_size[2] + task.lift_height + 0.001
+    assert success(z, np.eye(3)[None]) and not success(z, up)
