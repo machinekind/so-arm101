@@ -11,3 +11,5 @@ ppo:
 task_overrides:
   variants: [cube, cuboid, cylinder]
   block: cube
+randomization:
+  block_tolerance_mm: 2.0

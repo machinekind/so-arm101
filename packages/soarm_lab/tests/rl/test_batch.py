@@ -113,6 +113,69 @@ def test_a_block_with_variants_steps_on_the_cpu_device(station):
     np.testing.assert_array_equal(np.asarray(obs[:, -6:]), np.tile(task.descriptor(), (4, 1)))
 
 
+def test_every_world_collides_with_its_own_block_size(station):
+    """Each world uses its own collision geometry and settles at its scaled resting height."""
+    task = tk.make_task("lift", spec=station.spec(), variants=("cuboid",), block="cuboid")
+    rand = replace(Randomization.none(), block_tolerance_mm=5.0)
+    env = BatchEnv(task, num_envs=2, station=station, randomization=rand, device="cpu", seed=0)
+    obs = env.reset()
+    size = np.asarray(env.s["size"], float)
+    spec = task.block_spec
+    rest = spec.half_size[2]
+    # Require enough height variation [mm] to expose incorrect collision geometry.
+    height, nominal = 2000.0 * rest * size[:, 2], 2000.0 * rest
+    assert abs(height[0] - height[1]) > 2.0 and abs(height[0] - nominal) > 2.0
+    assert (np.abs(2000.0 * np.asarray(spec.half_size) * (size - 1.0)) <= 5.0 + 1e-4).all()
+    b, g = env.cube_body, env.cube_geoms[0]
+    geo = blocks.scaled_geometry(spec, size, spec.mass * size.prod(1))
+    fields = {"geom_size": (env.m.geom_size.numpy()[:, g], geo.size),
+              "geom_rbound": (env.m.geom_rbound.numpy()[:, g], geo.rbound),
+              "geom_aabb": (env.m.geom_aabb.numpy()[:, g, 1], geo.aabb),
+              "body_inertia": (env.m.body_inertia.numpy()[:, b], geo.inertia),
+              "body_mass": (env.m.body_mass.numpy()[:, b], spec.mass * size.prod(1))}
+    for name, (got, want) in fields.items():
+        assert got.shape[0] == 2, name
+        np.testing.assert_allclose(got, want, rtol=1e-6, err_msg=name)
+    assert not env.m.geom_aabb.numpy()[:, g, 0].any()
+    np.testing.assert_array_equal(np.asarray(obs[:, -3:]), np.tile(task.descriptor()[-3:], (2, 1)))
+    for _ in range(40):
+        obs, rew, done, info = env.step(jnp.zeros((2, env.act_dim)))
+    assert not done.any() and not info["broken"].any()
+    z = ((env.d.xpos.numpy()[:, b] - env.t_b) @ env.R_b)[:, 2]
+    np.testing.assert_allclose(z, rest * size[:, 2], atol=5e-4)
+    np.testing.assert_allclose(np.asarray(info["height"]), 0.0, atol=5e-4)
+
+
+def test_without_a_size_tolerance_the_geometry_is_neither_batched_nor_written(station):
+    task = tk.make_task("lift", spec=station.spec(), variants=("cuboid",), block="cuboid")
+    env = BatchEnv(task, num_envs=2, station=station, randomization=Randomization.none(), device="cpu")
+    env.reset()
+    assert env.block is None and env.m.geom_size.shape[0] == env.m.geom_aabb.shape[0] == 1
+    assert "geom_size" not in env.s["fields"]
+    assert np.asarray(env.s["size"]).tolist() == [[1.0, 1.0, 1.0]] * 2
+    assert env._size(env.s) is None
+
+
+def test_the_3cm_cube_takes_a_size_tolerance_and_stays_square(station):
+    env = BatchEnv("lift", num_envs=2, station=station, device="cpu",
+                   randomization=replace(Randomization.none(), block_tolerance_mm=5.0))
+    env.reset()
+    size = np.asarray(env.s["size"])
+    assert env.block is blocks.block("cube3cm")
+    assert np.array_equal(size[:, 0], size[:, 1]) and not np.array_equal(size[:, 1], size[:, 2])
+    assert (np.abs(30.0 * size - 30.0) <= 5.0 + 1e-4).all()                 # Sides [mm].
+    np.testing.assert_allclose(env.m.geom_size.numpy()[:, env.cube_geoms[0]], 0.015 * size, rtol=1e-6)
+
+
+def test_a_block_that_cannot_scale_refuses_a_size_tolerance(station, monkeypatch):
+    one = blocks.block("cube").parts[0]
+    two = blocks.BlockSpec("two", (0.025, 0.0125, 0.0125), 0.02, (one, one), np.pi)
+    monkeypatch.setitem(blocks.classic_world.BLOCKS, "two", two)
+    with pytest.raises(ValueError, match="one-part block"):
+        BatchEnv(tk.make_task("lift", block="two"), num_envs=2, station=station, device="cpu",
+                 randomization=replace(Randomization(), block_tolerance_mm=2.0))
+
+
 def test_the_contact_budget_counts_the_collision_parts(monkeypatch):
     assert CONTACTS == {"so101": (48, 288), "a1x": (64, 384)}
     assert contact_budget(tk.make_task("reach"), "so101") == (16, 64)

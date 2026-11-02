@@ -100,6 +100,8 @@ def test_the_lift_blocks_experiment_composes():
     assert (task.variants, task.block) == (variants, "cube")
     assert task == replace(init.task, variants=variants, block="cube")
     assert task.obs_dim == init.meta.obs_dim + len(variants) + 3
+    # Block sizes vary in training. No other randomization key changes.
+    assert options("experiment=lift_blocks").changes() == {"block_tolerance_mm": 2.0}
 
 
 def test_the_late_pose_experiment_extends_the_block_training():
@@ -114,14 +116,17 @@ def test_the_late_pose_experiment_extends_the_block_training():
         (0.03, 4, 40, 4, 0.05)
     assert rand.centre.grip_close_s == 1.3 and rand.grip_close == (0.8, 1.25)
     assert [key for _, key, _ in evals] == ["cpu_nominal", "cpu_rand"]
+    assert rand.block_tolerance_mm == 2.0
+    off = options("experiment=lift_late_pose", "randomization.block_tolerance_mm=null")
+    assert "block_tolerance_mm" not in off.changes()
 
 
 def test_the_randomization_keys_are_off_by_default():
     assert options().changes() == {}
-    assert options("experiment=lift_blocks").changes() == {}
     rand, _ = randomization_plan(options(), {})
     assert rand.centre.grip_close_s == 0.0 and rand.grip_close == (1.0, 1.0)
     assert (rand.pose_bias_m, rand.cube_min_delay, rand.latch_m) == (0.0, 0, 0.0)
+    assert rand.block_tolerance_mm == 0.0
 
 
 def test_the_randomization_keys_shape_the_perception_and_the_jaw():
@@ -154,13 +159,34 @@ def test_the_closing_time_overrides_the_stations():
     assert rand.centre.grip_close_s == 0.0 and rand.grip_close == (1.0, 1.0)
 
 
+def test_the_block_tolerance_reaches_training_and_its_randomized_evaluation():
+    chosen = options("randomization.block_tolerance_mm=1.5")
+    assert chosen.block_tolerance_mm == 1.5
+    assert chosen.changes() == {"block_tolerance_mm": 1.5}
+    rand, evals = randomization_plan(chosen, {})
+    assert rand.block_tolerance_mm == 1.5 and rand.randomized
+    plan = {key: r for _, key, r in evals}
+    assert plan["cpu_rand"] is rand and plan["cpu_nominal"].block_tolerance_mm == 0.0
+    assert "wymiary klocka +-1.5 mm" in describe(rand)
+    assert "wymiary klocka" not in describe(plan["cpu_nominal"])
+    # Size randomization remains enabled when the dynamics spread is zero.
+    chosen = options("randomization.spread=0", "randomization.block_tolerance_mm=1.5")
+    rand, evals = randomization_plan(chosen, {})
+    assert rand.block_tolerance_mm == 1.5
+    assert [key for _, key, _ in evals] == ["cpu_nominal", "cpu_rand"]
+    assert options("randomization.block_tolerance_mm=5").block_tolerance_mm == 5.0
+
+
 BAD_RANDOMIZATION = {"randomization.pose_delay=[5,3]": "0 <= min <= max",
                      "randomization.pose_delay=[-1]": "0 <= min <= max",
                      "randomization.pose_delay=[1,2,3]": r"\[max\] or \[min, max\]",
                      "randomization.pose_period=0": "at least 1 tick",
                      "randomization.pose_bias_m=-0.01": "pose_bias_m must be zero or more",
                      "randomization.latch_m=-0.01": "latch_m must be zero or more",
-                     "randomization.grip_close_s=-1": "grip_close_s must be zero or more"}
+                     "randomization.grip_close_s=-1": "grip_close_s must be zero or more",
+                     "randomization.block_tolerance_mm=5.5": "0 < T <= 5 mm",
+                     "randomization.block_tolerance_mm=0": "0 < T <= 5 mm",
+                     "randomization.block_tolerance_mm=-1": "0 < T <= 5 mm"}
 
 
 @pytest.mark.parametrize("override,message", BAD_RANDOMIZATION.items())
@@ -169,7 +195,8 @@ def test_bad_randomization_values_are_refused(override, message):
         options(override)
 
 
-@pytest.mark.parametrize("override", ["randomization.pose_delay=[4.5,40]", "randomization.pose_period=often"])
+@pytest.mark.parametrize("override", ["randomization.pose_delay=[4.5,40]", "randomization.pose_period=often",
+                                      "randomization.block_tolerance_mm=wide"])
 def test_randomization_values_of_the_wrong_type_are_rejected(override):
     with pytest.raises(ConfigCompositionException):
         config(override)
@@ -185,24 +212,27 @@ def test_the_command_refuses_bad_randomization_values_before_writing_anything(tm
 
 @pytest.mark.slow
 def test_a_cpu_smoke_run_of_the_trainer_from_lift_v3(tmp_path):
-    """A short CPU training run saves the perception and gripper settings with the policy."""
+    """A short CPU training run saves the perception, gripper and size settings with the policy."""
     pytest.importorskip("mujoco_warp", reason="mujoco-warp is not installed (the `train` extra)")
     args = ["experiment=lift_blocks", "task_overrides.variants=[cube]", "device=cpu", "ppo.num_envs=4",
             "ppo.iterations=2", "eval_episodes=1", "randomization.pose_bias_m=0.02",
             "randomization.pose_delay=[2,6]", "randomization.pose_period=4", "randomization.latch_m=0.05",
-            "randomization.grip_close_s=1.3", f"out={tmp_path}", "name=smoke"]
+            "randomization.grip_close_s=1.3", "randomization.block_tolerance_mm=3", f"out={tmp_path}",
+            "name=smoke"]
     result = subprocess.run([sys.executable, "-m", "soarm_lab.cli", "train", *args], cwd=tmp_path,
                             env={**os.environ, "MUJOCO_GL": "disable"}, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     out = result.stdout
     assert "Trening lift (warianty: cube)" in out
     assert "zamykanie chwytaka 1.30 s" in out and "odswiezanie co 1-4 takt." in out
+    assert "wymiary klocka +-3.0 mm" in out
     pol = Policy.load(tmp_path / "smoke" / "policy.npz")
     assert pol.meta.obs_dim == 37 and pol.task.variants == ("cube",)
     r = pol.meta.randomization
     assert (r["pose_bias_m"], r["cube_min_delay"], r["cube_delay"], r["cube_period"], r["latch_m"]) == \
         (0.02, 2, 6, 4, 0.05)
     assert r["grip_close"] == [0.8, 1.25] and r["centre"]["grip_close_s"] == 1.3
+    assert r["block_tolerance_mm"] == 3.0
     assert set(pol.meta.evals) >= {"gpu", "cpu_nominal", "cpu_rand", "cpu_cube", "cpu_rand_cube"}
     saved = json.loads((tmp_path / "smoke" / "config.json").read_text(encoding="utf-8"))
     assert saved["variants"] == ["cube"]

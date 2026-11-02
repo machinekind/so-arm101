@@ -124,6 +124,10 @@ class Randomization:
     latch_m: float = 0.0
     #: Closing-time multiplier range, sampled per episode when `centre.grip_close_s` is positive.
     grip_close: tuple[float, float] = (1.0, 1.0)
+    #: Sample side length changes uniformly within this tolerance [mm] per episode.
+    #: Mass scales with volume. Inertia and collision geometry follow the scaled dimensions.
+    #: Zero disables it without drawing random values.
+    block_tolerance_mm: float = 0.0
 
     @staticmethod
     def none() -> Randomization:
@@ -199,14 +203,16 @@ class Randomization:
         """Whether the dynamics are sampled (and not only set to the centre)."""
         ranges = (self.kp, self.damping, self.armature, self.frictionloss, self.cube_mass, self.cube_friction,
                   self.grip_close)
-        return any(hi > lo for lo, hi in ranges) or self.max_delay > self.min_delay
+        sized = self.block_tolerance_mm > 0
+        return any(hi > lo for lo, hi in ranges) or self.max_delay > self.min_delay or sized
 
     def sample(self, rng: np.random.Generator, n: int) -> dict[str, np.ndarray]:
         """Sample dynamics and perception settings as arrays of shape (n,).
 
         Delays and refresh periods use policy ticks. `pose_bias_x` and `pose_bias_y` use metres.
         Arm multipliers and `grip_close_s` [s] include the centre values.
-        Disabled pose bias and a fixed closing time consume no extra random draws.
+        `size_x`, `size_y` and `size_z` are side length changes along the body axes [mm].
+        Disabled pose bias, fixed closing times and a zero size tolerance consume no extra random draws.
         """
         c = self.centre
         out = {
@@ -229,6 +235,9 @@ class Randomization:
         lo, hi = self.grip_close
         mult = rng.uniform(lo, hi, n) if c.grip_close_s > 0 and hi > lo else np.full(n, lo)
         out["grip_close_s"] = c.grip_close_s * mult
+        t = self.block_tolerance_mm
+        for k in ("size_x", "size_y", "size_z"):
+            out[k] = rng.uniform(-t, t, n) if t > 0 else np.zeros(n)
         return out
 
 
@@ -255,6 +264,8 @@ def describe(rand: Randomization) -> str:
     seen += f", opoznienie pozy {lo}-{rand.cube_delay} takt., odswiezanie co 1-{period} takt."
     if rand.latch_m > 0:
         seen += f", zatrzask pod dlonia < {rand.latch_m * 100:.0f} cm"
+    if rand.block_tolerance_mm > 0:
+        seen += f"; wymiary klocka +-{rand.block_tolerance_mm:.1f} mm"
     return (f"dynamika: {c.source} (kp x{c.kp:.2f}, tlumienie x{c.damping:.2f}, opoznienie {delay} takt."
             f"{jaw}); randomizacja: {'tak' if rand.randomized else 'brak'}; "
             f"percepcja kostki: {'jak z kamer' if rand.fold_yaw or rand.cube_delay else 'idealna'}{seen}")

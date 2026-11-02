@@ -111,7 +111,7 @@ To add a catalog, create a module under [blocks](../blocks) with named `BlockSpe
 entries in `BLOCKS`, then register that mapping in `blocks.__init__._CATALOGS`.
 Set the experiment's `task_overrides.variants` to the ordered names and
 `task_overrides.block` to its default variant. `ppo.num_envs` must be divisible by
-the number of variants. Training samples each block's position and yaw at random.
+the number of variants. Training samples each block's position, yaw and side lengths at random.
 
 ## Train with the stand's pose errors
 
@@ -123,6 +123,15 @@ The following keys control them:
 - `randomization.pose_period` bounds the refresh period from 1 through this value [policy ticks].
 - `randomization.latch_m` freezes pose updates within this true TCP-to-object distance [m].
 - `randomization.grip_close_s` sets the nominal full gripper closing time [s].
+- `randomization.block_tolerance_mm` sets the side length tolerance t [mm].
+  Each world samples side changes uniformly in [-t, +t] mm each episode.
+  Mass and inertia follow the scaled dimensions. `lift_blocks` sets 2 mm, which `lift_late_pose` inherits.
+  The policy's descriptor keeps the catalog dimensions, as on the arm.
+  Values must be above 0 and at most 5 mm. Use `null` to disable it.
+
+Scale sharing preserves radial and yaw symmetry. Cylinders stay round.
+Blocks with quarter-turn yaw symmetry share x and y scales. Their height varies independently.
+Size tolerance rejects blocks with several parts, an off-centre part or a part that is not axis-aligned.
 
 For dispatched training, an exported station must sit in the checkout as `stations/<name>`
 (gitignored), because the dispatcher's sync skips `workspace/`.

@@ -77,16 +77,20 @@ class LiftConfig(TaskBase):
         return [self.with_variant(name) for name in self.variants]
 
     def descriptor(self) -> np.ndarray:
-        """Encode the block as one-hot `variants` followed by half extents divided by `SIZE_SCALE`."""
+        """Encode the block as one-hot `variants` followed by catalog half extents divided by `SIZE_SCALE`."""
         n = len(self.variants)
         out = np.zeros(n + 3, np.float32)
         out[self.variants.index(self.block)] = 1.0
         out[n:] = np.asarray(self.block_spec.half_size) / SIZE_SCALE
         return out
 
-    def height(self, xp, cube_pos, cube_rot):
-        """Return lowest-point heights above the table [m] as an (N,) array."""
-        return blocks.bottom_height(xp, self.block_spec, cube_pos, cube_rot)
+    def height(self, xp, cube_pos, cube_rot, size=None):
+        """Return lowest-point heights above the table (N,) [m] with body-axis scales `size` (N, 3)."""
+        return blocks.bottom_height(xp, self.block_spec, cube_pos, cube_rot, size)
+
+    def rest_heights(self, size):
+        """Return resting heights of body origins (...) [m] for body-axis scales `size` (..., 3)."""
+        return self.block_spec.half_size[2] * size[..., 2]
 
     def _observe_parts(self, xp, limits, q, q_cmd, tcp, cube_pos, cube_rot):
         parts = [normalize_q(xp, limits, q), normalize_q(xp, limits, q_cmd), tcp]
@@ -108,7 +112,7 @@ class LiftConfig(TaskBase):
         return self._with_descriptor(xp, parts + [prev_action], q)
 
     def reward(self, xp, tcp, action, prev_action, cube_pos=None, cube_rot=None, jaw_contacts=None,
-               q_cmd=None, limits=None, **_):
+               q_cmd=None, limits=None, size=None, **_):
         """Count success when both jaws touch and the lowest point exceeds `lift_height`.
 
         Falls terminate episodes. Time limits and success streaks truncate them.
@@ -116,7 +120,7 @@ class LiftConfig(TaskBase):
         cost = action_cost(xp, self, action, prev_action, q_cmd, limits)
         d = _norm(cube_pos - tcp)
         grasped = (jaw_contacts[..., 0] > 0.5) & (jaw_contacts[..., 1] > 0.5)
-        height = self.height(xp, cube_pos, cube_rot)
+        height = self.height(xp, cube_pos, cube_rot, size)
         lifted = _clip(xp, height / self.lift_height, 0.0, 1.0)
         success = grasped & (height > self.lift_height)
         g, s = _cast(xp, grasped, tcp), _cast(xp, success, tcp)
@@ -127,13 +131,13 @@ class LiftConfig(TaskBase):
         failure = height < -0.05
         return r - cost, success, failure
 
-    def sample_reset(self, jax, n, keys, **_):
+    def sample_reset(self, jax, n, keys, size, **_):
         jnp = jax.numpy
         _, k_r, k_b, k_yaw, _ = keys
         u = jax.random.uniform
         r = u(k_r, (n,), minval=self.cube_radius[0], maxval=self.cube_radius[1])
         b = u(k_b, (n,), minval=self.cube_bearing[0], maxval=self.cube_bearing[1])
-        p = jnp.stack([r * jnp.cos(b), r * jnp.sin(b), jnp.full_like(r, self.block_spec.half_size[2])], 1)
+        p = jnp.stack([r * jnp.cos(b), r * jnp.sin(b), self.rest_heights(size)], 1)
         yaw = u(k_yaw, (n,), minval=-np.pi, maxval=np.pi)
         return {"cube_pos": p, "cube_yaw": yaw}
 
