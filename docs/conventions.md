@@ -129,7 +129,11 @@ The plugin contracts are the package `machinekind-twin-api` (see the root README
   `soarm_lab.strategies.wrist.WristGraspStrategy` refines the aim from `Observation.frames` at the hover.
   It fits the block shape to a colour blob through `before_straddle`, and `before_descent` with `probe` on.
   A named camera requires OpenCV.
+  `soarm_lab.strategies.grasp_jev.GraspJevStrategy` judges each close and lift.
+  With `probe: true`, it also judges each probe.
+  `soarm_lab.strategies.judges.Consultation` handles calls, timeouts, retries and records without blocking `act`.
+  Drops use grasp's recovery. `touch_jev` imports `JudgeStatus` but retains its own consultation flow.
 - `packages/soarm_lab/pyproject.toml` registers these strategies under `machinekind_twin.strategies` (`STRATEGIES`)
-  as `policy`, `ik`, `touch`, `touch_jev`, `grasp`, `grasp_wrist` and `dream`. `soarm_lab.strategies.dream.DreamStrategy` imports the Dream client only in `start`.
+  as `policy`, `ik`, `touch`, `touch_jev`, `grasp`, `grasp_jev`, `grasp_wrist` and `dream`. `soarm_lab.strategies.dream.DreamStrategy` imports the Dream client only in `start`.
 - The station export is `Workspace.export` in the twin (`twin export`). `soarm_lab.station.Station` reads it.
   `soarm_lab.robot.RobotSpec` reads only the `robot.yaml` fields the lab uses and skips the others.

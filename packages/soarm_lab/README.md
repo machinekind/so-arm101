@@ -78,6 +78,8 @@ With this package installed alongside the twin, its Strategies tab offers:
   see [Grasp a block](#grasp-a-block).
 - `grasp_wrist`: refines the grasp aim and yaw from the wrist camera at the hover;
   see [Wrist camera](#wrist-camera).
+- `grasp_jev`: judges the close and lift, then applies the chosen grasp step;
+  see [Jev in the grasp loop](#jev-in-the-grasp-loop).
 - `dream`: runs Dream Labs' Dream-1 model from a prompt and the cameras; see [Dream Labs](#dream-labs).
 
 All send joint targets through the twin's safety supervisor. Read the
@@ -111,6 +113,12 @@ grasp:
   carry_s: 10.0
   wait_s: 20.0
   time_limit_s: 120.0
+grasp_jev:
+  block: cube
+  model: jev-1.14.0
+  min_confidence: 0.8
+  send_frames: false
+  wrist_camera: wrist
 grasp_wrist:
   block: cuboid
   wrist_camera: wrist
@@ -147,6 +155,7 @@ See [policy settings](soarm_lab/strategies/policy.py),
 [touch settings](soarm_lab/strategies/touch.py),
 [touch_jev settings](soarm_lab/strategies/touch_jev.py),
 [grasp settings](soarm_lab/strategies/grasp.py),
+[grasp_jev settings](soarm_lab/strategies/grasp_jev.py),
 [grasp_wrist settings](soarm_lab/strategies/wrist.py) and
 [conventions](../../docs/conventions.md) for the full interfaces.
 
@@ -216,6 +225,43 @@ input can be put to Claude or to a person to compare accuracy. A Claude judge wo
 process handling of the twin's `machinekind_twin_llm.cli` copied here, not imported (that package is
 only in the `twin` group and loads OpenCV), a fake CLI for its tests, and an `answer_timeout_s` near
 its 60 s limit, because the CLI answers in seconds where Jev answers in about 0.1 s.
+
+## Jev in the grasp loop
+
+`grasp_jev` asks Jev after each close and lift. It requires `TYPESAFE_API_KEY` and
+uses the same client and retry rules as `touch_jev`. Grasp's motion guards and drop recovery
+remain active. Each attempt is judged again after recovery.
+
+The task sent to Jev says whether a probe preceded the straddle.
+With `probe: true`, Jev also judges each probe. Touch questions decide whether to continue or
+correct the aim by `correction_m`. A claimed touch without usable probe geometry stops for review.
+At close and lift, `held` records whether the jaws are empty, hold the block or hold an edge.
+`next` chooses lift, wider regrasp, rotated regrasp or give-up.
+The state supplies jaw and lift buckets, pose
+sources, heading origin, earlier attempts and the geometry's `available_next` choices.
+
+`min_confidence` sets the verdict threshold. `min_correction_confidence` applies to corrections
+and next steps. Uncertain answers or unavailable steps stop for review. Regrasps consume
+`max_attempts`. Lift and hold clocks start after the answer. `answer_timeout_s` limits each
+call, and `time_limit_s` includes all model waits and retries.
+
+A wider regrasp adds twice `open_margin_m` on the moving jaw's side, keeping the fixed tip
+in place. A rotated regrasp turns the heading only when it was guessed and rotation changes
+the grasp. Held blocks are lowered and released before retrying.
+The open hand then moves `open_margin_m` toward the fixed jaw along the closing axis at release
+height. It rises only after the fixed tip clears the block.
+A drop during judging or lowering cancels the question and starts grasp's recovery.
+
+With `send_frames: true`, only `wrist_camera` is sent. Frames are reduced to Jev's side limit
+or omitted when too small, missing or stale. The state records frame references, ages, scaling
+and omission reasons. `GraspJevStrategy(..., blob=fn)` accepts a colour-occupancy callback
+for the region between the jaws. Until one is supplied, that sighting remains unknown.
+
+`judging.decisions` keeps records for replies, failures and cancellations. `drain_decisions`
+returns outgoing records once each. Stop-time cancellations remain in the run's records.
+Each record includes the decision point and question version.
+
+See [grasp_jev settings](soarm_lab/strategies/grasp_jev.py) for the full interface.
 
 ## Grasp a block
 
