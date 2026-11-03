@@ -4,6 +4,7 @@
 `robot` and `kinematics` provide the arm model and coordinate conversions.
 `blocks` provides named geometry catalogs. `rl` provides tasks, environments, PPO, and evaluation.
 `strategies` implements the twin's strategy API. `cli` exposes the `soarm-lab` commands.
+`planner` gives a language model the block world and turns its plan steps into target poses.
 
 Policy inference uses NumPy. Training requires the `soarm-lab[train]` extra.
 The `soarm-lab[torch]` extra converts older PyTorch checkpoints.
