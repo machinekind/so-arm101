@@ -1,0 +1,13 @@
+# @package _global_
+defaults:
+  - override /task: lift
+  - override /ppo: fine_tune
+
+name: lift_blocks
+init: lift-v3
+ppo:
+  iterations: 300
+  widen_init: true
+task_overrides:
+  variants: [cube, cuboid, cylinder]
+  block: cube

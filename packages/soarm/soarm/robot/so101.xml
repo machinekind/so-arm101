@@ -1,5 +1,6 @@
 <mujoco model="so101">
-  <option integrator="implicitfast" timestep="0.005" cone="elliptic" iterations="10" ls_iterations="20" impratio="10"/>
+  <!-- Modified by Machinekind from the Menagerie original: solver iterations 10 -> 20 and ls_iterations 20 -> 50, gripper contact solimp 0.9 0.995 0.001, so the jaws do not sink into objects and the solver converges. -->
+  <option integrator="implicitfast" timestep="0.005" cone="elliptic" iterations="20" ls_iterations="50" impratio="10"/>
 
   <compiler angle="radian" meshdir="assets" autolimits="true"/>
 
@@ -21,10 +22,10 @@
         <geom group="3" condim="3"/>
       </default>
       <default class="collision_gripper">
-        <geom group="3" condim="6" friction="1 5e-3 5e-4" solref="0.01 1" priority="1" rgba="1.0 0 0 1.0" mass="0"/>
+        <geom group="3" condim="6" friction="1 5e-3 5e-4" solref="0.01 1" solimp="0.9 0.995 0.001" priority="1" rgba="1.0 0 0 1.0" mass="0"/>
       </default>
       <default class="collision_gripper_mesh">
-        <geom group="4" condim="6" friction="1 5e-3 5e-4" solref="0.01 1" priority="1" rgba="1.0 0 0 1.0" mass="0"/>
+        <geom group="4" condim="6" friction="1 5e-3 5e-4" solref="0.01 1" solimp="0.9 0.995 0.001" priority="1" rgba="1.0 0 0 1.0" mass="0"/>
       </default>
     </default>
 

@@ -49,6 +49,11 @@ class TaskBase:
         return None
 
     @property
+    def variant(self) -> str | None:
+        """Return the task variant name, or None for tasks without variants."""
+        return None
+
+    @property
     def act_dim(self) -> int:
         return self.n_joints
 
@@ -125,10 +130,10 @@ def normalize_q(xp, limits: Limits, q):
     return 2.0 * (q - lo) / (hi - lo) - 1.0
 
 
-def fold_yaw(xp, R):
-    """Return yaw-only rotation matrices folded to ±45 degrees to match cube detector symmetry."""
+def fold_yaw(xp, R, period):
+    """Return yaw-only rotation matrices folded into [-period/2, period/2)."""
     yaw = xp.arctan2(R[..., 1, 0], R[..., 0, 0])
-    yaw = (yaw + np.pi / 4) % (np.pi / 2) - np.pi / 4
+    yaw = (yaw + period / 2) % period - period / 2
     c, s = xp.cos(yaw), xp.sin(yaw)
     z, o = xp.zeros_like(c), xp.ones_like(c)
     rows = [xp.stack([c, -s, z], -1), xp.stack([s, c, z], -1), xp.stack([z, z, o], -1)]

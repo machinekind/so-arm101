@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -10,8 +11,9 @@ import pytest
 mujoco = pytest.importorskip("mujoco")
 gym = pytest.importorskip("gymnasium")
 
+from soarm_lab.blocks import block  # noqa: E402
 from soarm_lab.rl import tasks as tk  # noqa: E402
-from soarm_lab.rl.env import VIEW, ArmEnv  # noqa: E402
+from soarm_lab.rl.env import TARGET_RGBA, VIEW, ArmEnv  # noqa: E402
 from soarm_lab.rl.randomize import Randomization  # noqa: E402
 from soarm_lab.station import Station  # noqa: E402
 
@@ -41,7 +43,7 @@ def test_observation_and_reward_are_the_same_in_numpy_and_jax():
     vel = rng.normal(0, 0.02, (n, 3))
     carried = rng.integers(0, 2, n).astype(bool)
     opened = rng.integers(0, 2, n).astype(bool)
-    cube[n // 2:, 2] = task.cube_half + rng.uniform(-0.002, 0.004, n - n // 2)
+    cube[n // 2:, 2] = task.block_spec.half_size[2] + rng.uniform(-0.002, 0.004, n - n // 2)
     cube[n // 2::2, :2] = target[n // 2::2, :2] + rng.normal(0, 0.01, (len(cube[n // 2::2]), 2))
     ok = slice(n // 2, n, 4)                                   # every success condition at once here
     vel[ok], jaws[ok], carried[ok], opened[ok] = 0.001, 0.0, True, True
@@ -51,11 +53,11 @@ def test_observation_and_reward_are_the_same_in_numpy_and_jax():
         obs = task.observe(xp, lim, conv(q), conv(q_cmd), conv(tcp), conv(prev), goal=conv(goal),
                          cube_pos=conv(cube), cube_rot=conv(rot), target=conv(target))
         r, s, f = task.reward(xp, conv(tcp), conv(act), conv(prev), goal=conv(goal), cube_pos=conv(cube),
-                            jaw_contacts=conv(jaws), q_cmd=conv(q_cmd), limits=lim, target=conv(target),
+                            cube_rot=conv(rot), jaw_contacts=conv(jaws), q_cmd=conv(q_cmd), limits=lim, target=conv(target),
                             cube_vel=conv(vel), carried=b(carried), grip_open=b(opened))
         nxt = tk.apply_action(xp, task, lim, conv(q_cmd), conv(act))
         st, done = tk.success_streak(xp, task, streak if xp is np else jnp.asarray(streak), s)
-        latch = tk.carry_latch(xp, task, b(carried), conv(jaws), conv(cube))
+        latch = tk.carry_latch(xp, task, b(carried), conv(jaws), conv(cube), conv(rot))
         grip = tk.grip_is_open(xp, lim, conv(q_cmd))
         return [np.asarray(x) for x in (obs, r, s, f, nxt, st, done, latch, grip)]
 
@@ -66,6 +68,228 @@ def test_observation_and_reward_are_the_same_in_numpy_and_jax():
         assert np.allclose(x, y, atol=1e-9)
     assert a[0].shape == (n, task.obs_dim)
     assert 0 < a[2].sum() < n                                  # success in some worlds: both branches run
+
+
+#: Expected rewards for the default cube with reset seed 3 and action seed 7.
+#: These actions leave the cube untouched; test_task_backends.py covers grasp rewards.
+PINNED = {
+    ("lift", "none"): [-0.038297, -0.060949, -0.080177, -0.10761, -0.110454, -0.088212, -0.110115, -0.098116,
+                       -0.007524, -0.133061, -0.061515, -0.035416, -0.163077, -0.082272, -0.063145, -0.083786,
+                       -0.08302, -0.085151, -0.043596, -0.065157],
+    ("lift", "default"): [-0.040315, -0.064228, -0.083141, -0.109993, -0.113994, -0.089289, -0.111033,
+                          -0.100593, -0.009758, -0.135502, -0.064, -0.038297, -0.165972, -0.083678, -0.065125,
+                          -0.086361, -0.083931, -0.086851, -0.047217, -0.068642],
+}
+#: Observation entries 12..26 contain TCP, cube, cube-TCP, and rotation in that order.
+PINNED_OBS0 = {"none": [0.321912, 0.000313, 0.145093, 0.191204, 0.026726, 0.015, -0.130708, 0.026413, -0.130093,
+                        0.076343, 0.997082, 0.0, -0.997082, 0.076343, 0.0],
+               "default": [0.323696, -0.019901, 0.158223, 0.166277, 0.151155, 0.015, -0.157419, 0.171056,
+                           -0.143223, 0.976999, 0.213242, 0.0, -0.213242, 0.976999, 0.0]}
+PINNED_CUBE20 = {"none": [0.191204, 0.026726, 0.014987], "default": [0.168353, 0.148136, 0.014987]}
+#: Initial target and target-cube values with randomization disabled.
+PINNED_TARGET0 = [0.23113, -0.083134, 0.0, 0.039926, -0.10986, -0.015]
+
+
+@pytest.mark.parametrize("rand", ["none", "default"])
+def test_the_3cm_cube_env_keeps_its_numbers(rand):
+    """The default cube retains its scene and observations while lying flat."""
+    task = tk.make_task("lift")
+    assert task.obs_dim == tk.OBS_DIMS["lift"] == 33
+    env = ArmEnv(task, randomization=Randomization.none() if rand == "none" else Randomization())
+    try:
+        obs, _ = env.reset(seed=3)
+        np.testing.assert_allclose(obs[12:27], PINNED_OBS0[rand], atol=2e-6)
+        rng = np.random.default_rng(7)
+        rewards = []
+        for _ in range(20):
+            obs, r, _, _, info = env.step(rng.uniform(-1, 1, task.act_dim))
+            rewards.append(r)
+        np.testing.assert_allclose(rewards, PINNED[("lift", rand)], atol=2e-6)
+        np.testing.assert_allclose(obs[15:18], PINNED_CUBE20[rand], atol=2e-6)
+        assert info["height"] == pytest.approx(-0.0000134, abs=1e-7)
+        m = env.scene.model
+        assert np.flatnonzero(m.geom_bodyid == m.body("cube").id).tolist() == [m.geom("cube").id]
+        assert m.geom_type[m.geom("cube").id] == mujoco.mjtGeom.mjGEOM_BOX
+        assert m.geom_size[m.geom("cube").id] == pytest.approx([0.015] * 3)
+        if rand == "none":
+            assert m.body_mass[m.body("cube").id] == pytest.approx(0.03)
+        assert m.opt.ccd_tolerance == pytest.approx(1e-6)
+    finally:
+        env.close()
+
+    env = ArmEnv("pickplace", randomization=Randomization.none())
+    try:
+        obs, _ = env.reset(seed=3)
+        np.testing.assert_allclose(obs[27:33], PINNED_TARGET0, atol=2e-6)
+    finally:
+        env.close()
+
+
+def test_a_block_under_the_pressing_gripper_stays_on_the_table_top():
+    """Table penetration stays below 1 mm while the closed gripper presses at the arm's torque limit."""
+    env = ArmEnv("lift", randomization=Randomization.none())
+    try:
+        half = env.task.block_spec.half_size[2]
+        env.reset(seed=0, options={"cube": ((0.2, 0.0, half), (1.0, 0.0, 0.0, 0.0))})
+        kin, scene = env.kin, env.scene
+        m, d = scene.model, scene.data
+        down = np.column_stack([[0.0, 0.0, -1.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+        joints = kin.ik(np.array([0.2, 0.0, 2 * half + 0.04]), down, seed=dict(kin.spec.home, gripper=0.0)).joints
+        scene.set_joints(joints)
+        lows = []
+        for z in np.linspace(2 * half + 0.04, 2 * half - 0.02, 20):
+            joints = dict(kin.ik_step(np.array([0.2, 0.0, z]), down, seed=joints).joints, gripper=0.0)
+            scene.command(joints)
+            for _ in range(10):
+                mujoco.mj_step(m, d)
+        for _ in range(300):
+            mujoco.mj_step(m, d)
+            mujoco.mj_kinematics(m, d)
+            s = env.state()
+            lows.append(env.task.height(np, s["cube_pos"][None], s["cube_rot"][None])[0])
+        # Require contact under load at the shoulder or elbow torque limit.
+        limit = m.actuator_forcerange[scene.act_ids[2], 1]
+        assert np.abs(d.actuator_force[scene.act_ids[1:3]]).max() == pytest.approx(limit)
+        assert s["jaws"].max() > 0.5
+        assert min(lows) > -0.001
+    finally:
+        env.close()
+
+
+#: Descriptor order for these tests.
+VARIANTS = ("cube", "cuboid", "cylinder")
+
+
+def _plain_observation(env: ArmEnv) -> np.ndarray:
+    """Return the current observation without a descriptor."""
+    s = env.state()
+    pos, rot = env._cube_seen
+    plain = replace(env.task, variants=())
+    return plain.observe(np, env.limits, s["q"][None], env.q_cmd[None], s["tcp"][None], env.prev_action[None],
+                         goal=env.goal[None], cube_pos=pos[None], cube_rot=rot[None],
+                         target=env.target[None])[0].astype(np.float32)
+
+
+@pytest.mark.parametrize("own", VARIANTS)
+def test_a_lift_env_with_variants_for_every_block(own):
+    """The descriptor follows the unchanged lift observation in every variant."""
+    task = tk.make_task("lift", variants=VARIANTS, block=own)
+    env = ArmEnv(task, randomization=Randomization.none())
+
+    def height():
+        s = env.state()
+        return task.height(np, s["cube_pos"][None], s["cube_rot"][None])[0]
+
+    try:
+        assert env.observation_space.shape == (39,)
+        obs, _ = env.reset(seed=0)
+        assert abs(height()) < 1e-12
+        rng = np.random.default_rng(1)
+        for t in range(21):
+            assert obs.shape == (39,) and np.isfinite(obs).all()
+            assert np.array_equal(obs[:33], _plain_observation(env)), t
+            assert np.array_equal(obs[33:], task.descriptor())
+            obs, r, _, _, info = env.step(rng.uniform(-1, 1, task.act_dim))
+            assert np.isfinite(r) and np.isfinite(info["height"])
+            assert info["height"] == height()
+        geoms = np.flatnonzero(env.scene.model.geom_bodyid == env.fields.cube_body)
+        assert env.fields.cube_geoms.tolist() == geoms.tolist()
+        assert env.scene.model.body_mass[env.fields.cube_body] == pytest.approx(block(own).mass)
+    finally:
+        env.close()
+
+
+def test_the_block_randomizes_on_every_part_and_folds_its_own_symmetry():
+    """Randomization scales object friction and mass and folds yaw by its symmetry."""
+    task = tk.make_task("lift", block="cuboid")
+    env = ArmEnv(task, randomization=Randomization(cube_friction=(1.2, 1.2), cube_mass=(1.5, 1.5)))
+    try:
+        m = env.scene.model
+        env.reset(seed=0)
+        assert m.geom_friction[env.fields.cube_geoms, 0] == pytest.approx(1.2)
+        assert m.body_mass[env.fields.cube_body] == pytest.approx(1.5 * block("cuboid").mass)
+        assert env.yaw_period == np.pi
+        yaw = np.radians(130.0)
+        R = np.array([[np.cos(yaw), -np.sin(yaw), 0.0], [np.sin(yaw), np.cos(yaw), 0.0], [0.0, 0.0, 1.0]])
+        folded = tk.fold_yaw(np, R[None], env.yaw_period)[0]
+        assert np.degrees(np.arctan2(folded[1, 0], folded[0, 0])) == pytest.approx(-50.0)
+    finally:
+        env.close()
+
+
+def test_every_part_of_a_block_randomizes_its_friction(monkeypatch):
+    """All parts share the friction multiplier and contribute to one body mass."""
+    from soarm_lab import blocks
+    from soarm_lab.station import Part
+
+    half = (0.03, 0.0125, 0.0125)
+    two = blocks.BlockSpec("two", half, 0.04, (Part("box", (0.015, 0.0125, 0.0125), pos=(-0.015, 0.0, 0.0)),
+                                               Part("box", (0.015, 0.0125, 0.0125), pos=(0.015, 0.0, 0.0))),
+                           np.pi)
+    monkeypatch.setitem(blocks.classic_world.BLOCKS, "two", two)
+    env = ArmEnv(tk.make_task("lift", block="two"), randomization=Randomization(cube_friction=(1.2, 1.2),
+                                                                                 cube_mass=(1.5, 1.5)))
+    try:
+        env.reset(seed=0)
+        m = env.scene.model
+        assert len(env.fields.cube_geoms) == 2
+        assert m.geom_friction[env.fields.cube_geoms, 0].tolist() == pytest.approx([1.2, 1.2])
+        assert m.body_mass[env.fields.cube_body] == pytest.approx(1.5 * 0.04)
+    finally:
+        env.close()
+
+
+@pytest.mark.parametrize("own", VARIANTS)
+def test_a_block_starts_anywhere_on_the_ring_at_any_yaw(own):
+    """Resets sample position and yaw while keeping body z vertical."""
+    task = tk.make_task("lift", block=own)
+    env = ArmEnv(task, randomization=Randomization.none())
+    try:
+        poses = []
+        for seed in range(8):
+            env.reset(seed=seed)
+            s = env.state()
+            poses.append((*s["cube_pos"], np.arctan2(s["cube_rot"][1, 0], s["cube_rot"][0, 0])))
+            assert s["cube_rot"][2, 2] == pytest.approx(1.0)
+            assert s["cube_pos"][2] == pytest.approx(block(own).half_size[2])
+    finally:
+        env.close()
+    poses = np.array(poses)
+    radius = np.hypot(poses[:, 0], poses[:, 1])
+    assert radius.min() >= task.cube_radius[0] and radius.max() <= task.cube_radius[1]
+    assert np.ptp(poses[:, 1]) > 0.05 and np.ptp(poses[:, 3]) > np.pi / 2
+
+
+def test_each_reset_paints_the_block_without_touching_the_physics():
+    """Seeds repeat colours. Every part of the block gets the same colour."""
+    task = tk.make_task("lift", block="cube", variants=("cube",))
+    env = ArmEnv(task, randomization=Randomization.none())
+    try:
+        m = env.scene.model
+        geoms = env.fields.cube_geoms
+
+        def paint(seed=None):
+            obs, _ = env.reset(seed=seed)
+            rgba = m.geom_rgba[geoms]
+            assert (rgba == rgba[0]).all()
+            return obs, tuple(rgba[0])
+
+        first, colour = paint(4)
+        assert paint(4) == (pytest.approx(first), colour)
+        assert paint(5)[1] != colour
+        assert len({paint()[1] for _ in range(5)}) == 5
+    finally:
+        env.close()
+
+
+def test_the_target_pad_is_white():
+    assert TARGET_RGBA == (1.0, 1.0, 1.0, 1.0)
+    env = ArmEnv("pickplace", randomization=Randomization.none())
+    try:
+        m = env.scene.model
+        assert m.geom_rgba[m.geom("target").id].tolist() == list(TARGET_RGBA)
+    finally:
+        env.close()
 
 
 def test_gymnasium_ids_of_the_lab():

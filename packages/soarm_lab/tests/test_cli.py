@@ -43,6 +43,60 @@ def test_eval_on_an_exported_station_folder(tmp_path, capsys):
     assert "'episodes': 1" in capsys.readouterr().out
 
 
+def _blocks_policy(tmp_path, evals=None) -> str:
+    """Save a policy with two variants and zero weights in SOARM_LAB_POLICIES."""
+    from dataclasses import asdict
+
+    from soarm_lab.rl.policy import Policy, PolicyMeta
+    from soarm_lab.rl.tasks import make_task
+
+    task = make_task("lift", variants=("cube", "cylinder"), block="cube")
+    meta = PolicyMeta(asdict(task), [8], task.obs_dim, task.act_dim, evals=evals or {}, created="2030-01-01")
+    Policy(meta).save(tmp_path / "policies" / "two-blocks" / "policy.npz")
+    return "two-blocks"
+
+
+def test_policies_shows_the_mean_and_the_worst_variant(tmp_path, capsys):
+    evals = {"cpu_rand_cube": {"success": 0.8}, "cpu_rand_cylinder": {"success": 0.4},
+             "cpu_cube": {"success": 1.0}, "cpu_cylinder": {"success": 1.0}}
+    _blocks_policy(tmp_path, evals)
+    assert main(["policies"]) == 0
+    line = next(x for x in capsys.readouterr().out.splitlines() if "two-blocks" in x)
+    assert "warianty z rand. srednio 60.0%, najslabszy cylinder 40.0%" in line
+
+
+def test_policies_falls_back_to_the_nominal_variants(tmp_path, capsys):
+    _blocks_policy(tmp_path, {"cpu_cube": {"success": 1.0}, "cpu_cylinder": {"success": 0.5}})
+    assert main(["policies"]) == 0
+    out = capsys.readouterr().out
+    assert "warianty bez rand. srednio 75.0%, najslabszy cylinder 50.0%" in out
+    assert out.count("warianty") == 1                                 # Bundled policies have no variants.
+
+
+def test_eval_on_one_variant(tmp_path, capsys):
+    name = _blocks_policy(tmp_path)
+    assert main(["eval", name, "--episodes", "1", "--variant", "cylinder"]) == 0
+    out = capsys.readouterr().out
+    assert "policy.npz (cylinder): " in out and "'variant': 'cylinder'" in out
+    assert main(["eval", name, "--episodes", "1"]) == 0
+    assert "'variant'" not in capsys.readouterr().out
+
+
+def test_eval_of_a_name_that_is_no_variant_is_refused(tmp_path):
+    name = _blocks_policy(tmp_path)
+    with pytest.raises(ValueError, match="'cuboid' is not a variant"):
+        main(["eval", name, "--episodes", "1", "--variant", "cuboid"])
+    with pytest.raises(ValueError, match="reach has no variants"):
+        main(["eval", "reach-v3", "--episodes", "1", "--variant", "cube"])
+
+
+def test_a_policy_without_variants_evaluates_on_any_block(capsys):
+    assert main(["eval", "lift-v3", "--episodes", "1", "--variant", "cuboid"]) == 0
+    assert "'variant': 'cuboid'" in capsys.readouterr().out
+    with pytest.raises(ValueError, match="unknown block"):
+        main(["eval", "lift-v3", "--episodes", "1", "--variant", "mug"])
+
+
 def test_an_unknown_policy_names_the_known_ones():
     with pytest.raises(FileNotFoundError, match="znane: .*reach-v3"):
         main(["eval", "reach-v9"])

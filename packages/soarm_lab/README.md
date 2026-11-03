@@ -67,7 +67,7 @@ with gym.make("SoArmLab/Lift-v0") as env:
 
 With this package installed alongside the twin, its Strategies tab offers:
 
-- `policy`: runs a bundled or trained policy, with tracking and episode limits.
+- `policy`: runs a policy on the perceived object selected by `object_name`.
 - `ik`: moves the tool centre point toward a goal without training, keeping the gripper fixed.
 - `touch`: closes the gripper, moves it above an object from `obs.objects` and down until the arm
   stalls on it; built for coarse, late poses such as the LLM detector's.

@@ -22,6 +22,7 @@ import jax.numpy as jnp  # noqa: E402
 
 from soarm_lab.rl import jax_policy as jp  # noqa: E402
 from soarm_lab.rl import ppo  # noqa: E402
+from soarm_lab.rl import tasks as tk  # noqa: E402
 from soarm_lab.rl.policy import POLICY_FILE, Policy  # noqa: E402
 from soarm_lab.station import Station  # noqa: E402
 
@@ -301,6 +302,149 @@ def test_a_policy_for_another_environment_is_refused(station, trained):
     other.actor = [(np.zeros((32, 5), np.float32), np.zeros(32, np.float32)), *pol.actor[1:]]
     with pytest.raises(ValueError, match="the actor of the init policy"):
         run(station, replace(CFG, iterations=1), init=other)
+
+
+#: Number of appended inputs for widening tests.
+EXTRA = 7
+
+
+def test_widening_keeps_the_actions():
+    """Widening preserves actions for arbitrary values of the appended inputs.
+    """
+    obs_dim, wide, act_dim, hidden = 33, 33 + EXTRA, 6, [32, 16]
+    k = jax.random.split(jax.random.PRNGKey(7), 5)
+    actor = jp.init_mlp(k[0], [obs_dim, *hidden, act_dim])
+    critic = jp.init_mlp(k[1], [obs_dim, *hidden, 1])
+    norm = jp.norm_update(jp.Norm.new(obs_dim), jax.random.normal(k[2], (300, obs_dim)) * 2 + 0.3)
+    like_actor = jp.init_mlp(k[3], [wide, *hidden, act_dim])
+    like_critic = jp.init_mlp(k[3], [wide, *hidden, 1])
+    w_actor = ppo._widen_layers("actor", actor, like_actor, EXTRA)
+    w_critic = ppo._widen_layers("critic", critic, like_critic, EXTRA)
+    w_norm = jp.widen_norm(norm, wide)
+    for old, new in ((actor, w_actor), (critic, w_critic)):
+        assert [w.shape for w, _ in new] == [(hidden[0], wide), *(w.shape for w, _ in old[1:])]
+        np.testing.assert_array_equal(new[0][0][:, :obs_dim], old[0][0])
+        np.testing.assert_array_equal(new[0][0][:, obs_dim:], 0.0)
+        for (w0, _), (w1, _) in zip(old[1:], new[1:], strict=True):
+            np.testing.assert_array_equal(w0, w1)
+        for (_, b0), (_, b1) in zip(old, new, strict=True):
+            np.testing.assert_array_equal(b0, b1)
+    np.testing.assert_array_equal(w_norm.mean[:obs_dim], norm.mean)
+    np.testing.assert_array_equal(w_norm.var[:obs_dim], norm.var)
+    np.testing.assert_array_equal(w_norm.mean[obs_dim:], 0.0)
+    np.testing.assert_array_equal(w_norm.var[obs_dim:], 1.0)
+    assert float(w_norm.count) == float(norm.count) and float(w_norm.clip) == float(norm.clip)
+
+    old_pol = jp.to_policy(_meta(obs_dim, act_dim, hidden), norm, actor)
+    new_pol = jp.to_policy(_meta(wide, act_dim, hidden), w_norm, w_actor)
+    obs = np.asarray(jax.random.normal(k[4], (50, obs_dim)) * 2, np.float32)
+    zeros = np.concatenate([obs, np.zeros((50, EXTRA), np.float32)], 1)
+    other = np.concatenate([obs, np.tile(_extra_inputs()[1], (50, 1))], 1)
+    want = old_pol.act(obs)
+    assert want.dtype == np.float32 and np.abs(want).max() > 0.05
+    np.testing.assert_allclose(new_pol.act(zeros), want, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(new_pol.act(other), want, rtol=0, atol=1e-6)
+
+    # Only the allowed number of appended inputs may change.
+    with pytest.raises(ValueError, match="the actor of the init policy"):
+        ppo._widen_layers("actor", actor, jp.init_mlp(k[3], [obs_dim + 5, *hidden, act_dim]), EXTRA)
+    with pytest.raises(ValueError, match="the actor of the init policy"):
+        ppo._widen_layers("actor", actor, like_actor, 0)
+
+
+def _extra_inputs():
+    """Return a constant input vector for each test variant."""
+    return np.stack([np.r_[1.0, 0.0, 0.25, 0.25, 0.25, 0.0, 0.0],
+                     np.r_[0.0, 1.0, 0.5, 0.25, 0.25, 0.0, 0.0]]).astype(np.float32)
+
+
+#: Worlds are split equally between these variants in order.
+TOY_VARIANTS = ["first", "second"]
+
+
+class WiderPointEnv(PointEnv):
+    """Append variant inputs to `PointEnv` without changing its dynamics or goals.
+    """
+
+    variants = TOY_VARIANTS
+
+    def __init__(self, task, num_envs, **kw):
+        super().__init__(task, num_envs, **kw)
+        half = self.num_envs // 2
+        self.variant = jnp.repeat(jnp.arange(2, dtype=jnp.int32), half)
+        self.extra = jnp.asarray(np.repeat(_extra_inputs(), half, axis=0))
+
+    @property
+    def obs_dim(self) -> int:
+        return 4 + EXTRA
+
+    def reset(self):
+        return jnp.concatenate([super().reset(), self.extra], 1)
+
+    def step(self, action):
+        obs, rew, done, info = super().step(action)
+        return jnp.concatenate([obs, self.extra], 1), rew, done, {**info, "variant": self.variant}
+
+
+def test_a_policy_is_widened_to_a_wider_environment(station, trained, tmp_path):
+    """Training widens saved weights and reports success for each variant."""
+    pol, history, _ = trained
+    lift_pol = _with_critic(pol, pol.critic)                    # Use lift metadata with the test environment.
+    lift_pol.meta.task = {"name": "lift"}
+    task = tk.make_task("lift")
+    seen = []
+    cfg = replace(CFG, iterations=2, init_std=0.25, widen_init=True)
+
+    def record(p):
+        seen.append(replace(p, success_by_variant=dict(p.success_by_variant)))
+
+    tuned = ppo.train(task, cfg, station=station, device="cpu", make_env=WiderPointEnv, init=lift_pol,
+                      init_name="toy-v1", out_dir=tmp_path, on_progress=record)
+    wide = 4 + EXTRA
+    assert tuned.sizes == [wide, 32, 32, 2] and tuned.critic[0][0].shape == (32, wide)
+    assert tuned.meta.obs_dim == wide
+    assert "(toy-v1, " in tuned.meta.notes and f"z 4 do {wide} wejsc" in tuned.meta.notes
+    # Widening preserves the learned behavior at the start of training.
+    assert seen[0].success > 0.7 > history[0]["success"], seen
+    assert set(seen[0].success_by_variant) == set(TOY_VARIANTS)
+    assert all(v > 0.5 for v in seen[0].success_by_variant.values()), seen[0].success_by_variant
+    prog = json.loads((tmp_path / "progress.json").read_text(encoding="utf-8"))
+    assert set(prog["success_by_variant"]) == set(TOY_VARIANTS) and "success_second" in prog["history"][-1]
+    assert json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))["variants"] == TOY_VARIANTS
+    # Appended inputs require widening to be enabled.
+    with pytest.raises(ValueError, match="the actor of the init policy"):
+        ppo.train(task, replace(CFG, iterations=1), station=station, device="cpu",
+                  make_env=WiderPointEnv, init=lift_pol)
+    # Fine-tuning requires the same task name.
+    with pytest.raises(ValueError, match="trained on lift, the task is pickplace"):
+        ppo.train(tk.make_task("pickplace"), replace(CFG, iterations=1), station=station, device="cpu",
+                  make_env=WiderPointEnv, init=lift_pol)
+
+
+def test_widen_init_refuses_any_other_mismatch(station, trained):
+    """Widening rejects narrower observations and changed hidden-layer shapes."""
+    pol, _, _ = trained
+    wider = _with_critic(pol, None)
+    wider.meta = replace(wider.meta, obs_dim=5)
+    wider.actor = [(np.zeros((32, 5), np.float32), np.zeros(32, np.float32)), *pol.actor[1:]]
+    with pytest.raises(ValueError, match="the actor of the init policy"):
+        run(station, replace(CFG, iterations=1, widen_init=True), init=wider)
+    other = _with_critic(pol, None)
+    other.actor = [*pol.actor[:-1], (np.zeros((2, 16), np.float32), np.zeros(2, np.float32))]
+    with pytest.raises(ValueError, match="the actor of the init policy"):
+        run(station, replace(CFG, iterations=1, widen_init=True), init=other)
+
+
+def test_widen_init_changes_nothing_on_the_same_width(station, trained):
+    pol, _, _ = trained
+    tuned, _ = run(station, replace(CFG, iterations=1, init_std=0.25, widen_init=True), init=pol)
+    assert tuned.sizes == pol.sizes and "poszerzona" not in tuned.meta.notes
+
+
+def test_success_by_variant_names_the_variants():
+    assert ppo._success_by_variant([1.0, 0.0, 1.0, 1.0], [0, 0, 1, 1], ("first", "second")) == \
+        {"first": 0.5, "second": 1.0}
+    assert ppo._success_by_variant([1.0, 0.0], [2, 2], ()) == {"2": 0.5}
 
 
 # ----------------------------------------------------------------------- helpers

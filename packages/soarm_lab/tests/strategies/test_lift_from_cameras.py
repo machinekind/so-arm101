@@ -55,11 +55,13 @@ def test_lift_policy_lifts_a_cube_seen_only_by_cameras(twin_robots):
                                    calibration={"trusted": True}))
     strategy = PolicyStrategy(PolicySettings(policy="lift-v3"))
     task = strategy.task
-    h = task.cube_half
+    spec = task.block_spec
+    h = spec.half_size[2]
     twin = Twin(ws, clock=VirtualClock(t0=0.0))
     try:
-        twin.configure(objects=[sc.Box("cube", (h, h, h), (0.2, 0.0), rgba=(0.85, 0.25, 0.2, 1.0),
-                                       mass=task.cube_mass)], grasp_sensors=["cube"])
+        red = (0.85, 0.25, 0.2, 1.0)
+        twin.configure(objects=[sc.Box("cube", spec.half_size, (0.2, 0.0), rgba=red, mass=spec.mass)],
+                       grasp_sensors=["cube"])
         twin.connect("sim", threaded=False)
         pos, quat = tk.sample_cubes(task, np.random.default_rng(5), 1)
         with twin.lock:

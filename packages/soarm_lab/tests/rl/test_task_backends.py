@@ -15,12 +15,15 @@ import pytest
 pytest.importorskip("mujoco")
 jnp = pytest.importorskip("jax.numpy")
 
+from soarm_lab import blocks  # noqa: E402
 from soarm_lab import sim as sc  # noqa: E402
 from soarm_lab.rl import tasks as tk  # noqa: E402
 from soarm_lab.rl.env import scene_config  # noqa: E402
 
 #: Worlds in a batch.
 N = 32
+#: Descriptor order for the task variants under test.
+VARIANTS = ("cube", "cuboid", "cylinder")
 
 
 @pytest.fixture(scope="module")
@@ -42,7 +45,8 @@ def inputs(task: tk.TaskConfig, lim: tk.Limits, seed: int) -> dict[str, np.ndarr
     goal[::3] = tcp[::3] + rng.normal(0, 0.005, (len(goal[::3]), 3))      # reach: some within success_dist
     cube = rng.normal(0, 0.2, (N, 3))
     cube[: N // 2, 2] = 0.09                                    # half lifted: the carry latch, the lift term
-    cube[N // 2:, 2] = tk.make_task("lift").cube_half + rng.uniform(-0.002, 0.004, N - N // 2)
+    rest = task.block_spec.half_size[2] if task.cube else 0.015
+    cube[N // 2:, 2] = rest + rng.uniform(-0.002, 0.004, N - N // 2)
     cube[::5, 2] = -0.08                                        # off the table: failure
     target = np.c_[rng.normal(0, 0.2, (N, 2)), np.zeros(N)]
     cube[N // 2::2, :2] = target[N // 2::2, :2] + rng.normal(0, 0.01, (len(cube[N // 2::2]), 2))
@@ -80,31 +84,31 @@ def run(xp, task: tk.TaskConfig, lim: tk.Limits, x: dict[str, np.ndarray]) -> di
     if task.target:
         kw = dict(target=f(x["target"]), cube_vel=f(x["vel"]), carried=b(x["carried"]),
                   grip_open=b(x["opened"]))
+    period = task.block_spec.yaw_period if cube else np.pi / 2
     out = {
         "observe": task.observe(xp, lim, f(x["q"]), f(x["q_cmd"]), f(x["tcp"]), f(x["prev"]),
                               goal=f(x["goal"]), cube_pos=f(x["cube"]) if cube else None,
                               cube_rot=f(x["rot"]) if cube else None, target=f(x["target"])),
         "apply_action": tk.apply_action(xp, task, lim, f(x["q_cmd"]), f(x["act"])),
-        "fold_yaw": tk.fold_yaw(xp, f(x["rot"])),
+        "fold_yaw": tk.fold_yaw(xp, f(x["rot"]), period),
         "carry_latch": tk.carry_latch(xp, task if task.cube else tk.make_task("lift"),
-                                      b(x["carried"]), f(x["jaws"]), f(x["cube"])),
+                                      b(x["carried"]), f(x["jaws"]), f(x["cube"]), f(x["rot"])),
         "grip_is_open": tk.grip_is_open(xp, lim, f(x["q_cmd"])),
         # reach has no limit penalty of its own; `limit_cost` is checked with one anyway.
         "limit_cost": tk.limit_cost(xp, replace(task, limit_penalty=0.5), lim, f(x["q_cmd"])),
     }
     r, s, fail = task.reward(xp, f(x["tcp"]), f(x["act"]), f(x["prev"]), goal=f(x["goal"]),
-                           cube_pos=f(x["cube"]) if cube else None,
+                           cube_pos=f(x["cube"]) if cube else None, cube_rot=f(x["rot"]) if cube else None,
                            jaw_contacts=f(x["jaws"]) if cube else None, q_cmd=f(x["q_cmd"]), limits=lim, **kw)
     out.update(reward=r, success=s, failure=fail)
+    if cube:
+        out["height"] = task.height(xp, f(x["cube"]), f(x["rot"]))
     out["streak"], out["streak_done"] = tk.success_streak(xp, task, b(x["streak"]), s)
     return {k: np.asarray(v) for k, v in out.items()}
 
 
-@pytest.mark.parametrize("name", tk.TASKS)
-def test_numpy_and_jax_compute_the_same_task(name, station, limits):
-    task = tk.make_task(name, spec=station.spec())
-    x = inputs(task, limits, seed=tk.TASKS.index(name))
-    a, b = run(np, task, limits, x), run(jnp, task, limits, x)
+def _compare(task: tk.TaskConfig, lim: tk.Limits, x: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    a, b = run(np, task, lim, x), run(jnp, task, lim, x)
     assert a.keys() == b.keys()
     for k in a:
         assert a[k].shape == b[k].shape, k
@@ -114,6 +118,14 @@ def test_numpy_and_jax_compute_the_same_task(name, station, limits):
             assert b[k].dtype == np.float32, k
             np.testing.assert_allclose(b[k], a[k], rtol=1e-5, atol=1e-6, err_msg=k)
     assert a["observe"].shape == (N, task.obs_dim)
+    return a
+
+
+@pytest.mark.parametrize("name", tk.TASKS)
+def test_numpy_and_jax_compute_the_same_task(name, station, limits):
+    task = tk.make_task(name, spec=station.spec())
+    x = inputs(task, limits, seed=tk.TASKS.index(name))
+    a = _compare(task, limits, x)
     # Both sides of the conditions ran, so `where` and the masks were checked, not one branch.
     assert 0 < a["success"].sum() < N
     assert 0 < a["limit_cost"].astype(bool).sum() < N
@@ -121,3 +133,91 @@ def test_numpy_and_jax_compute_the_same_task(name, station, limits):
         assert 0 < a["failure"].sum() < N
     if task.end_on_success:
         assert 0 < a["streak_done"].sum() < N
+
+
+@pytest.mark.parametrize("own", VARIANTS)
+@pytest.mark.parametrize("name", ("lift", "pickplace"))
+def test_numpy_and_jax_compute_the_same_task_with_variants(name, own, station, limits):
+    """NumPy and JAX agree on variant observations and lowest-point rewards."""
+    task = tk.make_task(name, spec=station.spec(), variants=VARIANTS, block=own)
+    x = inputs(task, limits, seed=10 + VARIANTS.index(own))
+    a = _compare(task, limits, x)
+    plain = replace(task, variants=()).observe(np, limits, x["q"], x["q_cmd"], x["tcp"], x["prev"],
+                                               cube_pos=x["cube"], cube_rot=x["rot"], target=x["target"])
+    k = plain.shape[1]
+    assert a["observe"].shape == (N, k + len(VARIANTS) + 3)
+    assert np.array_equal(a["observe"][:, :k], plain)
+    assert np.array_equal(a["observe"][:, k:], np.broadcast_to(task.descriptor(), (N, len(VARIANTS) + 3)))
+    np.testing.assert_array_equal(a["height"], blocks.bottom_height(np, task.block_spec, x["cube"], x["rot"]))
+    assert 0 < a["success"].sum() < N and 0 < a["failure"].sum() < N
+
+
+def _pinned_batch(task: tk.TaskConfig, lim: tk.Limits) -> dict[str, np.ndarray]:
+    """Build fixed states spanning grasp, lift, placement, and failure conditions."""
+    rng = np.random.default_rng(5)
+    n, nj = 12, task.act_dim
+    tcp = rng.normal(0, 0.05, (n, 3)) + [0.2, 0.0, 0.05]
+    cube = tcp + rng.normal(0, 0.01, (n, 3))
+    cube[:, 2] = task.block_spec.half_size[2] + np.linspace(-0.07, 0.10, n)
+    jaws = np.ones((n, 2))
+    jaws[::3] = 0.0
+    target = np.c_[cube[:, :2] + rng.normal(0, 0.02, (n, 2)), np.zeros(n)]
+    vel = rng.normal(0, 0.01, (n, 3))
+    q_cmd = rng.uniform(lim.lo, lim.hi, (n, nj))
+    act, prev = rng.uniform(-1, 1, (n, nj)), rng.uniform(-1, 1, (n, nj))
+    return dict(tcp=tcp, cube=cube, rot=np.broadcast_to(np.eye(3), (n, 3, 3)), jaws=jaws, target=target,
+                vel=vel, carried=np.arange(n) % 2 == 0, opened=np.arange(n) % 4 < 2, q_cmd=q_cmd, act=act,
+                prev=prev)
+
+
+#: Expected rewards, successes, and failures for the upright default cube in `_pinned_batch`.
+PINNED_REWARDS = {
+    "lift": ([-0.05087789, 1.010613325, 0.988474619, 0.830648662, 1.148904974, 1.832259039, 0.284883369,
+              3.803095015, 4.393715791, 0.242831223, 6.846265757, 6.189205521],
+             [0] * 10 + [1, 1], [1, 1] + [0] * 10),
+    "pickplace": ([10.175731089, 1.010613325, 3.637924755, 0.830648662, 7.987700552, 1.589834797,
+                   3.18401043, 2.530367742, 6.250467077, 0.242831223, 6.107233112, 3.005231585],
+                  [1] + [0] * 11, [1, 1] + [0] * 10),
+}
+PINNED_LATCH = [1, 0] * 5 + [1, 1]
+
+
+@pytest.mark.parametrize("name", ("lift", "pickplace"))
+def test_the_reward_terms_are_pinned(name, station, limits):
+    """The upright default cube preserves grasp, lift, placement, and failure rewards."""
+    task = tk.make_task(name, spec=station.spec())
+    x = _pinned_batch(task, limits)
+    kw = dict(target=x["target"], cube_vel=x["vel"], carried=x["carried"], grip_open=x["opened"]) \
+        if task.target else {}
+    r, s, f = task.reward(np, x["tcp"], x["act"], x["prev"], cube_pos=x["cube"], cube_rot=x["rot"],
+                          jaw_contacts=x["jaws"], q_cmd=x["q_cmd"], limits=limits, **kw)
+    rew, succ, fail = PINNED_REWARDS[name]
+    np.testing.assert_allclose(r, rew, atol=2e-9)
+    assert s.astype(int).tolist() == succ and f.astype(int).tolist() == fail
+    latch = tk.carry_latch(np, task, x["carried"], x["jaws"], x["cube"], x["rot"])
+    assert latch.astype(int).tolist() == PINNED_LATCH
+
+
+@pytest.mark.parametrize("name", ("lift", "pickplace"))
+def test_a_tilted_cube_counts_its_lowest_point(name, station, limits):
+    """A tilted cube uses its lowest corner for height, carrying, and lift success."""
+    task = tk.make_task(name, spec=station.spec())
+    x = _pinned_batch(task, limits)
+    c = s = np.sqrt(0.5)
+    tilt = np.array([[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]])            # 45 deg about x
+    rot = np.broadcast_to(tilt, (12, 3, 3))
+    flat = task.height(np, x["cube"], x["rot"])
+    np.testing.assert_allclose(flat, x["cube"][:, 2] - 0.015, atol=1e-15)
+    tilted = task.height(np, x["cube"], rot)
+    np.testing.assert_allclose(tilted, x["cube"][:, 2] - 0.015 * np.sqrt(2.0), atol=1e-15)
+    # Tilting lowers the corner below the lift threshold.
+    z = 0.015 + task.lift_height + 0.002
+    pos = np.array([[0.2, 0.0, z]])
+    jaws, no = np.ones((1, 2)), np.zeros(1, bool)
+    assert tk.carry_latch(np, task, no, jaws, pos, x["rot"][:1]).tolist() == [True]
+    assert tk.carry_latch(np, task, no, jaws, pos, tilt[None]).tolist() == [False]
+    if name == "lift":
+        args = (np, x["tcp"][:1], x["act"][:1], x["prev"][:1])
+        kw = dict(cube_pos=pos, jaw_contacts=jaws, q_cmd=x["q_cmd"][:1], limits=limits)
+        assert task.reward(*args, cube_rot=x["rot"][:1], **kw)[1].tolist() == [True]
+        assert task.reward(*args, cube_rot=tilt[None], **kw)[1].tolist() == [False]

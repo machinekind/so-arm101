@@ -94,6 +94,25 @@ sets `init_std=0.25` and `critic_warmup=30`.
 output name. Set `OVERRIDES="name=x"` to change it. The dispatcher also reads
 `GPUS` and `ON_FAILURE`.
 
+## Train one policy on several blocks
+
+`lift_blocks` fine-tunes `lift-v3` on three task variants, one per block shape.
+`ppo.widen_init` enables appended descriptor inputs with zero initial actor and critic weights.
+
+```bash
+uv run --extra train soarm-lab train experiment=lift_blocks
+uv run soarm-lab eval lift_blocks --variant cylinder
+```
+
+Training saves nominal and randomized CPU evaluations for each variant.
+The [Classic World catalog](../blocks/classic_world.py) holds measured dimensions.
+Masses are estimated from volume at 0.7 g/cm³ until the blocks are weighed.
+To add a catalog, create a module under [blocks](../blocks) with named `BlockSpec`
+entries in `BLOCKS`, then register that mapping in `blocks.__init__._CATALOGS`.
+Set the experiment's `task_overrides.variants` to the ordered names and
+`task_overrides.block` to its default variant. `ppo.num_envs` must be divisible by
+the number of variants. Training samples each block's position and yaw at random.
+
 ## Add an experiment
 
 Add a YAML file under [`conf/experiment`](../conf/experiment) with a global

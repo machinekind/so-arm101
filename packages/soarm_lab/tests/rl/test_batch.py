@@ -18,8 +18,9 @@ pytest.importorskip("mujoco_warp", reason="mujoco-warp is not installed (the `tr
 
 import jax.numpy as jnp  # noqa: E402
 
+from soarm_lab import blocks  # noqa: E402
 from soarm_lab.rl import tasks as tk  # noqa: E402
-from soarm_lab.rl.batch import BatchEnv  # noqa: E402
+from soarm_lab.rl.batch import CONTACTS, BatchEnv, contact_budget  # noqa: E402
 from soarm_lab.rl.env import ArmEnv  # noqa: E402
 from soarm_lab.rl.policy import Policy  # noqa: E402
 from soarm_lab.rl.randomize import Randomization  # noqa: E402
@@ -91,6 +92,39 @@ def test_the_batch_steps_on_the_cpu_device(task, station):
     assert all(isinstance(v, jax.Array) and v.shape == (4,) for v in info.values())
     assert jnp.isfinite(obs).all() and jnp.isfinite(rew).all()
     assert not info["broken"].any()
+
+
+def test_a_block_with_variants_steps_on_the_cpu_device(station):
+    """Cylinder worlds include a descriptor after the previous action."""
+    variants = ("cube", "cuboid", "cylinder")
+    task = tk.make_task("lift", spec=station.spec(), variants=variants, block="cylinder")
+    env = BatchEnv(task, num_envs=4, station=station, device="cpu")
+    assert env.obs_dim == tk.OBS_DIMS["lift"] + 6 == 39
+    assert contact_budget(task, "so101") == CONTACTS["so101"]
+    assert env.yaw_period == pytest.approx(np.pi)
+    env.reset()
+    _, _, _, info = env.step(jnp.zeros((4, env.act_dim)))
+    # The initial cylinder centre is one radius above the table.
+    np.testing.assert_allclose(np.asarray(info["height"]), 0.0, atol=2e-3)
+    obs, rew, done, info = random_steps(env, 20)
+    assert obs.shape == (4, 39) and obs.dtype == jnp.float32 and rew.shape == (4,)
+    assert jnp.isfinite(obs).all() and jnp.isfinite(rew).all() and not info["broken"].any()
+    assert set(info) == {"success", "time_outs", "broken", "finished"} | INFO["lift"]
+    np.testing.assert_array_equal(np.asarray(obs[:, -6:]), np.tile(task.descriptor(), (4, 1)))
+
+
+def test_the_contact_budget_counts_the_collision_parts(monkeypatch):
+    assert CONTACTS == {"so101": (48, 288), "a1x": (64, 384)}
+    assert contact_budget(tk.make_task("reach"), "so101") == (16, 64)
+    assert contact_budget(tk.make_task("reach"), "a1x") == (16, 64)
+    for name in ("lift", "pickplace"):
+        assert contact_budget(tk.make_task(name), "so101") == (48, 288)
+        assert contact_budget(tk.make_task(name), "a1x") == (64, 384)
+    one = blocks.block("cube").parts[0]
+    two = blocks.BlockSpec("two", (0.025, 0.0125, 0.0125), 0.02, (one, one), np.pi)
+    monkeypatch.setitem(blocks.classic_world.BLOCKS, "two", two)
+    assert contact_budget(tk.make_task("lift", block="two"), "so101") == (96, 576)
+    assert contact_budget(tk.make_task("lift", block="two"), "a1x") == (128, 768)
 
 
 def test_a_reset_observes_the_joints_it_wrote(station):

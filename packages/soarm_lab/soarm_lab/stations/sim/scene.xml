@@ -1,7 +1,7 @@
 <mujoco model="MuJoCo Model">
   <compiler angle="radian" meshdir="assets/"/>
 
-  <option timestep="0.005" impratio="10" integrator="implicitfast" cone="elliptic" iterations="10" ls_iterations="20"/>
+  <option timestep="0.005" impratio="10" integrator="implicitfast" cone="elliptic" iterations="20"/>
 
   <visual>
     <headlight ambient="0.35 0.35 0.35" diffuse="0.35 0.35 0.35"/>
@@ -19,10 +19,10 @@
           <geom group="3"/>
         </default>
         <default class="robot/collision_gripper">
-          <geom condim="6" group="3" priority="1" friction="1 0.005 0.0005" solref="0.01" rgba="1 0 0 1"/>
+          <geom condim="6" group="3" priority="1" friction="1 0.005 0.0005" solref="0.01" solimp="0.9 0.995" rgba="1 0 0 1"/>
         </default>
         <default class="robot/collision_gripper_mesh">
-          <geom condim="6" group="4" priority="1" friction="1 0.005 0.0005" solref="0.01" rgba="1 0 0 1"/>
+          <geom condim="6" group="4" priority="1" friction="1 0.005 0.0005" solref="0.01" solimp="0.9 0.995" rgba="1 0 0 1"/>
         </default>
       </default>
       <default class="robot/sts3215">

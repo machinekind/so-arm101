@@ -23,7 +23,7 @@ from ..robot import RobotSpec
 from ..station import Station
 from . import tasks
 from .evaluate import evaluate
-from .policy import POLICY_FILE, Policy, find_policy
+from .policy import POLICY_FILE, Policy, find_policy, variant_key
 from .ppo import PPOConfig, train
 from .randomize import Dynamics, describe, train_plan
 
@@ -88,6 +88,13 @@ def training_task(cfg: DictConfig, spec: RobotSpec, *, task_selected: bool = Fal
     return init, task
 
 
+def mixed_env(task: tasks.LiftConfig, num_envs: int, **kwargs):
+    """Build a `MixedBatchEnv` from the task variants using `BatchEnv` arguments."""
+    from .mixed import MixedBatchEnv
+
+    return MixedBatchEnv(task.variant_tasks(), num_envs, **kwargs)
+
+
 def execute(a: DictConfig, *, task_selected: bool = False) -> int:
     st = Station.load(a.station)
     init, task = training_task(a, st.spec(), task_selected=task_selected)
@@ -99,13 +106,19 @@ def execute(a: DictConfig, *, task_selected: bool = False) -> int:
     cfg.hidden = tuple(cfg.hidden)
     if init is not None:
         print(f"Start z polityki {a.init} ({init.task.name})")
-    print(f"Trening {task.name} na stanowisku {st.folder}: {a.ppo.num_envs} swiatow x {a.ppo.iterations} iteracji -> {out}")
+    variants = task.variants if isinstance(task, tasks.LiftConfig) else ()
+    listed = f" (warianty: {', '.join(variants)})" if variants else ""
+    print(f"Trening {task.name}{listed} na stanowisku {st.folder}: {a.ppo.num_envs} swiatow x {a.ppo.iterations} iteracji -> {out}")
     print(f"  {describe(rand)}{'' if a.randomization.spread == 0 else f', rozrzut x{a.randomization.spread}'}")
 
     def show(p):
         if p.iteration == 1 or p.iteration % 10 == 0 or p.status != "uczenie":
+            worst = ""
+            if p.success_by_variant:
+                variant = min(p.success_by_variant, key=p.success_by_variant.__getitem__)
+                worst = f"  najslabszy {variant} {p.success_by_variant[variant]:5.1%}"
             print(f"  it {p.iteration:4d}/{p.iterations}  {p.steps / 1e6:7.2f} M krokow  {p.fps / 1e3:5.0f} k/s  "
-                  f"sukces {p.success:5.1%}  nagroda {p.reward:7.2f}  {p.elapsed:5.0f} s", flush=True)
+                  f"sukces {p.success:5.1%}{worst}  nagroda {p.reward:7.2f}  {p.elapsed:5.0f} s", flush=True)
 
     stop = None
     if a.stop_file:
@@ -123,14 +136,25 @@ def execute(a: DictConfig, *, task_selected: bool = False) -> int:
         threading.Thread(target=watch, daemon=True).start()
     out.mkdir(parents=True, exist_ok=True)
     OmegaConf.save(a, out / "experiment.yaml", resolve=True)
+    init_name = find_policy(a.init).parent.name if a.init else ""
     pol = train(task, cfg, station=st, randomization=rand, out_dir=out, on_progress=show, stop=stop,
-                init=init, device=a.device)
+                init=init, device=a.device, make_env=mixed_env if variants else None, init_name=init_name)
+
+    def report(label, res):
+        rounded = {k: round(v, 3) if isinstance(v, float) else v for k, v in res.items()}
+        print(f"  {label:{27 if variants else 17}s} sukces {res['success']:5.1%}  ({json.dumps(rounded)})")
+
     print("Ewaluacja na CPU (zwykle MuJoCo, inny silnik niz w treningu):")
     for label, key, r in evals:
         res = evaluate(pol, a.eval_episodes, randomization=r, station=st)
         pol.meta.evals[key] = res
-        rounded = {k: round(v, 3) if isinstance(v, float) else v for k, v in res.items()}
-        print(f"  {label:17s} sukces {res['success']:5.1%}  ({json.dumps(rounded)})")
+        report(label, res)
+    for variant in variants:
+        for label, key, r in evals:
+            res = {**pol.meta.evals[key], "variant": variant} if variant == task.block else \
+                evaluate(pol, a.eval_episodes, randomization=r, station=st, variant=variant)
+            pol.meta.evals[variant_key(key, variant)] = res
+            report(f"{variant} {label}", res)
     print(f"Zapisano {pol.save(out / POLICY_FILE)}")
     return 0
 

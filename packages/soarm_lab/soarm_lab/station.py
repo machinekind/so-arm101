@@ -82,12 +82,40 @@ class Table:
         return pose(R, np.array([self.base_xy[0], self.base_xy[1], self.height]))
 
 
+#: Map part kinds to MuJoCo geometry types.
+PART_GEOMS = {"box": mujoco.mjtGeom.mjGEOM_BOX, "cylinder": mujoco.mjtGeom.mjGEOM_CYLINDER}
+#: Tighten cylinder contact accuracy to prevent drift at rest.
+CYLINDER_CCD_TOLERANCE = 1e-10
+#: Name of the table's collision geom.
+TABLE_GEOM = "table"
+#: Stiff contacts limit penetration when the arm presses on light objects.
+OBJECT_SOLREF = (0.01, 1.0)
+OBJECT_SOLIMP = (0.95, 0.995, 0.001, 0.5, 2.0)
+
+
+@dataclass(frozen=True)
+class Part:
+    """Define a convex collision part in the object's body frame.
+
+    `size` uses metres and MuJoCo conventions. Boxes take half extents.
+    Cylinders take (radius, half length, 0) along local z.
+    `pos` [m] and `quat` (w, x, y, z) locate the part in the body.
+    `mass_fraction` is a relative weight for splitting the object's mass among its parts.
+    """
+
+    kind: str
+    size: tuple[float, float, float]
+    pos: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    quat: tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0)
+    mass_fraction: float = 1.0
+
+
 @dataclass
 class Box:
-    """A box on the table: a task object (free body) or a marker (mocap body without collisions)."""
+    """Define a table object with optional mocap control."""
 
     name: str
-    #: Half sides [m].
+    #: Bounding-box half extents [m]; the initial body origin is `size[2]` above the table.
     size: tuple[float, float, float]
     #: Where it lies on the table, in the base frame [m].
     xy: tuple[float, float]
@@ -97,6 +125,9 @@ class Box:
     #: A mocap body without collisions, for looking only (e.g. the pickplace target pad). Its pose is
     #: set through `data.mocap_pos` / `mocap_quat`; objects pass through it.
     mocap: bool = False
+    #: Collision parts; empty creates one box of `size`.
+    #: Geom names are the object name for the first part, then `<name>/part<i>`.
+    parts: tuple[Part, ...] = ()
 
 
 class Station:
@@ -191,12 +222,14 @@ class Station:
 
     def compose(self, objects: Sequence[Box] = (), grasp_sensors: Sequence[str] = (),
                 cameras: Sequence[CameraView] = ()) -> mujoco.MjSpec:
-        """`scene.xml` as an `MjSpec`, plus task objects, jaw contact sensors and extra cameras.
+        """Load `scene.xml` as an `MjSpec` with objects, jaw sensors, and extra cameras.
 
-        Each of `objects` is a free body with a box geom (condim 4, friction 1 / 0.02 / 0.002), or a
-        mocap body without collisions. `grasp_sensors` names objects that get a contact sensor with
-        each jaw, `<object>_jaw0` (fixed) and `<object>_jaw1` (moving), 1 when they touch. `cameras`
-        are added with their full K; a name the scene already has fails.
+        Objects use one geom per part, or one box when parts are empty.
+        Collision geoms use condim 4 and friction (1, 0.02, 0.002).
+        Objects and the table top use `OBJECT_SOLREF` and `OBJECT_SOLIMP` for stiff contacts.
+        Mocap markers have no collisions. Cylinder parts tighten `ccd_tolerance` to prevent drift.
+        `grasp_sensors` adds binary `<object>_jaw0` and `<object>_jaw1` sensors for the fixed and moving jaws.
+        Cameras retain their full intrinsic matrix K. Duplicate camera names raise an error.
         """
         spec = mujoco.MjSpec.from_file(str(self.scene_path))
         if not (self.folder / ASSETS_DIR).is_dir():
@@ -204,6 +237,9 @@ class Station:
         T_base2world = self.T_base2world
 
         world = spec.worldbody
+        table = spec.geom(TABLE_GEOM)
+        if table is not None:
+            _stiff_contact(table)
         for obj in objects:
             p = T_base2world @ np.array([obj.xy[0], obj.xy[1], obj.size[2], 1.0])
             body = world.add_body()
@@ -213,6 +249,9 @@ class Station:
                 body.mocap = True
             elif obj.free:
                 body.add_freejoint()
+            if obj.parts:
+                _add_parts(body, obj)
+                continue
             g = body.add_geom()
             g.name = obj.name
             g.type = mujoco.mjtGeom.mjGEOM_BOX
@@ -223,8 +262,9 @@ class Station:
                 g.contype = g.conaffinity = 0
                 g.group = 1
                 continue
-            g.condim = 4
-            g.friction = [1.0, 0.02, 0.002]
+            _object_contact(g)
+        if any(part.kind == "cylinder" for obj in objects for part in obj.parts):
+            spec.option.ccd_tolerance = min(spec.option.ccd_tolerance, CYLINDER_CCD_TOLERANCE)
 
         for obj in grasp_sensors:
             for k, jaw in enumerate(self.spec().jaw_bodies):
@@ -288,6 +328,37 @@ def _robot_meshdir(spec: RobotSpec) -> Path:
     """Where the robot's own MJCF finds its meshes."""
     robot = mujoco.MjSpec.from_file(str(spec.mjcf_path))
     return (Path(robot.modelfiledir) / robot.meshdir).resolve()
+
+
+def _add_parts(body: mujoco.MjsBody, obj: Box) -> None:
+    """Add collision geoms with mass split by relative part weights."""
+    if obj.mocap:
+        raise ValueError(f"{obj.name}: a mocap marker is one box, it takes no parts")
+    total = sum(part.mass_fraction for part in obj.parts)
+    for i, part in enumerate(obj.parts):
+        if part.kind not in PART_GEOMS:
+            raise ValueError(f"{obj.name}: unknown part kind {part.kind!r}; known: {', '.join(PART_GEOMS)}")
+        g = body.add_geom()
+        g.name = obj.name if i == 0 else f"{obj.name}/part{i}"
+        g.type = PART_GEOMS[part.kind]
+        g.size = list(part.size)
+        g.pos = list(part.pos)
+        g.quat = list(part.quat)
+        g.rgba = list(obj.rgba)
+        g.mass = obj.mass * part.mass_fraction / total
+        _object_contact(g)
+
+
+def _object_contact(g: mujoco.MjsGeom) -> None:
+    """Set friction and stiffness for an object's collision geom."""
+    g.condim = 4
+    g.friction = [1.0, 0.02, 0.002]
+    _stiff_contact(g)
+
+
+def _stiff_contact(g: mujoco.MjsGeom) -> None:
+    g.solref = list(OBJECT_SOLREF)
+    g.solimp = list(OBJECT_SOLIMP)
 
 
 def _add_camera(spec: mujoco.MjSpec, view: CameraView, T_base2world: np.ndarray) -> None:

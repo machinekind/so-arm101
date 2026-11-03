@@ -1,27 +1,25 @@
-"""PPO on the GPU batch environment: short, plain JAX and optax, no RL library.
+"""PPO training with JAX and optax on a batch environment.
 
     pol = train("reach", PPOConfig(iterations=200), station=Station.load("sim"))
     pol.save("workspace/policies/reach/policy.npz")
 
-Needs the `soarm-lab[train]` extra (JAX, optax, MuJoCo Warp), no torch. It trains the actor, the critic
-and the observation normalizer as JAX arrays (`jax_policy`), and returns and saves the numpy policy
-`policy.Policy` (`policy.npz`, with the critic for fine-tuning).
+Requires the `soarm-lab[train]` extra. Training updates the actor, critic, and observation
+normalizer. It returns a NumPy `policy.Policy` with the critic saved for fine-tuning.
 
-The classic recipe of rsl_rl / legged_gym, tuned for thousands of parallel worlds: short rollouts
-(`horizon` steps per world), GAE, a few epochs over minibatches, a learning rate adapted to the KL,
-and environments that ended on the time limit get the state value added to their reward instead of
-zero (otherwise the critic learns that the world ends with the episode, after 5 s for reach, and on
-the arm it does not end). It is step for step the algorithm of the torch trainer it replaced.
+Each rollout has `horizon` steps per world. Updates use GAE, clipped PPO minibatches, and a
+learning rate adapted to KL divergence. Time-limit truncations bootstrap the state value.
 
-The environment (`batch.BatchEnv`, or another with its interface: `make_env`) steps eagerly, so the
-rollout is a Python loop over the `horizon` steps. What runs around a step is jitted: sampling the
-actions (`_act`) and bootstrapping the reward (`_record`). So is the whole update, GAE and every
-epoch's minibatches (`_update`). The rollout's arrays are collected in lists and stacked once per
-iteration.
+`make_env` can replace `batch.BatchEnv` with another environment that implements `EnvLike`.
+The rollout steps the environment eagerly. Action sampling, reward bootstrapping, and updates
+are JIT compiled.
 
-Progress goes to `on_progress(Progress)` and, with `out_dir`, to `progress.json` in the run's folder.
-Interrupting: `stop` (threading.Event); the policy as it is at that point is returned, and saved with
-`out_dir`.
+`on_progress` receives `Progress` after each iteration. `out_dir` enables checkpoints and
+`progress.json`. Setting `stop` returns the current policy and saves it when `out_dir` is set.
+Variant environments report indices in `info["variant"]` for `Progress.success_by_variant`.
+
+`init` resumes from a saved actor, normalizer, and optional critic. `PPOConfig.widen_init`
+allows extra observation inputs appended after the saved inputs. Their actor and critic weights
+start at zero. Their normalizer entries start with mean 0 and variance 1.
 """
 
 from __future__ import annotations
@@ -49,11 +47,11 @@ try:
 except ImportError as exc:
     raise ImportError(jp.MISSING) from exc
 
-#: The bounds of the KL-adapted learning rate and of the exploration's standard deviation.
+#: Bounds for the adaptive learning rate and exploration standard deviation.
 LR_MIN, LR_MAX = 1e-5, 1e-2
 STD_MIN, STD_MAX = 0.05, 1.5
 _LOG_2PI = float(np.log(2.0 * np.pi))
-#: torch's Adam: betas (0.9, 0.999), eps 1e-8; the learning rate is applied in `_adam`.
+#: `_adam` applies the learning rate separately from moment scaling.
 _ADAM = optax.scale_by_adam(b1=0.9, b2=0.999, eps=1e-8)
 
 
@@ -73,20 +71,22 @@ class PPOConfig:
     value_coef: float = 1.0
     max_grad_norm: float = 1.0
     init_std: float = 0.6
-    #: Fine-tuning a policy saved without a critic: this many first iterations train only the critic
-    #: (the actor holds), see `train`.
+    #: Initial iterations reserved for learning a missing critic while the actor stays fixed.
     critic_warmup: int = 0
     hidden: tuple[int, ...] = (256, 256, 128)
     seed: int = 0
-    #: Save a checkpoint every this many iterations (0 = only at the end).
+    #: Checkpoint interval in iterations; zero saves only the final policy.
     save_every: int = 50
+    #: Allow appended observation inputs when loading `init`, with zero initial weights.
+    widen_init: bool = False
 
 
 class EnvLike(Protocol):
-    """What `train` needs of an environment: the interface of `batch.BatchEnv`.
+    """The environment interface required by `train`.
 
-    Worlds reset themselves inside `step`; `info` holds bool arrays (N,) "time_outs" (episodes to
-    bootstrap with the state value) and "success".
+    `step` resets done worlds. `info` contains (N,) bool arrays for "success" and "time_outs".
+    "time_outs" marks episodes whose value must be bootstrapped. Variant environments also provide
+    a (N,) integer "variant" array indexing their `variants` names.
     """
 
     num_envs: int
@@ -116,44 +116,45 @@ class Progress:
     elapsed: float = 0.0
     status: str = "uczenie"
     history: list[dict[str, float]] = field(default_factory=list)
+    #: Recent episode success rates grouped by `info["variant"]`.
+    success_by_variant: dict[str, float] = field(default_factory=dict)
 
 
 class _State(NamedTuple):
-    """What training changes, as one pytree."""
+    """Keep trainable parameters, optimizer moments, normalization, and learning rate in one pytree."""
 
-    #: "actor" and "critic" (dense layers as in `policy.npz`) and "log_std" (act_dim,): the Gaussian's
-    #: state-independent log standard deviation.
+    #: Actor and critic layers plus the action log standard deviation (act_dim,).
     params: dict[str, Any]
-    #: Adam's moments per group, "policy" (actor and log_std) and "critic": a critic warm-up steps the
-    #: critic only, and the actor's first step after it is Adam's first, as in torch.
+    #: Separate optimizer moments let the critic warm up without advancing the actor's optimizer.
     opt: dict[str, Any]
     norm: jp.Norm
     lr: jax.Array
 
 
 class _Rollout(NamedTuple):
-    """`horizon` steps of every world, stacked: (T, N, ...)."""
+    """Store `horizon` rollout steps with leading dimensions (T, N)."""
 
-    obs: jax.Array          # normalized, as the policy saw it
+    obs: jax.Array          # Normalized policy inputs.
     act: jax.Array
     logp: jax.Array
     val: jax.Array
-    rew: jax.Array          # with the time-outs bootstrapped
-    done: jax.Array         # float
+    rew: jax.Array          # Includes bootstrapped time-out values.
+    done: jax.Array         # Float done flags.
 
 
 def train(task: str | tk.TaskConfig, cfg: PPOConfig | None = None, *, station: Station | None = None,
           randomization: Randomization | None = None, out_dir: str | Path | None = None,
           on_progress: Callable[[Progress], None] | None = None,
           stop: threading.Event | None = None, device: str = "cuda:0", init: Policy | None = None,
-          make_env: Callable[..., EnvLike] | None = None) -> Policy:
-    """Trains a policy for `task`; `init` starts from an existing one (actor, normalizer, critic if saved).
+          make_env: Callable[..., EnvLike] | None = None, init_name: str = "") -> Policy:
+    """Train `task`, optionally starting from `init` weights and normalization.
 
-    `init` is for fine-tuning: after identifying the arm's dynamics, after a change of randomization
-    or perception, instead of discovering the grasp from scratch.
+    With `init`, a task name uses the saved task configuration. An explicit `TaskConfig` must have
+    the same task name as `init`. `cfg.widen_init` permits appended observation inputs.
+    `init_name` records the source in `meta.notes`.
 
-    `device` is "cuda:0" ("cuda:k", "cuda") or "cpu": the JAX device, and the same string goes to the
-    environment. `make_env` builds the environment, called as `batch.BatchEnv` (the default):
+    `device` selects "cpu" or a CUDA device such as "cuda:0" for both JAX and the environment.
+    `make_env` defaults to `batch.BatchEnv` and must accept
     `make_env(task, num_envs, station=, randomization=, device=, seed=)`.
     """
     cfg = cfg or PPOConfig()
@@ -165,18 +166,27 @@ def train(task: str | tk.TaskConfig, cfg: PPOConfig | None = None, *, station: S
     if init is not None:
         if init.meta.robot != spec.name:
             raise RuntimeError(f"polityka uczona na {init.meta.robot}, stanowisko ma {spec.name}")
-        tsk = task if isinstance(task, tk.TaskConfig) else init.task
+        if not isinstance(task, tk.TaskConfig):
+            tsk = init.task
+        elif tsk.name != init.task.name:
+            raise ValueError(f"the init policy was trained on {init.task.name}, the task is {tsk.name}")
     rand = randomization if randomization is not None else Randomization()
     if make_env is None:
         from .batch import BatchEnv
 
         make_env = BatchEnv
     env = make_env(tsk, cfg.num_envs, station=station, randomization=rand, device=device, seed=cfg.seed)
+    variants = tuple(getattr(env, "variants", ()))
     meta = PolicyMeta(task=asdict(tsk), hidden=list(cfg.hidden), obs_dim=env.obs_dim, act_dim=env.act_dim,
                       randomization=_rand_dict(rand), robot=spec.name)
+    extra = 0
     if init is not None:
         meta.hidden = list(init.meta.hidden)
-        meta.notes = f"douczana z polityki z {init.meta.created} ({init.meta.steps / 1e6:.0f} mln krokow)"
+        source = f"{init_name}, " if init_name else ""
+        meta.notes = f"douczana z polityki z {init.meta.created} ({source}{init.meta.steps / 1e6:.0f} mln krokow)"
+        if cfg.widen_init and meta.obs_dim > init.meta.obs_dim:
+            extra = meta.obs_dim - init.meta.obs_dim
+            meta.notes += f"; obserwacja poszerzona z {init.meta.obs_dim} do {meta.obs_dim} wejsc, nowe wejscia z zerowymi wagami"
     key, k_actor, k_critic = jax.random.split(key, 3)
     sizes = [meta.obs_dim, *meta.hidden]
     norm = jp.Norm.new(meta.obs_dim)
@@ -185,9 +195,11 @@ def train(task: str | tk.TaskConfig, cfg: PPOConfig | None = None, *, station: S
     warmup = 0
     if init is not None:
         norm, init_actor, init_critic = jp.from_policy(init)
-        actor = _same_layers("actor", init_actor, actor)
+        actor = _widen_layers("actor", init_actor, actor, extra)
+        if extra:
+            norm = jp.widen_norm(norm, meta.obs_dim)
         if init_critic is not None:
-            critic = _same_layers("critic", init_critic, critic)
+            critic = _widen_layers("critic", init_critic, critic, extra)
         else:
             warmup = cfg.critic_warmup
     log_std = jnp.full(meta.act_dim, np.log(cfg.init_std), jnp.float32)
@@ -199,9 +211,10 @@ def train(task: str | tk.TaskConfig, cfg: PPOConfig | None = None, *, station: S
     out = Path(out_dir) if out_dir else None
     if out:
         out.mkdir(parents=True, exist_ok=True)
-        (out / "config.json").write_text(json.dumps({"ppo": asdict(cfg), "task": asdict(tsk),
-                                                     "randomization": meta.randomization}, indent=2),
-                                         encoding="utf-8")
+        config = {"ppo": asdict(cfg), "task": asdict(tsk), "randomization": meta.randomization}
+        if variants:
+            config["variants"] = list(variants)
+        (out / "config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
 
     N, T = cfg.num_envs, cfg.horizon
     obs = env.reset()
@@ -212,15 +225,11 @@ def train(task: str | tk.TaskConfig, cfg: PPOConfig | None = None, *, station: S
     recent_succ: list[float] = []
     recent_ret: list[float] = []
     recent_len: list[float] = []
+    recent_variant: list[int] = []
 
     for it in range(1, cfg.iterations + 1):
         t0 = time.perf_counter()
-        # Fine-tuning a policy saved without a critic starts with a new critic: its advantages are
-        # noise at first, and with little exploration (init_std 0.25) it takes long to tell "at the
-        # goal" from "a few mm off". Measured on reach-v1: 98% success up to iteration 60, then a
-        # drop to 9%, and the deterministic policy drifted off the goal (3 -> 29 mm at the end of
-        # the episode). The actor, together with the input normalizer, holds until the critic has
-        # learned. A policy with a saved critic needs no warm-up.
+        # Freeze the actor and normalizer during critic warm-up to protect the learned behavior.
         warming = it <= warmup
         # ---------------------------------------------------------- rollout
         steps, ends = [], []
@@ -231,24 +240,28 @@ def train(task: str | tk.TaskConfig, cfg: PPOConfig | None = None, *, station: S
             rew, done_f, ep_ret, ep_len, ret_end, len_end = _record(val, rew, done, info["time_outs"], ep_ret,
                                                                     ep_len, cfg.gamma)
             steps.append((obs_n, act, logp, val, rew, done_f))
-            ends.append((done, info["success"], ret_end, len_end))
+            end = (done, info["success"], ret_end, len_end)
+            ends.append((*end, info["variant"]) if "variant" in info else end)
         roll = _Rollout(*(jnp.stack(x) for x in zip(*steps)))
 
         # ------------------------------------------------------------ update
         key, k_update = jax.random.split(key)
         state = update(state, roll, obs, k_update, warming=warming)
-        # The episodes that ended in this rollout, in the order they ended.
-        done_h, succ_h, ret_h, len_h = (np.asarray(jnp.stack(x)) for x in zip(*ends))
+        # Aggregate completed episodes in rollout order.
+        done_h, succ_h, ret_h, len_h, *variant_h = (np.asarray(jnp.stack(x)) for x in zip(*ends))
         done_h = done_h.astype(bool)
         recent_succ += succ_h[done_h].astype(float).tolist()
         recent_ret += ret_h[done_h].tolist()
         recent_len += len_h[done_h].tolist()
+        if variant_h:
+            recent_variant += variant_h[0][done_h].astype(int).tolist()
         jax.block_until_ready(state)
 
         # ---------------------------------------------------------- progress
         dt = time.perf_counter() - t0
         keep = max(cfg.num_envs, 200)
         recent_succ, recent_ret, recent_len = recent_succ[-keep:], recent_ret[-keep:], recent_len[-keep:]
+        recent_variant = recent_variant[-keep:]
         prog.iteration, prog.steps = it, it * T * N
         prog.fps = T * N / dt
         prog.success = float(np.mean(recent_succ)) if recent_succ else 0.0
@@ -256,7 +269,10 @@ def train(task: str | tk.TaskConfig, cfg: PPOConfig | None = None, *, station: S
         prog.episode_len = float(np.mean(recent_len)) if recent_len else 0.0
         prog.lr, prog.std = float(state.lr), float(jnp.exp(state.params["log_std"]).mean())
         prog.elapsed = time.perf_counter() - t_start
-        prog.history.append({"it": it, "steps": prog.steps, "success": prog.success, "reward": prog.reward})
+        if recent_variant:
+            prog.success_by_variant = _success_by_variant(recent_succ, recent_variant, variants)
+        prog.history.append({"it": it, "steps": prog.steps, "success": prog.success, "reward": prog.reward,
+                             **{f"success_{k}": v for k, v in prog.success_by_variant.items()}})
         stopping = stop is not None and stop.is_set()
         if it == cfg.iterations or stopping:
             prog.status = "przerwane" if stopping and it < cfg.iterations else "gotowe"
@@ -273,32 +289,32 @@ def train(task: str | tk.TaskConfig, cfg: PPOConfig | None = None, *, station: S
 
 
 def jax_device(device: str) -> jax.Device:
-    """The JAX device of "cuda:k" (CUDA's device k, as `batch.BatchEnv` reads it), "cuda" (k = 0), "cpu"."""
+    """Resolve "cpu", "cuda" (device 0), or "cuda:k" to a JAX device."""
     return jp.devices(device)[0]
 
 
 # ------------------------------------------------------------------- the algorithm
 def log_prob(act: jax.Array, mean: jax.Array, log_std: jax.Array) -> jax.Array:
-    """The Gaussian's log density of the actions (N, act_dim), summed over the action's dimensions."""
+    """Return Gaussian action log densities (N,) summed over action dimensions."""
     return jnp.sum(-0.5 * ((act - mean) / jnp.exp(log_std)) ** 2 - log_std - 0.5 * _LOG_2PI, -1)
 
 
 def entropy(log_std: jax.Array) -> jax.Array:
-    """The Gaussian's entropy, summed over the action's dimensions (the same in every state)."""
+    """Return Gaussian entropy summed over action dimensions."""
     return jnp.sum(0.5 + 0.5 * _LOG_2PI + log_std)
 
 
 def value(params: dict[str, Any], obs_n: jax.Array) -> jax.Array:
-    """The critic's state value (N,) of normalized observations."""
+    """Return critic values (N,) for normalized observations (N, obs_dim)."""
     return jp.mlp(params["critic"], obs_n)[..., 0]
 
 
 def gae(rew: jax.Array, val: jax.Array, done: jax.Array, last_val: jax.Array, gamma: float,
         lam: float) -> tuple[jax.Array, jax.Array]:
-    """Generalized advantage estimation over a rollout (T, N): (advantages, returns = advantages + values).
+    """Return GAE advantages and returns with shape (T, N).
 
-    `done` (float) cuts the sums where an episode ended; `last_val` is the value of the state after
-    the last step.
+    `done` is a float array that stops accumulation at episode boundaries.
+    `last_val` (N,) gives the value after the final step.
     """
     def back(carry, step):
         adv_next, val_next = carry
@@ -313,8 +329,7 @@ def gae(rew: jax.Array, val: jax.Array, done: jax.Array, last_val: jax.Array, ga
 
 
 def adapt_lr(lr: jax.Array, kl: jax.Array, desired_kl: float) -> jax.Array:
-    """The learning rate after a minibatch with this KL: /1.5 above 2 x `desired_kl`, x1.5 below half
-    of it (and above 0), within [`LR_MIN`, `LR_MAX`]."""
+    """Adjust the learning rate toward `desired_kl` within [`LR_MIN`, `LR_MAX`]."""
     down = jnp.maximum(LR_MIN, lr / 1.5)
     up = jnp.minimum(LR_MAX, lr * 1.5)
     return jnp.where(kl > 2.0 * desired_kl, down, jnp.where((kl > 0.0) & (kl < 0.5 * desired_kl), up, lr))
@@ -322,9 +337,9 @@ def adapt_lr(lr: jax.Array, kl: jax.Array, desired_kl: float) -> jax.Array:
 
 @partial(jax.jit, static_argnames="update")
 def _act(params: dict[str, Any], norm: jp.Norm, obs: jax.Array, key: jax.Array, *, update: bool):
-    """A rollout step's policy: (norm, normalized obs, sampled action, its log density, value, next key).
+    """Return (norm, normalized obs, sampled action, log density, value, next key).
 
-    With `update` the normalizer takes in `obs` first.
+    `update` includes the current observations in the normalizer before sampling.
     """
     obs = jnp.asarray(obs, jnp.float32)
     if update:
@@ -338,10 +353,10 @@ def _act(params: dict[str, Any], norm: jp.Norm, obs: jax.Array, key: jax.Array, 
 
 @jax.jit
 def _record(val, rew, done, time_outs, ep_ret, ep_len, gamma):
-    """A step's reward with the time-outs bootstrapped, and the episodes' sums.
+    """Bootstrap time-out rewards and accumulate episode returns and lengths.
 
-    (reward, done as float, return and length so far with the ended episodes zeroed, the return and
-    length of every world's episode at this step: those of the ended ones count).
+    Return (reward, float done, running return, running length, final return, final length).
+    Running totals reset in done worlds; final totals are valid at episode ends.
     """
     rew = jnp.asarray(rew, jnp.float32) + gamma * val * time_outs.astype(jnp.float32)
     ep_ret, ep_len = ep_ret + rew, ep_len + 1.0
@@ -351,9 +366,9 @@ def _record(val, rew, done, time_outs, ep_ret, ep_len, gamma):
 
 def _update(state: _State, roll: _Rollout, last_obs: jax.Array, key: jax.Array, *, cfg: PPOConfig,
             warming: bool) -> _State:
-    """GAE and `cfg.epochs` passes over `cfg.minibatches` random minibatches of the rollout.
+    """Update parameters over shuffled rollout minibatches using GAE targets.
 
-    `warming` trains the critic only: the actor, its log_std and the learning rate hold.
+    `warming` freezes the actor, exploration variance, and learning rate while training the critic.
     """
     norm = state.norm
     last_val = value(state.params, jp.normalize(norm, jnp.asarray(last_obs, jnp.float32)))
@@ -364,7 +379,7 @@ def _update(state: _State, roll: _Rollout, last_obs: jax.Array, key: jax.Array, 
 
     def loss_fn(params, obs, act, logp_old, val_old, a, ret):
         logp = log_prob(act, jp.mlp(params["actor"], obs), params["log_std"])
-        a = (a - a.mean()) / (a.std(ddof=1) + 1e-8)               # torch's std: unbiased
+        a = (a - a.mean()) / (a.std(ddof=1) + 1e-8)
         log_ratio = logp - logp_old
         ratio = jnp.exp(log_ratio)
         pg = jnp.maximum(-a * ratio, -a * jnp.clip(ratio, 1 - cfg.clip, 1 + cfg.clip)).mean()
@@ -373,7 +388,7 @@ def _update(state: _State, roll: _Rollout, last_obs: jax.Array, key: jax.Array, 
         vl = jnp.maximum((v - ret) ** 2, (v_clip - ret) ** 2).mean()
         if warming:
             return cfg.value_coef * vl, 0.0
-        # KL between the old and the new distribution (Schulman's approximation).
+        # Estimate KL divergence between the old and current action distributions.
         kl = jax.lax.stop_gradient(((ratio - 1) - log_ratio).mean())
         return pg + cfg.value_coef * vl - cfg.entropy * entropy(params["log_std"]), kl
 
@@ -402,25 +417,34 @@ def _update(state: _State, roll: _Rollout, last_obs: jax.Array, key: jax.Array, 
 
 
 def _clip_grad_norm(grads: Any, max_norm: float) -> Any:
-    """torch's `clip_grad_norm_`: every gradient scaled by max_norm / (global norm + 1e-6), at most 1."""
+    """Scale gradients together so their global norm is at most `max_norm`."""
     norm = jnp.sqrt(sum(jnp.sum(g**2) for g in jax.tree_util.tree_leaves(grads)))
     coef = jnp.minimum(1.0, max_norm / (norm + 1e-6))
     return jax.tree_util.tree_map(lambda g: g * coef, grads)
 
 
 def _adam(params: Any, grads: Any, opt: Any, lr: jax.Array) -> tuple[Any, Any]:
-    """One Adam step with the learning rate `lr`."""
+    """Apply an Adam update with learning rate `lr` and return parameters and optimizer state."""
     updates, opt = _ADAM.update(grads, opt)
     return jax.tree_util.tree_map(lambda p, u: p - lr * u, params, updates), opt
 
 
-def _same_layers(name: str, layers: jp.JaxLayers, like: jp.JaxLayers) -> jp.JaxLayers:
-    """The `init` policy's layers, checked against the shapes the environment needs."""
+def _widen_layers(name: str, layers: jp.JaxLayers, like: jp.JaxLayers, extra: int = 0) -> jp.JaxLayers:
+    """Match saved layer shapes to `like`, allowing `extra` appended inputs with zero weights."""
     got = [tuple(w.shape) for w, _ in layers]
     want = [tuple(w.shape) for w, _ in like]
-    if got != want:
-        raise ValueError(f"the {name} of the init policy has layers {got}, the environment needs {want}")
-    return layers
+    if got == want:
+        return layers
+    narrower = [(want[0][0], want[0][1] - extra), *want[1:]]
+    if extra > 0 and got == narrower:
+        return jp.widen_inputs(layers, want[0][1])
+    raise ValueError(f"the {name} of the init policy has layers {got}, the environment needs {want}")
+
+
+def _success_by_variant(success: list[float], variant: list[int], names: tuple[str, ...]) -> dict[str, float]:
+    """Group episode success by variant name, falling back to the index for unknown names."""
+    succ, idx = np.asarray(success, float), np.asarray(variant, int)
+    return {(names[k] if 0 <= k < len(names) else str(k)): float(succ[idx == k].mean()) for k in np.unique(idx)}
 
 
 def _finish(meta: PolicyMeta, state: _State, prog: Progress, path: Path | None) -> Policy:
@@ -435,7 +459,6 @@ def _finish(meta: PolicyMeta, state: _State, prog: Progress, path: Path | None) 
 
 def _rand_dict(r: Randomization) -> dict[str, Any]:
     d = asdict(r)
-    # Dynamics.to_dict writes an infinite band as "inf": asdict would give Infinity in
-    # config.json / meta.json, which strict JSON parsers (a browser's) reject.
+    # Encode infinite bounds as strings so configuration files remain valid JSON.
     d["centre"] = r.centre.to_dict()
     return d

@@ -1,4 +1,4 @@
-"""Carry a cube onto a target and release it."""
+"""Carry a block onto a target and release it."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Literal
 import numpy as np
 
 from ...robot import RobotSpec
-from .base import _cast, _cat, _clip, _norm, action_cost, grasped, grip_is_open
+from .base import _cast, _clip, _norm, action_cost, grasped, grip_is_open
 from .lift import LiftConfig
 
 
@@ -19,7 +19,7 @@ class PickPlaceConfig(LiftConfig):
     episode_steps: int = 300
     # Maximum cube-to-target distance in the table plane for success [m].
     place_radius: float = 0.03
-    # Maximum cube bottom height above the table for placement [m].
+    # Maximum height of the block's lowest point above the table for placement [m].
     place_height: float = 0.01
     # Minimum initial cube-to-target separation in the table plane [m].
     target_min_sep: float = 0.10
@@ -40,20 +40,23 @@ class PickPlaceConfig(LiftConfig):
 
     def observe(self, xp, limits, q, q_cmd, tcp, prev_action, cube_pos=None, cube_rot=None,
                 target=None, **_):
-        """Layout: q(n), commands(n), TCP(3), cube(3), cube-TCP(3), rotation(6), target(3), target-cube(3), previous action(n)."""
-        parts = self._observe_parts(xp, limits, q, q_cmd, tcp, cube_pos, cube_rot)
-        return _cat(xp, parts + [target, target - cube_pos, prev_action])
+        """Pack the lift layout with target(3) and target-cube(3) before previous action(n).
 
-    def reward(self, xp, tcp, action, prev_action, cube_pos=None, jaw_contacts=None, q_cmd=None,
+        Append the descriptor when variants are configured.
+        """
+        parts = self._observe_parts(xp, limits, q, q_cmd, tcp, cube_pos, cube_rot)
+        return self._with_descriptor(xp, parts + [target, target - cube_pos, prev_action], q)
+
+    def reward(self, xp, tcp, action, prev_action, cube_pos=None, cube_rot=None, jaw_contacts=None, q_cmd=None,
                limits=None, target=None, cube_vel=None, carried=None, grip_open=None, **_):
-        """Success is a carried cube on the target, released and still.
+        """Count success when a previously carried block rests on the target after release.
         Falls terminate episodes. Time limits and success streaks truncate them.
         """
         cost = action_cost(xp, self, action, prev_action, q_cmd, limits)
         opened = grip_open if grip_open is not None else grip_is_open(xp, limits, q_cmd)
         d = _norm(cube_pos - tcp)
         g = grasped(xp, jaw_contacts)
-        height = cube_pos[..., 2] - self.cube_half
+        height = self.height(xp, cube_pos, cube_rot)
         lifted = _clip(xp, height / self.lift_height, 0.0, 1.0)
         d_t = _norm(cube_pos[..., :2] - target[..., :2])
         placed = (d_t < self.place_radius) & (height < self.place_height)
@@ -79,10 +82,9 @@ class PickPlaceConfig(LiftConfig):
         return replace(base, target_radius=spec.desk.cube_radius, target_bearing=spec.desk.cube_bearing)
 
 
-def carry_latch(xp, task: LiftConfig, carried, jaw_contacts, cube_pos):
-    """Update before the reward so pushing a cube onto the target cannot count as carrying."""
-    height = cube_pos[..., 2] - task.cube_half
-    return carried | (grasped(xp, jaw_contacts) & (height > task.lift_height))
+def carry_latch(xp, task: LiftConfig, carried, jaw_contacts, cube_pos, cube_rot):
+    """Latch carrying after a grasped block clears `lift_height`, before computing reward."""
+    return carried | (grasped(xp, jaw_contacts) & (task.height(xp, cube_pos, cube_rot) > task.lift_height))
 
 
 TARGET_TRIES = 64
