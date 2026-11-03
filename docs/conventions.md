@@ -34,6 +34,8 @@ the old torch trainer (`policy.pt`) into `policy.npz`. Neither extra is a defaul
 `packages/soarm_lab/tests/test_dependency_rule.py` runs the bundled policies in a fresh interpreter and
 checks that no jax, optax, torch, hydra or omegaconf module got loaded, also with them made unimportable.
 Without them `train` names `soarm-lab[train]` and `convert` names `soarm-lab[torch]`.
+GraspGenX runs in a separate clone and environment under `tools/graspgenx`.
+The lab reads its converted libraries from `soarm_lab/grasps/<block>.json`.
 
 The twin holds no robot and no training. It keeps the scene, cameras, calibration, perception primitives,
 runtime, safety, sysid, `StrategyRunner` and `EpisodeLog`.
@@ -133,6 +135,8 @@ The plugin contracts are the package `machinekind-twin-api` (see the root README
   With `probe: true`, it also judges each probe.
   `soarm_lab.strategies.judges.Consultation` handles calls, timeouts, retries and records without blocking `act`.
   Drops use grasp's recovery. `touch_jev` imports `JudgeStatus` but retains its own consultation flow.
+  With `grasp_source: library`, `soarm_lab.grasp_library` composes cached grasps with the block pose.
+  `GraspStrategy.candidates` filters and ranks them before the jaw and reach checks.
 - `packages/soarm_lab/pyproject.toml` registers these strategies under `machinekind_twin.strategies` (`STRATEGIES`)
   as `policy`, `ik`, `touch`, `touch_jev`, `grasp`, `grasp_jev`, `grasp_wrist` and `dream`. `soarm_lab.strategies.dream.DreamStrategy` imports the Dream client only in `start`.
 - The station export is `Workspace.export` in the twin (`twin export`). `soarm_lab.station.Station` reads it.

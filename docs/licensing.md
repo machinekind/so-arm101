@@ -6,6 +6,8 @@ Third-party files and dependencies retain their own licenses; the project licens
 does not replace them. In particular, the bundled robot model and meshes have a
 separate [license](../packages/soarm/soarm/robot/LICENSE) and
 [provenance record](../packages/soarm/soarm/robot/README.md).
+`tools/graspgenx/so101/gripper.urdf` is a derivative of that model (see the
+[provenance record](../packages/soarm/THIRD_PARTY_NOTICES)).
 
 Apache-2.0 requires preserving applicable copyright and attribution notices when
 redistributing the work, providing the license, and identifying modified files.
@@ -50,6 +52,11 @@ Primary license references: [NumPy](https://github.com/numpy/numpy/blob/main/LIC
 [JAX](https://github.com/jax-ml/jax/blob/main/LICENSE), and
 [PyTorch](https://github.com/pytorch/pytorch/blob/main/LICENSE).
 Use the license files supplied with the actual released artifacts when distributing them.
+
+GraspGenX runs in a separate clone and environment ([setup](../tools/graspgenx/README.md)).
+Its code is Apache-2.0 with an NVIDIA copyright line. Model checkpoints use the NVIDIA
+Open Model License and are excluded from this repository. Library files record their
+generator. The bundled cube library is a hand-written example.
 
 ## What a release includes
 
