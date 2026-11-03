@@ -144,6 +144,18 @@ def test_the_jaw_reaches_below_the_tcp_by_the_fixed_jaws_sole(station):
         RobotKinematics(dataclasses.replace(spec, jaw_bodies=("", ""))).jaw_reach(0.0)
 
 
+def test_the_fully_open_moving_jaw_lifts_clear_of_the_tcp(station):
+    spec = station.spec()
+    kin = RobotKinematics(spec)
+
+    # Closed, the moving jaw reaches about as low as the whole jaw. Fully open, it swings above the TCP.
+    assert kin.jaw_reach(0.0, moving=True) == pytest.approx(0.0061, abs=5e-4)
+    assert kin.jaw_reach(100.0, moving=True) < -0.015
+    assert kin.jaw_reach(100.0) == pytest.approx(kin.jaw_reach(0.0), abs=5e-4)
+    with pytest.raises(ValueError, match="moving fingertip"):
+        RobotKinematics(dataclasses.replace(spec, fingertips=("a", ""))).jaw_reach(0.0, moving=True)
+
+
 def test_tip_swing_grows_as_the_hinged_jaw_opens(station):
     """The hinged moving tip trails the fixed tip along the approach when opened wide."""
     kin = RobotKinematics(station.spec())

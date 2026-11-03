@@ -21,6 +21,7 @@ EXPECTED = {
         (STRATEGIES, "grasp"): "soarm_lab.strategies.grasp:GraspStrategy",
         (STRATEGIES, "grasp_jev"): "soarm_lab.strategies.grasp_jev:GraspJevStrategy",
         (STRATEGIES, "grasp_wrist"): "soarm_lab.strategies.wrist:WristGraspStrategy",
+        (STRATEGIES, "pick_place"): "soarm_lab.strategies.pick_place:PickPlaceStrategy",
         ("console_scripts", "soarm-lab"): "soarm_lab.cli:main",
     },
 }
@@ -30,8 +31,9 @@ STRATEGY_NAMES = [name for group, name in EXPECTED["soarm-lab"] if group == STRA
 #: Network strategies have protocol tests with fake clients or judges in their own modules.
 #: `grasp_wrist` needs OpenCV with its default camera. The dev group does not install it.
 #: test_wrist.py checks the protocol without a camera and with defaults when OpenCV is available.
+#: `pick_place` needs both by default. test_pick_place.py checks it with `judge: none` and no camera.
 OFFLINE_STRATEGIES = [name for name in STRATEGY_NAMES
-                      if name not in ("dream", "touch_jev", "grasp_jev", "grasp_wrist")]
+                      if name not in ("dream", "touch_jev", "grasp_jev", "grasp_wrist", "pick_place")]
 
 
 def own_entry_points(dist: str) -> dict[tuple[str, str], metadata.EntryPoint]:

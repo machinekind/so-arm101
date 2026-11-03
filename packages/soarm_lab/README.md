@@ -80,6 +80,8 @@ With this package installed alongside the twin, its Strategies tab offers:
   see [Wrist camera](#wrist-camera).
 - `grasp_jev`: judges the close and lift, then applies the chosen grasp step;
   see [Jev in the grasp loop](#jev-in-the-grasp-loop).
+- `pick_place`: picks a block and places it on another block or a table spot, then checks the
+  result in the cameras; see [Pick and place](#pick-and-place).
 - `dream`: runs Dream Labs' Dream-1 model from a prompt and the cameras; see [Dream Labs](#dream-labs).
 
 All send joint targets through the twin's safety supervisor. Read the
@@ -126,6 +128,13 @@ grasp_wrist:
   hue_deg: -1.0
   centre_tol_m: 0.003
   look_before_straddle: true
+pick_place:
+  label: red cube
+  block: cube
+  place_on: blue cube        # empty: the table spot place_x_m, place_y_m
+  place_on_block: cube
+  judge: jev                 # or none
+  wrist_camera: wrist        # empty: no wrist look
 ```
 
 Goals use metres in the robot's base frame. Enable the panel's 3D goal handle
@@ -157,7 +166,8 @@ See [policy settings](soarm_lab/strategies/policy.py),
 [touch_jev settings](soarm_lab/strategies/touch_jev.py),
 [grasp settings](soarm_lab/strategies/grasp.py),
 [grasp_jev settings](soarm_lab/strategies/grasp_jev.py),
-[grasp_wrist settings](soarm_lab/strategies/wrist.py) and
+[grasp_wrist settings](soarm_lab/strategies/wrist.py),
+[pick_place settings](soarm_lab/strategies/pick_place.py) and
 [conventions](../../docs/conventions.md) for the full interfaces.
 
 ## Jev in the touch loop
@@ -389,6 +399,59 @@ Status and panel notes identify the source, candidate and rejection reasons.
 
 See [generation setup](../../tools/graspgenx/README.md) and the
 [library format](soarm_lab/grasps/README.md). GraspGenX runs in its own CUDA environment.
+
+## Pick and place
+
+`pick_place` runs one step of a building plan: pick block `label` and put it on block `place_on`,
+or on the table at `place_x_m`, `place_y_m` when `place_on` is empty. `block` and `place_on_block`
+name both blocks in the catalog. The pick is `grasp` with the wrist look of `grasp_wrist` (off with
+an empty `wrist_camera`) and, with `judge: jev`, the checks of `grasp_jev`. `judge: none` needs no
+`TYPESAFE_API_KEY`. A drop goes through grasp's recovery, then the run goes on to the place.
+`carry_s` and `release` have no effect.
+
+Before the pick, the target needs a usable pose and a whole place plan must fit. After the lift the
+held block goes up to the carry height, `carry_clearance_m` above the target and the catalog's
+tallest block, lower where the arm cannot reach that, but 1 cm at least. With `align_yaw` the hand
+turns the block to the target's yaw, by the smallest turn the two blocks' symmetry allows. A target
+pose without yaw counts as yaw 0. Over a block target the run latches the newest camera pose of the
+target seen on the way, captured at most `fresh_pose_s` before the hand started over it, and waits up
+to `target_wait_s` for one. The hand may hide the target at the hover. A target that moved gets a
+new hover, twice at most.
+
+The descent is fast down to 1.5 cm above the release height, or starts at the carry height when that
+is lower, and settles. The rest runs at `place_speed_mps` and stops on a stall or with `place_gap_m`
+between the blocks. The jaw opens `release_margin_m` past the block on each side and the hand eases
+off toward the fixed jaw, as in `grasp_jev`. It then rises up to `retreat_m`, and at least until the
+jaw clears the placed block. Where the arm cannot reach that high, as for a third cube on two, the
+jaw opens fully so that its moving side clears the block, and the way to the start position must
+lead away from the fixed jaw. Plans prefer the first exit. With neither, the run ends `unreachable`
+before the pick. The hand then moves to the start position, so the cameras see the result. Poses
+captured after the release must put the block within `place_tol_m` of the target's centre, at the
+target's top plus half its height. A target not seen at the hover, an unreachable place or a target
+that keeps moving puts the block back where it was picked. The carry back stays at least 1 cm above
+the target the hand hovered over.
+
+`PlaceStatus.outcome` names how the run ended:
+
+| outcome | meaning | block |
+| --- | --- | --- |
+| `placed` | verified on the target (the only success) | on the target |
+| `not_found` | no usable pose of `label` before the pick, or none fresh after the release | where it was / unknown |
+| `target_not_seen` | no usable target pose before the pick, or none fresh at the hover | where it was / put back |
+| `pick_failed` | the grasp failed, or Jev stopped it | on the table |
+| `dropped` | dropped and not picked again | on the table |
+| `fell_off` | seen after the release, but not on the target | near the target |
+| `target_moved` | the target moved by the check, or kept moving at the hover | near the target / put back |
+| `unreachable` | the block or the place cannot be reached with the hand down, or the open hand could not leave the placed block untouched | where it was / put back |
+| `stopped` | stopped by a person, the time limit or a motion guard | anywhere |
+
+The stop reason in the panel says the same in Polish. `place.put_back` tells whether the block
+went back, `place.opened_wide` whether the jaw opened fully to leave it. Known gaps: the twin's cube
+detector maps blocks on the table only, so it cannot verify a stacked block yet. Picks from the top
+of a stack are not supported. A third cube on two fits only where the hand can leave away from the
+fixed jaw toward the start position; a fourth never fits.
+
+See [pick_place settings](soarm_lab/strategies/pick_place.py) for the full interface.
 
 ## Dream Labs
 
