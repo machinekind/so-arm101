@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import numpy as np
@@ -53,6 +53,8 @@ RED = (0.85, 0.25, 0.2, 1.0)
 BLUE = (0.2, 0.4, 0.9, 1.0)
 SPEC = load_robot()
 KIN = RobotKinematics(SPEC)
+#: Where the base's turning axis crosses the table [m, base frame].
+PAN_XY = KIN.joint_anchor(SPEC.arm_joints[0], SPEC.home)[:2]
 
 Objects = Callable[[], dict[str, ObjectPose]]
 
@@ -359,6 +361,116 @@ def test_a_third_cube_goes_on_two_and_the_open_jaw_leaves_the_stack_untouched(tw
     assert max(tilt_deg(r) for r in (red_rot, blue_rot, base_rot)) < 2.0
     assert abs(((yaw_deg(red_rot) - yaw_deg(blue_rot) + 45) % 90) - 45) < 4.0
     assert all(c < 0.5 for c in contact(twin, "red"))
+
+
+def square(xy: tuple[float, float]) -> float:
+    """The yaw [deg] that sets a block at `xy` square to the arm."""
+    return math.degrees(math.atan2(xy[1] - PAN_XY[1], xy[0] - PAN_XY[0]))
+
+
+def tower_of(twin: Twin, xy: tuple[float, float], under: int, red_yaw: float) -> list[str]:
+    """Stack `under` blue cubes square to the arm at `xy`, with the red cube at `PICK_XY` and `red_yaw` [deg].
+    Return the stack's names, bottom first."""
+    half = block("cube").half_size[2]
+    names = [f"base{k}" for k in range(under - 1)] + ["blue"]
+    aside = [(0.12, 0.2), (0.12, -0.2), (0.3, 0.2)]
+    add_blocks(twin, Placed("red", "cube", PICK_XY, red_yaw, RED),
+               *(Placed(name, "cube", aside[k], square(xy), BLUE) for k, name in enumerate(names)))
+    for k, name in enumerate(names):
+        move(twin, name, xy, (2 * k + 1) * half)
+        settle(twin, 0.5)
+    settle(twin)
+    return names
+
+
+def without_yaw(objects: Objects, label: str) -> Objects:
+    """`objects` with `label`'s rotation dropped, as for a block located without its outline."""
+
+    def poses() -> dict[str, ObjectPose]:
+        out = objects()
+        if label in out:
+            out[label] = replace(out[label], rotation=np.eye(3))
+        return out
+
+    return poses
+
+
+@pytest.mark.parametrize("xy, under", [((0.24, 0.0), 2), ((0.21, 0.08), 3)], ids=["third far out", "fourth"])
+def test_a_cube_out_of_straight_down_reach_goes_on_its_stack_with_the_hand_tilted(twin, xy, under):
+    """The hand tilts for the pick and keeps the tilt, so the cube stays level and lands square; the stack
+    neither moves nor sinks."""
+    half = block("cube").half_size[2]
+    names = tower_of(twin, xy, under, square(PICK_XY))
+    clock = Clock()
+    strategy = built(label="red", place_on="blue")
+    runner = StrategyRunner(twin, strategy, objects=Cameras(twin, clock, ("red", *names)))
+    stack0 = {name: truth(twin, name)[0] for name in names}
+    shift: list[float] = []
+    lowest: list[float] = []
+    carried: list[float] = []
+
+    def watch() -> None:
+        shift.append(max(float(np.linalg.norm(truth(twin, name)[0] - p0)) for name, p0 in stack0.items()))
+        lowest.append(float(truth(twin, names[0])[0][2]))
+        if strategy.started and strategy.status.phase in ("carry_up", "carry_over", "latch", "place"):
+            carried.append(tilt_deg(truth(twin, "red")[1]))
+
+    runner.start(threaded=False)
+    drive(twin, runner, 150.0, clock, watch=watch)
+
+    assert runner.status.stopped_because == "zadanie wykonane", (strategy.status, strategy.place)
+    assert strategy.place.outcome == "placed" and 0.0 < strategy.grasp.tilt_deg <= 30.0
+    settle(twin)
+    red, red_rot = truth(twin, "red")
+    blue, blue_rot = truth(twin, "blue")
+    assert np.linalg.norm(red[:2] - blue[:2]) < 0.004
+    assert red[2] == pytest.approx((2 * under + 1) * half, abs=0.001)
+    assert blue[2] == pytest.approx((2 * under - 1) * half, abs=0.001)
+    assert max(shift) < 0.002 and min(lowest) > half - 0.0004
+    assert carried and max(carried) < 5.0
+    assert max(tilt_deg(truth(twin, name)[1]) for name in ("red", *names)) < 2.0
+    assert abs(((yaw_deg(red_rot) - yaw_deg(blue_rot) + 45) % 90) - 45) < 4.0
+    assert all(c < 0.5 for c in contact(twin, "red"))
+
+
+@pytest.mark.render
+@pytest.mark.parametrize("off", [0.0, 40.0], ids=["square", "40 deg off square"])
+def test_a_tilted_pick_of_a_cube_without_yaw_in_its_pose_follows_the_wrist_look(twin, off):
+    """The pose has no yaw, so the tilted pick guesses the cube square to the arm and the wrist camera checks
+    it. A square cube goes on the stack; one 40 degrees off is left where it lies, untouched."""
+    half = block("cube").half_size[2]
+    names = tower_of(twin, (0.24, 0.0), 2, square(PICK_XY) + off)
+    clock = Clock()
+    strategy = built(label="red", place_on="blue", wrist_camera="wrist")
+    cameras = without_yaw(Cameras(twin, clock, ("red", *names)), "red")
+    runner = StrategyRunner(twin, strategy, objects=cameras, cameras=("wrist",))
+    red0, red_rot0 = truth(twin, "red")
+    stack0 = {name: truth(twin, name)[0] for name in names}
+    shift: list[float] = []
+    touched: list[float] = []
+
+    def watch() -> None:
+        shift.append(max(float(np.linalg.norm(truth(twin, name)[0] - p0)) for name, p0 in stack0.items()))
+        touched.append(max(contact(twin, "red")))
+
+    runner.start(threaded=False)
+    drive(twin, runner, 150.0, clock, watch=watch)
+    settle(twin)
+    red, red_rot = truth(twin, "red")
+    blue, _ = truth(twin, "blue")
+
+    assert max(shift) < 0.002 and all(c < 0.5 for c in contact(twin, "red"))
+    if not off:
+        assert runner.status.stopped_because == "zadanie wykonane", (strategy.status, strategy.place)
+        assert strategy.place.outcome == "placed" and strategy.grasp.tilt_deg > 0.0
+        assert strategy.wrist.verdicts[:1] == ["centred"], strategy.wrist
+        assert np.linalg.norm(red[:2] - blue[:2]) < 0.004 and red[2] == pytest.approx(5 * half, abs=0.001)
+        assert tilt_deg(red_rot) < 2.0
+        return
+    assert strategy.place.outcome == "unreachable", (strategy.status, strategy.place, strategy.wrist)
+    assert strategy.status.stopped_because.startswith("blok w kamerze obrocony o "), strategy.status
+    assert max(touched) < 0.5 and np.linalg.norm(red - red0) < 0.001
+    assert abs(yaw_deg(red_rot) - yaw_deg(red_rot0)) < 1.0
 
 
 def stacked(twin: Twin, lower: Placed, *others: Placed) -> None:

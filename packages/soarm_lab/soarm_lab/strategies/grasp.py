@@ -50,6 +50,14 @@ Where the arm cannot reach the hover or the lift with the hand down, both come d
 `HEADROOM_STEP_M` steps to `MIN_HOVER_CLEAR_M` over the top and `MIN_LIFT_M`.
 A regrasp after a drop counts from the bottom of the block as seen after the drop, so a block that
 fell back onto a block keeps the same limits.
+
+With `max_tilt_deg` above zero and the probe off, a grasp out of reach with the hand straight down is
+tried with the hand tilted in `TILT_STEP_DEG` steps. The hand tilts about its closing axis and leans
+away from the base, so the jaws still close level across the block. The arm can tilt the hand only in
+its own vertical plane, so a tilted grasp needs a closing heading square to the arm, and so the
+block's yaw: a block whose pose has none is tried tilted only when a look before the straddle measures
+it (`_measures_yaw`). While tilted, the hand keeps its heading against the arm as the arm turns, and the
+jaw clearances count along straight down for the tilted hand.
 """
 
 from __future__ import annotations
@@ -66,7 +74,7 @@ from machinekind_twin_api.strategy import Action, Observation, RunInfo
 from ..blocks import BlockSpec, block
 from ..blocks.classic_world import BLOCKS
 from ..grasp_library import GraspLibrary, compose, load_library, rejections_text, roll_axis, select, wrap
-from ..kinematics import IKSolution, RobotKinematics
+from ..kinematics import IK_RESTARTS, IKSolution, RobotKinematics
 from .jaw import JawMonitor, JawReading
 from .touch import (
     APPROACH,
@@ -120,6 +128,14 @@ GRASP_SOURCES = (GEOMETRY, LIBRARY)
 MIN_BITE_M = 0.003
 #: Jaw-travel, squeeze and bite rejection labels checked before reach.
 SKIPS = ("szczeka", "scisk", "zbyt plytko")
+#: Hand tilts from straight down are tried in steps of this [deg].
+TILT_STEP_DEG = 5.0
+#: The largest `max_tilt_deg` [deg].
+MAX_HAND_TILT_DEG = 45.0
+#: Random IK starts for a tilted hand: fewer than straight down, so the search over tilts stays short.
+TILT_RESTARTS = 2
+#: Why no tilted grasp was tried: the block's yaw is unknown.
+NEEDS_YAW = "dlon pochylona potrzebuje obrotu bloku"
 
 #: Phases of a run after touch's (`TouchStatus.phase`).
 RISE = "rise"
@@ -227,6 +243,9 @@ class GraspSettings(TouchSettings):
     library_dir: str = ""
     #: Library grasps whose generator score lies below this are skipped [0..1].
     min_score: float = 0.0
+    #: Largest tilt of the hand from straight down [deg], tried when straight down is out of reach. The
+    #: tilted hand needs the block square to the arm. Zero, or `probe: true`, keeps the hand straight down.
+    max_tilt_deg: float = 0.0
 
 
 @dataclass
@@ -283,6 +302,8 @@ class GraspStatus:
     #: [m, base frame].
     depth_m: float = float("nan")
     offset_xy: tuple[float, float] = (0.0, 0.0)
+    #: How far the hand leans from straight down for this grasp [deg].
+    tilt_deg: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -346,6 +367,9 @@ class GraspStrategy(TouchStrategy):
                              f"{config.grasp_source!r}")
         if not 0 <= config.min_score <= 1:
             raise ValueError(f"grasp: min_score must lie within [0, 1], is {config.min_score}")
+        if not 0 <= config.max_tilt_deg <= MAX_HAND_TILT_DEG:
+            raise ValueError(f"grasp: max_tilt_deg must lie within [0, {MAX_HAND_TILT_DEG:.0f}], is "
+                             f"{config.max_tilt_deg}")
         spec = block(config.block)
         #: Block geometry in its body frame (x long, y short, z height) and yaw symmetry.
         self.block: BlockSpec = spec
@@ -381,6 +405,17 @@ class GraspStrategy(TouchStrategy):
         #: TCP rotation and closing heading [rad, base frame]. None / NaN before latching a pose.
         self._rot: np.ndarray | None = None
         self._psi = float("nan")
+        #: The hand's tilt about its closing axis [rad], signed as in `hand_down`, and the closing heading
+        #: against the direction of the TCP from the base's turning axis [rad].
+        self._tilt = 0.0
+        self._psi_rel = float("nan")
+        #: `_psi_rel` of the grasp: a held block stays level while the hand keeps it.
+        self._grip_rel = float("nan")
+        #: Where the base's turning axis crosses the table [m, base frame], from the model in `start`.
+        self._pan_xy = np.zeros(2)
+        #: The last aim's grasp passed `plan_problem`, and why it tried no tilted grasp, or ''.
+        self._fitted = False
+        self._tilt_why = ""
         #: The candidate headings `_aim` tries, in order [rad].
         self._headings: list[float] = []
         #: Original block centre [m, base frame] and retry index.
@@ -461,12 +496,13 @@ class GraspStrategy(TouchStrategy):
             if self._auto_touch_z:
                 self.config = replace(self.config, touch_z=self._probe_z())
 
-    def _grasp_floor(self, cmd_open: float) -> float:
+    def _grasp_floor(self, cmd_open: float, tilt: float = 0.0) -> float:
         """The lowest TCP height of the close [m]: above the table, or with the jaw opened to `cmd_open`
-        [app units] `STACK_CLEAR_M` above the block under the picked one."""
+        [app units] and the hand tilted by `tilt` [rad] `STACK_CLEAR_M` above the block under the picked
+        one."""
         if self.base_z <= 0:
             return MIN_GRASP_Z
-        return max(MIN_GRASP_Z, self.base_z + self.kin.jaw_reach(cmd_open) + STACK_CLEAR_M)
+        return max(MIN_GRASP_Z, self.base_z + self.kin.jaw_reach(cmd_open, tilt=tilt) + STACK_CLEAR_M)
 
     # ------------------------------------------------------------------- start
     def start(self, run: RunInfo, obs: Observation) -> None:
@@ -525,6 +561,8 @@ class GraspStrategy(TouchStrategy):
         self.grasp = GraspStatus()
         self.block_rotation = np.eye(3)
         self._rot, self._psi, self._headings = None, float("nan"), []
+        self._tilt, self._psi_rel, self._grip_rel = 0.0, float("nan"), float("nan")
+        self._pan_xy = kin.joint_anchor(spec.arm_joints[0], spec.home)[:2].copy()
         self._block_xy0, self._shift_k, self._retarget_xy = None, 0, None
         self._straddle_xy, self._grasp_z = np.full(2, np.nan), float("nan")
         self._lift_m = cfg.lift_m
@@ -583,10 +621,13 @@ class GraspStrategy(TouchStrategy):
         return heading(self.kin, self.kin.from_q(self.q_cmd))
 
     # ------------------------------------------------------------------- aiming
-    def _aim(self, xy: np.ndarray) -> None:
+    def _aim(self, xy: np.ndarray, *, strict: bool = False) -> None:
         """Choose the first candidate that passes jaw rules and reaches every planned point.
 
-        If none works, raise while retaining the aim and updating rejection status.
+        Straight down first, then each tilt from `_tilts`. With more than one tilt, a grasp must also pass
+        `plan_problem`; when none does, the first reachable straight-down grasp is taken, or with `strict`
+        the aim raises. A block without yaw is tried tilted only when `_measures_yaw`. If none works, raise
+        while retaining the aim and updating rejection status.
         """
         xy = np.asarray(xy, float)
         if xy.shape != (2,) or not np.all(np.isfinite(xy)):
@@ -596,33 +637,111 @@ class GraspStrategy(TouchStrategy):
         skips: dict[str, int] = dict.fromkeys(SKIPS, 0)
         plans: dict[float, JawPlan | str] = {}
         first_failure: tuple[np.ndarray, dict[str, float], IKSolution] | None = None
-        for cand in candidates:
-            jaw = self._candidate_jaw(cand, plans)
-            if isinstance(jaw, str):
-                skips[jaw] += 1
-                continue
-            if cand.origin != GEOMETRY and cand.depth_m - jaw.swing_m / 2 < MIN_BITE_M:
-                # The shallower tip lies half the swing above the planned midpoint.
-                skips["zbyt plytko"] += 1
-                continue
-            grasp_z = self._grasp_height(top, cand.depth_m, jaw.centre_open, jaw.cmd_open)
-            if self.base_z > 0:
-                # Over another block the floor may cut the depth: the shallower tip must still bite.
-                swing = jaw.swing_m if math.isfinite(jaw.swing_m) else self.kin.tip_swing(jaw.cmd_open)
-                if top - (grasp_z - float(jaw.centre_open[0])) - swing / 2 < MIN_BITE_M:
-                    skips["zbyt plytko"] += 1
+        fallback: tuple[GraspCandidate, JawPlan, dict[str, np.ndarray], float, float] | None = None
+        misfit = ""
+        tilts = self._tilts()
+        self._fitted, self._tilt_why = False, ""
+        # Without the block's yaw any heading grips it straight down, and a tilted hand needs one square to
+        # the arm: that is a guess until a look measures the yaw.
+        free = np.allclose(self.block_rotation, np.eye(3), atol=1e-6) and candidates[0].origin == GEOMETRY
+        blind = free and not self._measures_yaw
+        bearing = self._bearing(xy)
+        square = [replace(candidates[0], psi=wrap(bearing + side)) for side in (-math.pi / 2, math.pi / 2)]
+        for k, size in enumerate(tilts):
+            if size and blind:
+                break
+            for cand in square if size and free else candidates:
+                jaw = self._candidate_jaw(cand, plans)
+                if isinstance(jaw, str):
+                    skips[jaw] += k == 0
                     continue
-            plan, failure = self._reachable(xy, cand, jaw, grasp_z, top)
-            if failure is None:
-                self.grasp.skipped = rejections_text(skips, SKIPS)
-                self._take_plan(xy, cand, jaw, plan, grasp_z)
-                return
-            first_failure = first_failure or failure
+                if cand.origin != GEOMETRY and cand.depth_m - jaw.swing_m / 2 < MIN_BITE_M:
+                    # The shallower tip lies half the swing above the planned midpoint.
+                    skips["zbyt plytko"] += k == 0
+                    continue
+                tilt = self._signed_tilt(cand.psi, xy, size)
+                if tilt is None:
+                    continue
+                grasp_z = self._grasp_height(top, cand.depth_m, jaw.centre_open, jaw.cmd_open, tilt)
+                if self.base_z > 0:
+                    # Over another block the floor may cut the depth: the shallower tip must still bite.
+                    swing = jaw.swing_m if math.isfinite(jaw.swing_m) else self.kin.tip_swing(jaw.cmd_open)
+                    mid_z = grasp_z - float(jaw.centre_open[0]) * math.cos(tilt)
+                    if top - mid_z - swing / 2 < MIN_BITE_M:
+                        skips["zbyt plytko"] += k == 0
+                        continue
+                if tilt and self.plan_problem(xy, cand, jaw, tilt, grasp_z,
+                                              self._plan(xy, cand, jaw, grasp_z, tilt=tilt)):
+                    # A tilt is tried for the rest of the run, so that check comes first: it fails sooner.
+                    continue
+                plan, failure = self._reachable(xy, cand, jaw, grasp_z, top, tilt)
+                if failure is not None:
+                    first_failure = first_failure or failure
+                    continue
+                problem = ""
+                if len(tilts) > 1 and not tilt:
+                    problem = self.plan_problem(xy, cand, jaw, tilt, grasp_z, plan)
+                if not problem:
+                    self._fitted = len(tilts) > 1
+                    self.grasp.skipped = rejections_text(skips, SKIPS)
+                    self._take_plan(xy, cand, jaw, plan, grasp_z, tilt)
+                    return
+                misfit = misfit or problem
+                fallback = fallback or (cand, jaw, plan, grasp_z, tilt)
         self.grasp.skipped = rejections_text(skips, SKIPS)
-        if first_failure is None:
+        if len(tilts) > 1 and blind:
+            self._tilt_why = NEEDS_YAW
+        if fallback is not None:
+            if not strict:
+                self._take_plan(xy, *fallback)
+                return
+            reason = misfit
+        elif first_failure is not None:
+            reason = self._unreachable(*first_failure)
+        else:
             raise RuntimeError(f"biblioteka chwytow '{self.block.name}': zaden chwyt nie pasuje do szczeki "
                                f"({self.grasp.skipped})")
-        raise RuntimeError(self._unreachable(*first_failure))
+        raise RuntimeError("; ".join(filter(None, (reason, self._tilt_why))))
+
+    def plan_problem(self, xy: np.ndarray, cand: GraspCandidate, jaw: JawPlan, tilt: float, grasp_z: float,
+                     plan: dict[str, np.ndarray]) -> str:
+        """Why the rest of the run does not fit a reachable grasp at hand tilt `tilt` [rad], or ''.
+
+        `_aim` asks only when it may try more than one tilt. The default accepts every grasp."""
+        return ""
+
+    @property
+    def _measures_yaw(self) -> bool:
+        """Whether a look before each straddle measures the block's yaw. Plain grasp has none."""
+        return False
+
+    def _refuse(self, reason: str) -> Action:
+        """End the run before the straddle: the grasp cannot be aimed safely."""
+        return self._halt(reason, self.kin.from_q(self.q_cmd))
+
+    def _tilts(self) -> list[float]:
+        """Hand tilts to try [rad]: straight down, then `TILT_STEP_DEG` steps up to `max_tilt_deg`."""
+        cfg = self.grasp_settings
+        most = 0.0 if cfg.probe else cfg.max_tilt_deg
+        steps = [k * TILT_STEP_DEG for k in range(1, math.ceil(most / TILT_STEP_DEG - 1e-9))]
+        return [0.0] + [math.radians(t) for t in [*steps, most] if most > 0]
+
+    def _bearing(self, xy: np.ndarray) -> float:
+        """The direction of `xy` from the base's turning axis [rad, base frame]."""
+        d = np.asarray(xy, float)[:2] - self._pan_xy
+        return math.atan2(float(d[1]), float(d[0]))
+
+    def _signed_tilt(self, psi: float, xy: np.ndarray, size: float) -> float | None:
+        """Return tilt `size` [rad] signed so the hand at heading `psi` over `xy` leans away from the base.
+
+        None when the heading lies too far from square to the arm for the arm to tilt the hand that much.
+        The arm's reach check decides within that."""
+        if not size:
+            return 0.0
+        off = self._bearing(xy) - psi
+        if math.sin(size) * abs(math.cos(off)) > math.sin(math.radians(2 * MAX_ROT_ERR_DEG)):
+            return None
+        return math.copysign(size, math.sin(off))
 
     def candidates(self, rotation: np.ndarray) -> list[GraspCandidate]:
         """Return geometry or library candidates in attempt order.
@@ -687,7 +806,8 @@ class GraspStrategy(TouchStrategy):
         return JawPlan(plain + widened, width_m - cfg.squeeze_m, cmd_open, cmd_closed, cmd_block,
                        kin.jaw_centre(cmd_plain), kin.tip_swing(cmd_open))
 
-    def _reachable(self, xy: np.ndarray, cand: GraspCandidate, jaw: JawPlan, grasp_z: float, top: float
+    def _reachable(self, xy: np.ndarray, cand: GraspCandidate, jaw: JawPlan, grasp_z: float, top: float,
+                   tilt: float = 0.0
                    ) -> tuple[dict[str, np.ndarray], tuple[np.ndarray, dict[str, float], IKSolution] | None]:
         """Return the plan with the set hover and lift and its first unreachable point, or None.
 
@@ -697,31 +817,34 @@ class GraspStrategy(TouchStrategy):
         hover = self.config.touch_z + self.grasp_settings.hover_m
         lift = grasp_z + self.grasp_settings.lift_m
         while True:
-            plan = self._plan(xy, cand, jaw, grasp_z, hover, lift)
-            failure = self._reach(plan, cand.psi, jaw.cmd_open)
+            plan = self._plan(xy, cand, jaw, grasp_z, hover, lift, tilt)
+            failure = self._reach(plan, cand.psi, jaw.cmd_open, tilt)
             heights = ("probe_hover", "straddle_hover", "lift")
             if (failure is None or self.base_z <= 0
                     or not any(np.array_equal(failure[0], plan[name]) for name in heights)):
                 return plan, failure
-            low_hover = min(hover, top + self.kin.jaw_reach(jaw.cmd_open) + MIN_HOVER_CLEAR_M)
+            low_hover = min(hover, top + self.kin.jaw_reach(jaw.cmd_open, tilt=tilt) + MIN_HOVER_CLEAR_M)
             low_lift = min(lift, grasp_z + MIN_LIFT_M)
             if hover <= low_hover and lift <= low_lift:
                 return plan, failure
             hover, lift = max(hover - HEADROOM_STEP_M, low_hover), max(lift - HEADROOM_STEP_M, low_lift)
 
     def _plan(self, xy: np.ndarray, cand: GraspCandidate, jaw: JawPlan, grasp_z: float,
-              hover_z: float | None = None, lift_z: float | None = None) -> dict[str, np.ndarray]:
+              hover_z: float | None = None, lift_z: float | None = None, tilt: float = 0.0
+              ) -> dict[str, np.ndarray]:
         """Return candidate TCP targets in the base frame [m].
 
         Probe over the block centre. Place the open jaw at that centre plus the grasp offset. The hover
         and lift heights default to the set ones.
         """
         u = np.array([math.cos(cand.psi), math.sin(cand.psi)])
+        n = np.array([-math.sin(cand.psi), math.cos(cand.psi)]) * math.sin(tilt)
         hover_z = self.config.touch_z + self.config.hover_m if hover_z is None else hover_z
         lift_z = grasp_z + self.grasp_settings.lift_m if lift_z is None else lift_z
-        # Jaw midpoint = TCP + R @ centre. With the hand down, centre[2] lies along the heading.
-        probe_xy = xy - self._centre_probe[2] * u
-        straddle_xy = xy + np.asarray(cand.offset_xy, float) - jaw.centre_open[2] * u
+        # Jaw midpoint = TCP + R @ centre: centre[2] lies along the heading, and a tilt moves centre[0]
+        # along n.
+        probe_xy = xy - self._centre_probe[2] * u - self._centre_probe[0] * n
+        straddle_xy = xy + np.asarray(cand.offset_xy, float) - jaw.centre_open[2] * u - jaw.centre_open[0] * n
         return {"probe_xy": probe_xy, "straddle_xy": straddle_xy,
                 "probe_hover": np.array([*probe_xy, hover_z]),
                 "probe_bottom": np.array([*probe_xy, self.config.touch_z]),
@@ -729,14 +852,14 @@ class GraspStrategy(TouchStrategy):
                 "grasp": np.array([*straddle_xy, grasp_z]),
                 "lift": np.array([*straddle_xy, lift_z])}
 
-    def _reach(self, plan: dict[str, np.ndarray], psi: float, cmd_open: float
+    def _reach(self, plan: dict[str, np.ndarray], psi: float, cmd_open: float, tilt: float = 0.0
                ) -> tuple[np.ndarray, dict[str, float], IKSolution] | None:
-        """Check full IK at each planned point with the hand down.
+        """Check full IK at each planned point with the hand down, tilted by `tilt` [rad].
 
         Use `cmd_open` from straddle hover onward. Return None on success, or the first failed
         point, its seed and its solution.
         """
-        kin, R = self.kin, top_down(psi)
+        kin, R = self.kin, hand_down(psi, tilt)
         spec = kin.spec
         assert spec.gripper is not None
         seed = kin.from_q(self.q_cmd)
@@ -745,7 +868,7 @@ class GraspStrategy(TouchStrategy):
             if name == "straddle_hover":
                 seed = dict(seed, **{spec.gripper: cmd_open})
             point = plan[name]
-            sol = kin.ik(point, R, seed=seed, accept=self._clear)
+            sol = kin.ik(point, R, seed=seed, accept=self._clear, restarts=ik_restarts(tilt))
             if not (sol.ok and self._clear(sol.joints) and sol.rot_err <= math.radians(MAX_ROT_ERR_DEG)):
                 return point, seed, sol
             seed = sol.joints
@@ -764,9 +887,14 @@ class GraspStrategy(TouchStrategy):
         return f"{where}: ramie uderzyloby samo w siebie"
 
     def _take_plan(self, xy: np.ndarray, cand: GraspCandidate, jaw: JawPlan, plan: dict[str, np.ndarray],
-                   grasp_z: float) -> None:
+                   grasp_z: float, tilt: float = 0.0) -> None:
         psi = cand.psi
-        self._psi, self._rot = float(psi), top_down(psi)
+        self._tilt = float(tilt)
+        self._set_heading(psi, plan["straddle_xy"])
+        self._grip_rel = self._psi_rel
+        self.grasp.tilt_deg = math.degrees(abs(self._tilt))
+        if self._tilt:
+            logger.info("Dlon pochylona o %.0f st. od pionu", self.grasp.tilt_deg)
         self._headings = [float(psi)]
         self._cand = cand
         self._width_m, self._depth_m, self._offset_xy = cand.width_m, cand.depth_m, cand.offset_xy
@@ -802,16 +930,17 @@ class GraspStrategy(TouchStrategy):
         grasp.grasp_point = (float(self._straddle_xy[0]), float(self._straddle_xy[1]), self._grasp_z)
 
     def _grasp_height(self, top_m: float, depth_m: float | None = None, centre: np.ndarray | None = None,
-                      cmd_open: float | None = None) -> float:
+                      cmd_open: float | None = None, tilt: float | None = None) -> float:
         """Return closing TCP height [m above the table, base frame], bounded by `_grasp_floor`.
 
-        Place the midpoint `depth_m` below `top_m`, using open-tip `centre` in the TCP frame [m] and
-        opening `cmd_open` [app units]. Omitted values use the chosen grasp.
+        Place the midpoint `depth_m` below `top_m`, using open-tip `centre` in the TCP frame [m], opening
+        `cmd_open` [app units] and hand tilt `tilt` [rad]. Omitted values use the chosen grasp.
         """
         depth = self._depth_m if depth_m is None else depth_m
         centre = self._centre_open if centre is None else centre
-        floor = self._grasp_floor(self.cmd_open if cmd_open is None else cmd_open)
-        return max(floor, top_m - depth + float(centre[0]))
+        tilt = self._tilt if tilt is None else tilt
+        floor = self._grasp_floor(self.cmd_open if cmd_open is None else cmd_open, tilt)
+        return max(floor, top_m - depth + float(centre[0]) * math.cos(tilt))
 
     @property
     def straddle_hover(self) -> np.ndarray:
@@ -824,14 +953,24 @@ class GraspStrategy(TouchStrategy):
         return np.array([*self._straddle_xy, self._grasp_z])
 
     def _drive(self, goal: np.ndarray, step_m: float, *, rotation: np.ndarray | None = None) -> Action:
-        """Run touch's step with the chosen downward orientation after latching the pose."""
+        """Run touch's step with the chosen downward orientation after latching the pose.
+
+        A tilted hand keeps its heading against the arm as the arm turns, so a held block stays level."""
+        if rotation is None and self._tilt:
+            rotation = hand_down(self._bearing(self.tcp_cmd) + self._psi_rel, self._tilt)
         return super()._drive(goal, step_m, rotation=self._rot if rotation is None else rotation)
 
+    def _set_heading(self, psi: float, xy: np.ndarray) -> None:
+        """Set the closing heading `psi` [rad] the hand has with its TCP over `xy` [m, base frame]."""
+        self._psi, self._rot = float(psi), hand_down(psi, self._tilt)
+        self._psi_rel = wrap(float(psi) - self._bearing(xy))
+
     def _vertical(self) -> bool:
-        """Whether the last target's hand is top-down on the chosen heading within `MAX_TILT_DEG`."""
+        """Whether the last target's hand has the chosen tilt and heading within `MAX_TILT_DEG`."""
         joints = self.kin.from_q(self.q_cmd)
         limit = math.radians(MAX_TILT_DEG)
-        return tilt(self.kin, joints) <= limit and abs(wrap(heading(self.kin, joints) - self._psi)) <= limit
+        return (abs(tilt(self.kin, joints) - abs(self._tilt)) <= limit
+                and abs(wrap(heading(self.kin, joints) - self._psi)) <= limit)
 
     def _enter(self, phase: str) -> None:
         super()._enter(phase)
@@ -880,8 +1019,10 @@ class GraspStrategy(TouchStrategy):
         return self._drive(self.hover_point, self.approach_step_m)
 
     def _not_vertical(self) -> str:
-        return (f"chwytak nie ustawil sie pionowo nad blokiem "
-                f"({math.degrees(tilt(self.kin, self.kin.from_q(self.q_cmd))):.0f} st.)")
+        now = math.degrees(tilt(self.kin, self.kin.from_q(self.q_cmd)))
+        if self._tilt:
+            return f"chwytak nie pochylil sie o {self.grasp.tilt_deg:.0f} st. nad blokiem ({now:.0f} st.)"
+        return f"chwytak nie ustawil sie pionowo nad blokiem ({now:.0f} st.)"
 
     def _descend(self, obs: Observation) -> Action | None:
         if self._before_descent_pending:
@@ -1402,9 +1543,9 @@ class GraspStrategy(TouchStrategy):
             text = rise.get(self._rise_then, "w gore znad bloku") + f": {mm:.0f} mm"
         elif st.phase == APPROACH:
             text = ("nad obiekt: zamykam szczeke" if not self._jaw_ready() else f"nad obiekt: {mm:.0f} mm")
-            text += self._source_note()
+            text += self._source_note() + self._tilt_note()
         elif st.phase == OPEN:
-            text = f"nad blok, otwieram szczeke: {grasp.gap_cmd_m * 1000:.0f} mm"
+            text = f"nad blok, otwieram szczeke: {grasp.gap_cmd_m * 1000:.0f} mm" + self._tilt_note()
         elif st.phase == STRADDLE:
             text = f"w dol na blok: {mm:.0f} mm"
         elif st.phase == STRADDLED:
@@ -1428,6 +1569,9 @@ class GraspStrategy(TouchStrategy):
         return text + (" - cel poza zasiegiem ramienia" if st.out_of_reach else "")
 
 
+    def _tilt_note(self) -> str:
+        return f" (dlon pochylona {self.grasp.tilt_deg:.0f} st.)" if self._tilt else ""
+
     def _source_note(self) -> str:
         """Return the chosen library index and score, or the geometry fallback, for the panel."""
         if self.library is None:
@@ -1444,6 +1588,22 @@ def top_down(psi: float) -> np.ndarray:
     The columns are approach, y and closing, corresponding to TCP x, y and z."""
     c, s = math.cos(psi), math.sin(psi)
     return np.column_stack([(0.0, 0.0, -1.0), (-s, c, 0.0), (c, s, 0.0)])
+
+
+def ik_restarts(tilt: float) -> int:
+    """Random IK starts for a hand tilted by `tilt` [rad]."""
+    return TILT_RESTARTS if tilt else IK_RESTARTS
+
+
+def hand_down(psi: float, tilt: float = 0.0) -> np.ndarray:
+    """Return `top_down(psi)` turned by `tilt` [rad] about its closing axis.
+
+    A positive tilt leans the approach toward the TCP y axis, (-sin psi, cos psi, 0)."""
+    R = top_down(psi)
+    if not tilt:
+        return R
+    c, s = math.cos(tilt), math.sin(tilt)
+    return np.column_stack([c * R[:, 0] + s * R[:, 1], c * R[:, 1] - s * R[:, 0], R[:, 2]])
 
 
 def tilt(kin: RobotKinematics, joints: Mapping[str, float]) -> float:

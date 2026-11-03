@@ -29,6 +29,7 @@ from soarm_lab.strategies.grasp import (  # noqa: E402
     MIN_BITE_M,
     MIN_GRASP_Z,
     MIN_HOVER_CLEAR_M,
+    NEEDS_YAW,
     PROBE_BELOW_M,
     SEEN,
     STACK_CLEAR_M,
@@ -38,7 +39,9 @@ from soarm_lab.strategies.grasp import (  # noqa: E402
     GraspStrategy,
     Sighting,
     grasp_headings,
+    hand_down,
     heading,
+    tilt,
     top_down,
     wrap,
 )
@@ -423,6 +426,8 @@ def test_the_probe_height_comes_from_the_block_and_touch_z_zero_means_automatic(
     ({"max_attempts": 0}, "grasp: max_attempts must be at least 1"),
     ({"touch_z": 0.01, "probe": True}, r"grasp: touch_z must be zero \(from the block\) or at least 0.02 m"),
     ({"close_jaw": False, "probe": True}, "grasp: close_jaw must be on"),
+    ({"max_tilt_deg": -1.0}, r"grasp: max_tilt_deg must lie within \[0, 45\]"),
+    ({"max_tilt_deg": 50.0}, r"grasp: max_tilt_deg must lie within \[0, 45\]"),
 ])
 def test_settings_are_validated(settings: dict, match: str):
     with pytest.raises(ValueError, match=match):
@@ -1278,6 +1283,51 @@ def test_an_identity_rotation_keeps_the_current_heading():
     R = top_down(psi)
     assert R @ R.T == pytest.approx(np.eye(3)) and np.linalg.det(R) == pytest.approx(1.0)
     assert wrap(math.pi) == pytest.approx(math.pi) and wrap(-math.pi) == pytest.approx(math.pi)
+
+
+def test_a_tilted_hand_turns_about_its_closing_axis():
+    psi, lean = 0.3, math.radians(20.0)
+    R = hand_down(psi, lean)
+
+    assert np.array_equal(hand_down(psi, 0.0), top_down(psi))
+    assert R @ R.T == pytest.approx(np.eye(3)) and np.linalg.det(R) == pytest.approx(1.0)
+    # The closing axis stays level on its heading; the approach leans by the tilt toward the TCP y axis.
+    assert R[:, 2] == pytest.approx(top_down(psi)[:, 2])
+    assert R[:, 0] == pytest.approx([-math.sin(psi) * math.sin(lean), math.cos(psi) * math.sin(lean),
+                                     -math.cos(lean)])
+
+
+FAR = (0.33, 0.0)
+
+
+def test_a_cube_beyond_straight_down_reach_is_grasped_with_the_hand_tilted_only_when_allowed():
+    # A quarter turn, so the pose carries a yaw that lies square to the arm.
+    posed = seen(FAR, yaw_deg=90.0)
+    straight = started(posed)
+    answer = straight.act(obs(dict(SPEC.home), t=0.0, objects=posed))
+    assert answer.done and answer.note.endswith("chwytak nie siega tam pionowo")
+
+    s = started(posed, max_tilt_deg=30.0, carry_s=0.5)
+    answers, phases, joints, _ = follow(s, dict(SPEC.home), posed, 1500,
+                                        block=block_at(FAR, yaw=math.pi / 2))
+
+    assert answers[-1].done and answers[-1].success, answers[-1].note
+    assert 0.0 < s.grasp.tilt_deg <= 30.0 and s.grasp.verdict == "lifted"
+    # The jaws close square to the arm, and the hand holds the tilt it planned.
+    pan = KIN.joint_anchor(SPEC.arm_joints[0], SPEC.home)[:2]
+    bearing = math.atan2(FAR[1] - pan[1], FAR[0] - pan[0])
+    assert abs(math.cos(math.radians(s.grasp.heading_deg) - bearing)) < 1e-6
+    assert math.degrees(tilt(KIN, joints)) == pytest.approx(s.grasp.tilt_deg, abs=2.0)
+    assert any("dlon pochylona" in a.note for a, p in zip(answers, phases, strict=True) if p == "approach")
+    assert all(KIN.self_contacts(a.target) == set() for a in answers)
+
+
+def test_without_the_blocks_yaw_the_hand_does_not_tilt():
+    s = started(seen(FAR), max_tilt_deg=30.0)
+    answer = s.act(obs(dict(SPEC.home), t=0.0, objects=seen(FAR)))
+
+    assert answer.done and not answer.success and s.grasp.tilt_deg == 0.0
+    assert answer.note.endswith(f"chwytak nie siega tam pionowo; {NEEDS_YAW}")
 
 
 # ------------------------------------------------------------ the ends of touch's probe

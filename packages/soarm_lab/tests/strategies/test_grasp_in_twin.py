@@ -214,14 +214,15 @@ def test_its_settings_become_the_panel_form():
 
     assert list(fields) == TOUCH_FIELDS + ["block", "probe", "open_margin_m", "squeeze_m", "grasp_depth",
                                            "lift_m", "hold_s", "max_attempts", "carry_s", "release", "wait_s",
-                                           "recover_m", "grasp_source", "library_dir", "min_score"]
+                                           "recover_m", "grasp_source", "library_dir", "min_score",
+                                           "max_tilt_deg"]
     assert fields["block"].kind is str and fields["block"].default == "cube"
     assert fields["block"].choices == tuple(BLOCKS)
     assert fields["probe"].kind is bool and fields["probe"].default is False
     assert fields["grasp_source"].kind is str and fields["grasp_source"].default == "geometry"
     assert fields["grasp_source"].choices == ("geometry", "library")
     assert fields["library_dir"].kind is str and fields["library_dir"].default == ""
-    assert fields["min_score"].default == 0.0
+    assert fields["min_score"].default == 0.0 and fields["max_tilt_deg"].default == 0.0
     assert fields["label"].default == "" and fields["touch_z"].default == 0.0
     assert fields["hover_m"].default == 0.04 and fields["time_limit_s"].default == 120.0
     assert fields["max_attempts"].kind is int
