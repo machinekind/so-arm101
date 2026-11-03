@@ -16,6 +16,8 @@ from galaxeo-manipulators, with two changes:
   over most of the A1X workspace. IK starts from the given pose, from the rest pose and from a few random
   ones, and keeps the best.
 
+The jaw helpers read openings, fingertip positions and collision reach from the model.
+
 All poses are in the arm's BASE frame, not the scene's world frame: a camera calibrated relative to the
 base stays correct wherever the arm stands.
 """
@@ -46,6 +48,23 @@ def inverse(T: np.ndarray) -> np.ndarray:
     out[:3, :3] = R.T
     out[:3, 3] = -R.T @ t
     return out
+
+
+def turn_toward(R_from: np.ndarray, R_to: np.ndarray, max_angle: float) -> np.ndarray:
+    """Rotate from `R_from` toward `R_to` by at most `max_angle` [rad] along the shortest path.
+
+    Small rotation steps keep the IK correction from driving the wrist into a joint limit."""
+    R_from, R_to = np.asarray(R_from, float), np.asarray(R_to, float)
+    quat, w = np.zeros(4), np.zeros(3)
+    mujoco.mju_mat2Quat(quat, np.ascontiguousarray(R_to @ R_from.T).ravel())
+    mujoco.mju_quat2Vel(w, quat, 1.0)
+    angle = float(np.linalg.norm(w))
+    if angle <= max_angle:
+        return R_to.copy()
+    step, mat = np.zeros(4), np.zeros(9)
+    mujoco.mju_axisAngle2Quat(step, w / angle, max_angle)
+    mujoco.mju_quat2Mat(mat, step)
+    return mat.reshape(3, 3) @ R_from
 
 
 @dataclass
@@ -201,6 +220,101 @@ class RobotKinematics:
         """(approach direction, jaw closing axis) in the base frame."""
         R = self.tcp(joints)[:3, :3]
         return R @ self._approach, R @ self._closing
+
+    # ------------------------------------------------------------ the jaw
+    def fingertips(self, joints: Mapping[str, float]) -> tuple[np.ndarray, np.ndarray]:
+        """The centres of the two fingertip geoms (`spec.fingertips`: fixed, moving) in the base frame [m]."""
+        names = self.spec.fingertips
+        if not all(names):
+            raise ValueError(f"{self.spec.name}: no `fingertips` in the robot description")
+        self._apply(self.to_q(joints))
+        Bi, d = self._base_inv(), self.data
+        fixed, moving = (Bi[:3, :3] @ d.geom_xpos[self.model.geom(self.prefix + name).id] + Bi[:3, 3]
+                         for name in names)
+        return fixed, moving
+
+    def _jaw_pose(self, gripper: float) -> dict[str, float]:
+        """Return the rest pose with the given gripper command [app units].
+
+        Jaw geometry relative to the TCP is independent of the arm pose."""
+        if self.spec.gripper is None:
+            raise ValueError(f"{self.spec.name}: no gripper in the robot description")
+        return {**self.spec.home, self.spec.gripper: float(gripper)}
+
+    def jaw_gap(self, gripper: float) -> float:
+        """Return the distance between fingertip centres [m] at `gripper` [app units].
+
+        The gap between the surfaces is smaller by the sum of the tip radii."""
+        fixed, moving = self.fingertips(self._jaw_pose(gripper))
+        return float(np.linalg.norm(moving - fixed))
+
+    def gripper_for_gap(self, gap_m: float) -> float:
+        """Return the gripper command [app units, 0..100] for `gap_m` [m].
+
+        The gap must grow monotonically with the command. Raise ValueError outside the jaw's travel."""
+        lo_gap, hi_gap = self.jaw_gap(0.0), self.jaw_gap(100.0)
+        if not lo_gap <= gap_m <= hi_gap:
+            raise ValueError(f"jaw gap {gap_m:.4f} m is outside the jaw travel {lo_gap:.4f}..{hi_gap:.4f} m")
+        lo, hi = 0.0, 100.0
+        for _ in range(40):
+            mid = 0.5 * (lo + hi)
+            if self.jaw_gap(mid) < gap_m:
+                lo = mid
+            else:
+                hi = mid
+        return 0.5 * (lo + hi)
+
+    def jaw_centre(self, gripper: float) -> np.ndarray:
+        """Return the fingertips' midpoint in the TCP frame [m] at `gripper` [app units].
+
+        `spec.tcp_approach` and `spec.tcp_closing` define the approach and closing axes.
+        The moving tip follows an arc, so the midpoint changes with the opening."""
+        joints = self._jaw_pose(gripper)
+        fixed, moving = self.fingertips(joints)
+        Ti = inverse(self.tcp(joints))
+        return Ti[:3, :3] @ (0.5 * (fixed + moving)) + Ti[:3, 3]
+
+    def jaw_reach(self, gripper: float) -> float:
+        """Return the farthest jaw collision point beyond the TCP along `spec.tcp_approach` [m].
+
+        Use collision geoms on `spec.jaw_bodies` at `gripper` [app units].
+        Raise ValueError if those bodies are missing or have no supported collision geoms."""
+        bodies = [name for name in self.spec.jaw_bodies if name]
+        if not bodies:
+            raise ValueError(f"{self.spec.name}: no `jaw_bodies` in the robot description")
+        self._apply(self.to_q(self._jaw_pose(gripper)))
+        m, d = self.model, self.data
+        origin = d.site_xpos[self.site_id]
+        a = d.site_xmat[self.site_id].reshape(3, 3) @ self._approach
+        a = a / np.linalg.norm(a)
+        ids = {m.body(self.prefix + name).id for name in bodies}
+        best = -np.inf
+        for g in range(m.ngeom):
+            if int(m.geom_bodyid[g]) not in ids or not (m.geom_contype[g] or m.geom_conaffinity[g]):
+                continue
+            R, size, kind = d.geom_xmat[g].reshape(3, 3), m.geom_size[g], int(m.geom_type[g])
+            centre = float(a @ (d.geom_xpos[g] - origin))
+            local = R.T @ a                                   # the approach in the geom's frame
+            if kind == mujoco.mjtGeom.mjGEOM_SPHERE:
+                extent = size[0]
+            elif kind == mujoco.mjtGeom.mjGEOM_BOX:
+                extent = float(np.abs(local) @ size)
+            elif kind == mujoco.mjtGeom.mjGEOM_CAPSULE:
+                extent = abs(local[2]) * size[1] + size[0]
+            elif kind == mujoco.mjtGeom.mjGEOM_CYLINDER:
+                extent = abs(local[2]) * size[1] + size[0] * float(np.hypot(local[0], local[1]))
+            elif kind == mujoco.mjtGeom.mjGEOM_ELLIPSOID:
+                extent = float(np.linalg.norm(size * local))
+            elif kind == mujoco.mjtGeom.mjGEOM_MESH:
+                mesh = int(m.geom_dataid[g])
+                start, count = int(m.mesh_vertadr[mesh]), int(m.mesh_vertnum[mesh])
+                extent = float((m.mesh_vert[start:start + count] @ local).max())
+            else:
+                continue                                       # Skip planes and height fields.
+            best = max(best, centre + float(extent))
+        if not np.isfinite(best):
+            raise ValueError(f"{self.spec.name}: the `jaw_bodies` have no collision geoms")
+        return best
 
     def self_contacts(self, joints: Mapping[str, float]) -> set[tuple[str, str]]:
         """Pairs of the arm's own bodies whose collision geoms meet in pose `joints`, by body name.

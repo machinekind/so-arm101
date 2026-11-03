@@ -74,6 +74,8 @@ With this package installed alongside the twin, its Strategies tab offers:
 - `touch_jev`: `touch` plus a decision step, in which TypeSafe's Jev model says after each descent
   whether the gripper touched the object and where to aim after a miss; see
   [Jev in the touch loop](#jev-in-the-touch-loop).
+- `grasp`: straddles a block from above, closes the jaw and verifies the hold through the lift;
+  see [Grasp a block](#grasp-a-block).
 - `dream`: runs Dream Labs' Dream-1 model from a prompt and the cameras; see [Dream Labs](#dream-labs).
 
 All send joint targets through the twin's safety supervisor. Read the
@@ -98,6 +100,12 @@ touch_jev:
   model: jev-1.14.0
   min_confidence: 0.8
   max_attempts: 3
+grasp:
+  block: cube
+  open_margin_m: 0.008
+  squeeze_m: 0.008
+  grasp_depth: 0.5
+  lift_m: 0.04
 ```
 
 Goals use metres in the robot's base frame. Enable the panel's 3D goal handle
@@ -126,7 +134,8 @@ slows the run but never reads as a touch.
 See [policy settings](soarm_lab/strategies/policy.py),
 [IK settings](soarm_lab/strategies/ik.py),
 [touch settings](soarm_lab/strategies/touch.py),
-[touch_jev settings](soarm_lab/strategies/touch_jev.py) and
+[touch_jev settings](soarm_lab/strategies/touch_jev.py),
+[grasp settings](soarm_lab/strategies/grasp.py) and
 [conventions](../../docs/conventions.md) for the full interfaces.
 
 ## Jev in the touch loop
@@ -195,6 +204,44 @@ input can be put to Claude or to a person to compare accuracy. A Claude judge wo
 process handling of the twin's `machinekind_twin_llm.cli` copied here, not imported (that package is
 only in the `twin` group and loads OpenCV), a fake CLI for its tests, and an `answer_timeout_s` near
 its 60 s limit, because the CLI answers in seconds where Jev answers in about 0.1 s.
+
+## Grasp a block
+
+`grasp` hovers over a block, opens the jaw, straddles the block, closes and lifts it.
+The jaw rule verifies the hold after closing and at the lift height. The block stays held
+when the run succeeds. The operator releases it.
+
+`block` selects `cube`, `cuboid` or `cylinder`. Dimensions and yaw symmetry come
+from [`blocks.block`](soarm_lab/blocks/__init__.py). `label` selects the detector's key in
+`obs.objects` and defaults to `block`. The strategy latches the pose and closes across the
+short side. A pose without rotation keeps the current closing heading. All planned points
+must be reachable with the hand down.
+
+By default, the grasp depth counts from the catalog top height above the table.
+`hover_m` sets the hover height above the probe bottom computed from the block dimensions.
+
+`probe: true` first measures the top with a closed-jaw descent, as `touch` does.
+The straddle then uses that measured top. With the probe on, `touch_z: 0` computes the
+probe bottom from the block dimensions. An explicit `touch_z` overrides it.
+Without the probe, `close_jaw`, `touch_z` and `need_contact` have no effect.
+
+`open_margin_m` adds clearance on each side of the short dimension. `squeeze_m` sets how
+much tighter to close. `grasp_depth` sets tip depth as a fraction of block height.
+`lift_m` sets the lift distance and `hold_s` sets the final hold duration.
+
+A tip stall triggers a retry half the short side away. Retries alternate sides within
+`max_attempts`. With the probe on, each retry probes again. Without the probe, an empty close
+after a sideways retry tries the other side while attempts remain. Any other empty close,
+lost squeeze, jaw creep or motion timeout ends the run. Touch's lag guard, `time_limit_s`
+and the panel's Stop also apply.
+
+With the probe on the twin's simulated blocks, set `need_contact: false` until `scene.Box`
+supports contact settings. Default contact can let the probe sink without stalling.
+Reaching the probe bottom then uses the nominal top. Keep `need_contact` on when probing
+on the real arm. The real jaw opening and pad reach still need calibration.
+
+See [grasp settings and hooks](soarm_lab/strategies/grasp.py) and the
+[grasp plan](../../docs/grasp-plan.md) for later work.
 
 ## Dream Labs
 
