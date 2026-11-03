@@ -113,6 +113,26 @@ Set the experiment's `task_overrides.variants` to the ordered names and
 `task_overrides.block` to its default variant. `ppo.num_envs` must be divisible by
 the number of variants. Training samples each block's position and yaw at random.
 
+## Train with the stand's pose errors
+
+`lift_late_pose` extends `lift_blocks` with pose errors and a gripper closing time.
+The following keys control them:
+
+- `randomization.pose_bias_m` bounds the constant xy pose bias per episode [m].
+- `randomization.pose_delay` sets the inclusive delay range as `[max]` or `[min, max]` [policy ticks].
+- `randomization.pose_period` bounds the refresh period from 1 through this value [policy ticks].
+- `randomization.latch_m` freezes pose updates within this true TCP-to-object distance [m].
+- `randomization.grip_close_s` sets the nominal full gripper closing time [s].
+
+For dispatched training, an exported station must sit in the checkout as `stations/<name>`
+(gitignored), because the dispatcher's sync skips `workspace/`.
+Pass it as `OVERRIDES="station=stations/<name>"`:
+
+```bash
+twin export stations/desk1
+EXPERIMENTS=lift_late_pose OVERRIDES="station=stations/desk1" bash jobs/train.sh
+```
+
 ## Add an experiment
 
 Add a YAML file under [`conf/experiment`](../conf/experiment) with a global

@@ -17,16 +17,22 @@ pytest.importorskip("optax")
 from hydra import compose, initialize_config_module  # noqa: E402
 from hydra.errors import ConfigCompositionException  # noqa: E402
 from hydra.utils import instantiate  # noqa: E402
+from omegaconf import OmegaConf  # noqa: E402
 
 from soarm_lab.rl import tasks  # noqa: E402
-from soarm_lab.rl.experiment import composed_task, training_task  # noqa: E402
+from soarm_lab.rl.experiment import composed_task, randomization_plan, training_task  # noqa: E402
 from soarm_lab.rl.policy import Policy, find_policy  # noqa: E402
+from soarm_lab.rl.randomize import describe  # noqa: E402
 from soarm_lab.robot import load_robot  # noqa: E402
 
 
 def config(*overrides):
     with initialize_config_module(version_base="1.3", config_module="soarm_lab.conf"):
         return compose(config_name="train", overrides=list(overrides))
+
+
+def options(*overrides):
+    return OmegaConf.to_object(config(*overrides).randomization)
 
 
 @pytest.mark.parametrize("name", tasks.TASKS)
@@ -54,8 +60,8 @@ def test_task_and_ppo_tuple_overrides_are_tuples():
     assert tuple(ppo.hidden) == (32, 16)
 
 
-@pytest.mark.parametrize("override", ["ppo.iteratons=1", "task.cube_hlaf=0.02",
-                                     "randomization.spead=0", "eval_episdodes=1"])
+@pytest.mark.parametrize("override", ["ppo.iteratons=1", "task.cube_hlaf=0.02", "randomization.spead=0",
+                                      "randomization.pose_bias=0.02", "eval_episdodes=1"])
 def test_unknown_keys_are_rejected(override):
     with pytest.raises(ConfigCompositionException):
         config("task=lift", override)
@@ -94,6 +100,112 @@ def test_the_lift_blocks_experiment_composes():
     assert (task.variants, task.block) == (variants, "cube")
     assert task == replace(init.task, variants=variants, block="cube")
     assert task.obs_dim == init.meta.obs_dim + len(variants) + 3
+
+
+def test_the_late_pose_experiment_extends_the_block_training():
+    cfg, blocks = config("experiment=lift_late_pose"), config("experiment=lift_blocks")
+    assert cfg.name == "lift_late_pose" and cfg.init == blocks.init == "lift-v3"
+    assert cfg.ppo == blocks.ppo and cfg.task_overrides == blocks.task_overrides
+    assert cfg.task == blocks.task
+    assert cfg.ppo.iterations == 300 and cfg.ppo.widen_init is True and cfg.ppo.init_std == 0.25
+    assert config("experiment=lift_late_pose", "station=stations/desk1").station == "stations/desk1"
+    rand, evals = randomization_plan(OmegaConf.to_object(cfg.randomization), {})
+    assert (rand.pose_bias_m, rand.cube_min_delay, rand.cube_delay, rand.cube_period, rand.latch_m) == \
+        (0.03, 4, 40, 4, 0.05)
+    assert rand.centre.grip_close_s == 1.3 and rand.grip_close == (0.8, 1.25)
+    assert [key for _, key, _ in evals] == ["cpu_nominal", "cpu_rand"]
+
+
+def test_the_randomization_keys_are_off_by_default():
+    assert options().changes() == {}
+    assert options("experiment=lift_blocks").changes() == {}
+    rand, _ = randomization_plan(options(), {})
+    assert rand.centre.grip_close_s == 0.0 and rand.grip_close == (1.0, 1.0)
+    assert (rand.pose_bias_m, rand.cube_min_delay, rand.latch_m) == (0.0, 0, 0.0)
+
+
+def test_the_randomization_keys_shape_the_perception_and_the_jaw():
+    chosen = options("randomization.pose_bias_m=0.02", "randomization.pose_delay=[4,20]",
+                     "randomization.pose_period=4", "randomization.latch_m=0.05",
+                     "randomization.grip_close_s=1.3")
+    assert chosen.pose_delay == [4, 20] and chosen.pose_period == 4 and chosen.grip_close_s == 1.3
+    assert chosen.changes() == {"pose_bias_m": 0.02, "cube_min_delay": 4, "cube_delay": 20,
+                                "cube_period": 4, "latch_m": 0.05}
+    rand, evals = randomization_plan(chosen, {})
+    assert (rand.pose_bias_m, rand.cube_min_delay, rand.cube_delay, rand.cube_period, rand.latch_m) == \
+        (0.02, 4, 20, 4, 0.05)
+    assert rand.centre.grip_close_s == 1.3 and rand.grip_close == (0.8, 1.25)
+    plan = {key: r for _, key, r in evals}
+    assert plan["cpu_rand"] is rand
+    nominal = plan["cpu_nominal"]
+    assert (nominal.pose_bias_m, nominal.cube_period, nominal.centre.grip_close_s) == (0.0, 1, 1.3)
+    text = describe(rand)
+    assert "zamykanie chwytaka 1.30 s" in text and "odswiezanie co 1-4 takt." in text
+    assert "przesuniecie do 2 cm" in text and "opoznienie pozy 4-20 takt." in text and "< 5 cm" in text
+    assert options("randomization.pose_delay=[7]").changes() == {"cube_min_delay": 0, "cube_delay": 7}
+
+
+def test_the_closing_time_overrides_the_stations():
+    measured = {"grip_close_s": 2.0}
+    assert randomization_plan(options(), measured)[0].centre.grip_close_s == 2.0
+    rand, _ = randomization_plan(options("randomization.grip_close_s=1.3"), measured)
+    assert rand.centre.grip_close_s == 1.3
+    rand, _ = randomization_plan(options("randomization.grip_close_s=0"), measured)
+    assert rand.centre.grip_close_s == 0.0 and rand.grip_close == (1.0, 1.0)
+
+
+BAD_RANDOMIZATION = {"randomization.pose_delay=[5,3]": "0 <= min <= max",
+                     "randomization.pose_delay=[-1]": "0 <= min <= max",
+                     "randomization.pose_delay=[1,2,3]": r"\[max\] or \[min, max\]",
+                     "randomization.pose_period=0": "at least 1 tick",
+                     "randomization.pose_bias_m=-0.01": "pose_bias_m must be zero or more",
+                     "randomization.latch_m=-0.01": "latch_m must be zero or more",
+                     "randomization.grip_close_s=-1": "grip_close_s must be zero or more"}
+
+
+@pytest.mark.parametrize("override,message", BAD_RANDOMIZATION.items())
+def test_bad_randomization_values_are_refused(override, message):
+    with pytest.raises(ValueError, match=message):
+        options(override)
+
+
+@pytest.mark.parametrize("override", ["randomization.pose_delay=[4.5,40]", "randomization.pose_period=often"])
+def test_randomization_values_of_the_wrong_type_are_rejected(override):
+    with pytest.raises(ConfigCompositionException):
+        config(override)
+
+
+def test_the_command_refuses_bad_randomization_values_before_writing_anything(tmp_path):
+    args = ["train", "randomization.pose_delay=[5,3]"]
+    result = subprocess.run([sys.executable, "-m", "soarm_lab.cli", *args], cwd=tmp_path, capture_output=True,
+                            text=True)
+    assert result.returncode == 1 and "0 <= min <= max" in result.stderr
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.slow
+def test_a_cpu_smoke_run_of_the_trainer_from_lift_v3(tmp_path):
+    """A short CPU training run saves the perception and gripper settings with the policy."""
+    pytest.importorskip("mujoco_warp", reason="mujoco-warp is not installed (the `train` extra)")
+    args = ["experiment=lift_blocks", "task_overrides.variants=[cube]", "device=cpu", "ppo.num_envs=4",
+            "ppo.iterations=2", "eval_episodes=1", "randomization.pose_bias_m=0.02",
+            "randomization.pose_delay=[2,6]", "randomization.pose_period=4", "randomization.latch_m=0.05",
+            "randomization.grip_close_s=1.3", f"out={tmp_path}", "name=smoke"]
+    result = subprocess.run([sys.executable, "-m", "soarm_lab.cli", "train", *args], cwd=tmp_path,
+                            env={**os.environ, "MUJOCO_GL": "disable"}, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    out = result.stdout
+    assert "Trening lift (warianty: cube)" in out
+    assert "zamykanie chwytaka 1.30 s" in out and "odswiezanie co 1-4 takt." in out
+    pol = Policy.load(tmp_path / "smoke" / "policy.npz")
+    assert pol.meta.obs_dim == 37 and pol.task.variants == ("cube",)
+    r = pol.meta.randomization
+    assert (r["pose_bias_m"], r["cube_min_delay"], r["cube_delay"], r["cube_period"], r["latch_m"]) == \
+        (0.02, 2, 6, 4, 0.05)
+    assert r["grip_close"] == [0.8, 1.25] and r["centre"]["grip_close_s"] == 1.3
+    assert set(pol.meta.evals) >= {"gpu", "cpu_nominal", "cpu_rand", "cpu_cube", "cpu_rand_cube"}
+    saved = json.loads((tmp_path / "smoke" / "config.json").read_text(encoding="utf-8"))
+    assert saved["variants"] == ["cube"]
 
 
 def test_variants_compose_through_the_task_group_too():
@@ -241,6 +353,7 @@ else:
     (["init=lift-v3", "ppo=default"], False),
     (["init=lift-v3", "ppo=fine_tune"], True),
     (["experiment=lift_finetune"], True),
+    (["experiment=lift_late_pose"], True),
     (["experiment=lift_finetune", "ppo=default"], False),
 ])
 def test_init_requires_the_fine_tuning_ppo_group(tmp_path, overrides, accepted):

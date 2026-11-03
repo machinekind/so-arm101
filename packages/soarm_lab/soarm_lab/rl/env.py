@@ -8,6 +8,10 @@ The scene and task formulas are shared with `batch.BatchEnv`.
 Resets reuse the compiled scene and update its state and randomized fields.
 Each reset samples the object's colour independently of the physics.
 `station` accepts an exported setup and defaults to the bundled `sim` station.
+
+Pose observations include delay, a refresh period, a constant xy bias per episode and noise.
+They freeze while the true TCP is within `Randomization.latch_m` of the object.
+The gripper actuator has a speed limit independent of the command rate.
 """
 
 from __future__ import annotations
@@ -144,6 +148,10 @@ class ArmEnv(gym.Env):
         self._cube_hist: list[tuple[np.ndarray, np.ndarray]] = []
         self._cube_seen = (np.zeros(3), np.eye(3))
         self._colours = np.random.default_rng()
+        #: Constant xy offset of the observed pose for this episode [m].
+        self._bias = np.zeros(2)
+        #: Maximum gripper actuator step for this episode [rad per policy tick].
+        self._grip_rate = float("inf")
 
     # ------------------------------------------------------------ state
     def state(self) -> dict[str, np.ndarray]:
@@ -176,15 +184,15 @@ class ArmEnv(gym.Env):
             return
         self._cube_hist.append((s["cube_pos"].copy(), s["cube_rot"].copy()))
         del self._cube_hist[:-(self._cube_delay + 1)]
-        if not force and self.t % self._cube_period:
+        near = bool(tk.occluded(np, s["tcp"][None], s["cube_pos"][None], self.rand.latch_m)[0])
+        if not force and (self.t % self._cube_period or near):
             return
         pos, rot = self._cube_hist[max(0, len(self._cube_hist) - 1 - self._cube_delay)]
-        pos = pos.copy()
-        if self.rand.cube_noise > 0:
-            pos[:2] += self.np_random.normal(0.0, self.rand.cube_noise, 2)
-        if self.rand.fold_yaw:
-            rot = tk.fold_yaw(np, rot, self.yaw_period)
-        self._cube_seen = (pos, rot)
+        n = self.rand.cube_noise
+        noise = self.np_random.normal(0.0, n, 2) if n > 0 else np.zeros(2)
+        pos, rot = tk.perceived(np, pos[None], rot[None], self._bias[None], noise[None], self.rand.fold_yaw,
+                                self.yaw_period)
+        self._cube_seen = (pos[0], rot[0])
 
     # ------------------------------------------------------------ gym
     def reset(self, *, seed: int | None = None, options: dict[str, Any] | None = None):
@@ -200,6 +208,8 @@ class ArmEnv(gym.Env):
         self._delay = [np.zeros(self.task.act_dim)] * int(s["delay"])
         self._cube_delay, self._cube_period = int(s["cube_delay"]), int(s["cube_period"])
         self._cube_hist = []
+        self._bias = np.array([s["pose_bias_x"], s["pose_bias_y"]])
+        self._grip_rate = float(tk.grip_rate(np, self.task, self.limits, np.array([s["grip_close_s"]]))[0])
 
         mujoco.mj_resetData(m, d)
         q0 = np.asarray(options["q"], float) if "q" in options else tk.sample_start(self.task, self.limits, rng, 1)[0]
@@ -258,7 +268,12 @@ class ArmEnv(gym.Env):
             executed = self._delay.pop(0)
         self.q_cmd = tk.apply_action(np, self.task, self.limits, self.q_cmd[None], executed[None])[0]
         d = self.scene.data
+        g = self.limits.grip
+        grip_act = self.scene.act_ids[g]
+        grip_ctrl = float(d.ctrl[grip_act])
         d.ctrl[self.scene.act_ids] = self.q_cmd
+        # The servo speed limit applies independently of the command rate.
+        d.ctrl[grip_act] = tk.servo_follow(np, grip_ctrl, self.q_cmd[g], self._grip_rate)
         mujoco.mj_step(self.scene.model, d, nstep=self.task.substeps)
         # Refresh poses after integration so they match the observed joint angles.
         mujoco.mj_kinematics(self.scene.model, d)

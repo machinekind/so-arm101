@@ -221,3 +221,60 @@ def test_a_tilted_cube_counts_its_lowest_point(name, station, limits):
         kw = dict(cube_pos=pos, jaw_contacts=jaws, q_cmd=x["q_cmd"][:1], limits=limits)
         assert task.reward(*args, cube_rot=x["rot"][:1], **kw)[1].tolist() == [True]
         assert task.reward(*args, cube_rot=tilt[None], **kw)[1].tolist() == [False]
+
+
+def test_numpy_and_jax_perceive_the_same_pose(limits):
+    """NumPy and JAX agree on perception, occlusion and gripper speed limits."""
+    rng = np.random.default_rng(21)
+    pos = rng.normal(0, 0.2, (N, 3))
+    rot = np.array([np.linalg.qr(rng.normal(size=(3, 3)))[0] for _ in range(N)])
+    bias, noise = rng.uniform(-0.03, 0.03, (N, 2)), rng.normal(0, 0.002, (N, 2))
+    tcp, cube = rng.normal(0, 0.2, (N, 3)), rng.normal(0, 0.2, (N, 3))
+    # Put some TCP positions inside the occlusion radius.
+    tcp[::3] = cube[::3] + rng.normal(0, 0.01, (len(tcp[::3]), 3))
+    task = tk.make_task("lift")
+    g = limits.grip
+    ctrl, target = rng.uniform(limits.lo[g], limits.hi[g], N), rng.uniform(limits.lo[g], limits.hi[g], N)
+    rate = rng.uniform(0.01, 0.2, N)
+    close_s = np.tile([0.0, 0.33, 1.3, -1.0], N // 4)
+
+    def run(xp):
+        def f(a):
+            return np.asarray(a, float) if xp is np else jnp.asarray(a, jnp.float32)
+
+        out = {}
+        for fold in (True, False):
+            p, r = tk.perceived(xp, f(pos), f(rot), f(bias), f(noise), fold, np.pi / 2)
+            out[f"pos_{fold}"], out[f"rot_{fold}"] = p, r
+        out["occluded"] = tk.occluded(xp, f(tcp), f(cube), 0.05)
+        out["never"] = tk.occluded(xp, f(tcp), f(cube), 0.0)
+        out["grip_rate"] = tk.grip_rate(xp, task, limits, f(close_s))
+        out["follow"] = tk.servo_follow(xp, f(ctrl), f(target), f(rate))
+        out["follow_inf"] = tk.servo_follow(xp, f(ctrl), f(target), f(np.full(N, np.inf)))
+        return {k: np.asarray(v) for k, v in out.items()}
+
+    a, b = run(np), run(jnp)
+    for k in a:
+        assert a[k].shape == b[k].shape, k
+        if a[k].dtype == bool:
+            assert np.array_equal(a[k], b[k]), k
+        else:
+            assert b[k].dtype == np.float32, k
+            np.testing.assert_allclose(b[k], a[k], rtol=1e-5, atol=1e-6, err_msg=k)
+    assert 0 < a["occluded"].sum() < N and a["occluded"][::3].all()
+    assert a["never"].shape == (N,) and not a["never"].any()
+    np.testing.assert_array_equal(a["pos_True"][:, :2], pos[:, :2] + bias + noise)
+    np.testing.assert_array_equal(a["pos_True"][:, 2], pos[:, 2])
+    assert np.array_equal(a["rot_False"], rot)
+    zero = np.zeros((N, 2))
+    assert np.array_equal(tk.perceived(np, pos, rot, zero, zero, False, np.pi / 2)[0], pos)
+
+    # Nonpositive closing times disable the servo speed limit.
+    span = limits.hi[g] - limits.lo[g]
+    np.testing.assert_allclose(a["grip_rate"][1:3], [span / (0.33 * 20), span / 26])
+    assert np.isinf(a["grip_rate"][0]) and np.isinf(a["grip_rate"][3])
+    step = a["follow"] - ctrl
+    assert (np.abs(step) <= rate + 1e-12).all() and (np.abs(step) < np.abs(target - ctrl) - 1e-12).any()
+    np.testing.assert_allclose(step, np.clip(target - ctrl, -rate, rate), atol=1e-15)
+    assert np.array_equal(a["follow_inf"], target)
+    assert np.array_equal(b["follow_inf"], target.astype(np.float32))

@@ -12,9 +12,13 @@ from .base import (
     apply_action,
     fold_yaw,
     grip_is_open,
+    grip_rate,
     limit_cost,
     normalize_q,
+    occluded,
+    perceived,
     sample_start,
+    servo_follow,
     success_streak,
 )
 from .lift import LiftConfig, sample_cubes
@@ -66,4 +70,5 @@ OBS_DIMS = {name: make_task(name).obs_dim for name in TASKS}
 __all__ = ["TASKS", "TARGET_TRIES", "OBS_DIMS", "TaskConfig", "ReachConfig", "LiftConfig", "PickPlaceConfig",
            "Limits", "make_task", "task_from_dict", "apply_action", "fold_yaw",
            "grip_is_open", "limit_cost", "normalize_q", "sample_start", "success_streak", "carry_latch",
-           "sample_targets", "sample_goals", "sample_cubes"]
+           "sample_targets", "sample_goals", "sample_cubes", "perceived", "occluded", "grip_rate",
+           "servo_follow"]

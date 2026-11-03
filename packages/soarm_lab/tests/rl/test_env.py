@@ -14,7 +14,7 @@ gym = pytest.importorskip("gymnasium")
 from soarm_lab.blocks import block  # noqa: E402
 from soarm_lab.rl import tasks as tk  # noqa: E402
 from soarm_lab.rl.env import TARGET_RGBA, VIEW, ArmEnv  # noqa: E402
-from soarm_lab.rl.randomize import Randomization  # noqa: E402
+from soarm_lab.rl.randomize import Dynamics, Randomization  # noqa: E402
 from soarm_lab.station import Station  # noqa: E402
 
 
@@ -280,6 +280,107 @@ def test_each_reset_paints_the_block_without_touching_the_physics():
         assert len({paint()[1] for _ in range(5)}) == 5
     finally:
         env.close()
+
+
+#: Cube position in the base frame [m].
+CUBE = np.array([0.2, 0.0, 0.015])
+#: Upright quaternion (w, x, y, z).
+UPRIGHT = np.array([1.0, 0.0, 0.0, 0.0])
+
+
+def test_the_pose_bias_is_constant_within_an_episode():
+    """Each episode adds one xy pose bias bounded by `pose_bias_m` [m]. The z coordinate stays true."""
+    env = ArmEnv("lift", randomization=replace(Randomization.none(), pose_bias_m=0.03))
+    try:
+        obs, _ = env.reset(seed=1)
+        s = env.state()
+        off = obs[15:17] - s["cube_pos"][:2]
+        assert 1e-4 < np.linalg.norm(off) <= 0.03 + 1e-6
+        assert obs[17] == pytest.approx(s["cube_pos"][2], abs=1e-6)
+        for _ in range(10):
+            obs, _, _, _, info = env.step(np.zeros(env.task.act_dim))
+        np.testing.assert_allclose(obs[15:17] - env.state()["cube_pos"][:2], off, atol=1e-6)
+        assert abs(info["height"]) < 1e-3                                  # The reward uses the truth.
+        obs, _ = env.reset(seed=2)
+        assert np.linalg.norm(obs[15:17] - env.state()["cube_pos"][:2] - off) > 1e-4
+    finally:
+        env.close()
+
+
+def test_the_pose_delay_is_at_least_the_minimum():
+    """Equal delay bounds give a fixed pose delay [policy ticks]."""
+    env = ArmEnv("lift", randomization=replace(Randomization.none(), cube_min_delay=3, cube_delay=3))
+    try:
+        env.reset(seed=0, options={"q": env.limits.home, "cube": (CUBE, UPRIGHT)})
+        assert env._cube_delay == 3
+        for k in range(1, 7):
+            env.set_cube(CUBE + [0.01 * k, 0.0, 0.0], UPRIGHT)
+            obs, *_ = env.step(np.zeros(env.task.act_dim))
+            assert obs[15] == pytest.approx(CUBE[0] + 0.01 * max(0, k - 3), abs=1e-3), k
+    finally:
+        env.close()
+
+
+def test_the_seen_pose_freezes_while_the_tcp_is_near_the_block():
+    """Pose updates resume when the object leaves the TCP occlusion radius."""
+    env = ArmEnv("lift", randomization=replace(Randomization.none(), latch_m=0.08))
+    zero = np.zeros(env.task.act_dim)
+    try:
+        # The TCP hovers above the cube without touching it.
+        hover = env.kin.to_q(env.kin.ik([0.2, 0.0, 0.06]).joints)
+        obs, _ = env.reset(options={"q": hover, "cube": (CUBE, UPRIGHT)})
+        s = env.state()
+        assert np.linalg.norm(s["tcp"] - s["cube_pos"]) < 0.08
+        before = obs[15:18].copy()
+        env.set_cube(np.array([0.22, 0.0, 0.015]), UPRIGHT)
+        obs, *_ = env.step(zero)
+        assert np.array_equal(obs[15:18], before)
+        assert env.state()["cube_pos"][0] == pytest.approx(0.22, abs=2e-3)
+        env.set_cube(np.array([0.32, 0.0, 0.015]), UPRIGHT)
+        obs, *_ = env.step(zero)
+        assert obs[15] == pytest.approx(0.32, abs=2e-3)
+        assert env.state()["cube_pos"][0] == pytest.approx(0.32, abs=2e-3)
+
+        # From home the TCP is far enough for a refresh every tick.
+        env.reset(options={"q": env.limits.home, "cube": (CUBE, UPRIGHT)})
+        for k in range(1, 4):
+            env.set_cube(CUBE + [0.01 * k, 0.0, 0.0], UPRIGHT)
+            obs, *_ = env.step(zero)
+            assert obs[15] == pytest.approx(CUBE[0] + 0.01 * k, abs=2e-3), k
+    finally:
+        env.close()
+
+
+def test_the_jaw_closes_at_the_servos_own_speed_and_the_command_at_its_own():
+    """The gripper actuator obeys the servo speed limit independently of the command rate."""
+    for rand, ticks in ((Randomization.nominal(Dynamics(grip_close_s=1.3)), 30), (Randomization.none(), 9)):
+        env = ArmEnv("lift", randomization=rand)
+        try:
+            g = env.limits.grip
+            lo, span = env.limits.lo[g], env.limits.hi[g] - env.limits.lo[g]
+            q0 = env.limits.home.copy()
+            q0[g] = env.limits.hi[g]
+            env.reset(options={"q": q0, "cube": (np.array([0.3, 0.15, 0.015]), UPRIGHT)})
+            d, ag = env.scene.data, env.scene.act_ids[g]
+            close = np.zeros(env.task.act_dim)
+            close[g] = -1.0
+            ctrl, jaw = [float(d.ctrl[ag])], []
+            for t in range(1, ticks + 1):
+                env.step(close)
+                ctrl.append(float(d.ctrl[ag]))
+                jaw.append(float(d.qpos[env.kin.qadr[g]]))
+                if t >= 7:
+                    assert env.q_cmd[g] == pytest.approx(lo), t
+                if rand.centre.grip_close_s == 0:
+                    assert ctrl[-1] == env.q_cmd[g], t
+            if rand.centre.grip_close_s > 0:
+                assert max(np.diff(-np.array(ctrl))) <= span / 26 + 1e-9         # span / (1.3 s x 20 Hz)
+                assert ctrl[25] > lo + 0.03 and ctrl[26] == pytest.approx(lo, abs=1e-9)
+                assert jaw[10 - 1] > lo + 0.1 and jaw[28 - 1] < lo + 0.02
+            else:
+                assert jaw[9 - 1] < lo + 0.02
+        finally:
+            env.close()
 
 
 def test_the_target_pad_is_white():
