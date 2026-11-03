@@ -76,6 +76,8 @@ With this package installed alongside the twin, its Strategies tab offers:
   [Jev in the touch loop](#jev-in-the-touch-loop).
 - `grasp`: grips and lifts a block from above, monitors the hold and recovers after a drop;
   see [Grasp a block](#grasp-a-block).
+- `grasp_wrist`: refines the grasp aim and yaw from the wrist camera at the hover;
+  see [Wrist camera](#wrist-camera).
 - `dream`: runs Dream Labs' Dream-1 model from a prompt and the cameras; see [Dream Labs](#dream-labs).
 
 All send joint targets through the twin's safety supervisor. Read the
@@ -109,6 +111,12 @@ grasp:
   carry_s: 10.0
   wait_s: 20.0
   time_limit_s: 120.0
+grasp_wrist:
+  block: cuboid
+  wrist_camera: wrist
+  hue_deg: -1.0
+  centre_tol_m: 0.003
+  look_before_straddle: true
 ```
 
 Goals use metres in the robot's base frame. Enable the panel's 3D goal handle
@@ -138,7 +146,8 @@ See [policy settings](soarm_lab/strategies/policy.py),
 [IK settings](soarm_lab/strategies/ik.py),
 [touch settings](soarm_lab/strategies/touch.py),
 [touch_jev settings](soarm_lab/strategies/touch_jev.py),
-[grasp settings](soarm_lab/strategies/grasp.py) and
+[grasp settings](soarm_lab/strategies/grasp.py),
+[grasp_wrist settings](soarm_lab/strategies/wrist.py) and
 [conventions](../../docs/conventions.md) for the full interfaces.
 
 ## Jev in the touch loop
@@ -269,6 +278,44 @@ monitoring through `release()` and return its action from `carrying`.
 
 See [grasp settings and hooks](soarm_lab/strategies/grasp.py) and the
 [grasp plan](../../docs/grasp-plan.md) for later work.
+
+### Wrist camera
+
+`grasp_wrist` looks at the open-jaw hover before each straddle. It fits the block's known
+shape from `blocks.block` to a colour blob, centres the jaws and turns them across the short
+side. With `probe: true`, it also looks before the probe. `look_before_straddle` then controls
+the second look, which corrects movement caused by the probe. Without the probe, the look
+before the straddle always runs. Other settings extend `grasp`.
+
+`wrist_camera` selects an entry in robot.yaml `cameras` and `obs.frames`. Empty runs plain
+`grasp`. A named camera requires OpenCV, which the twin supplies. In simulation, the twin
+renders the arm camera. On hardware, it serves the workspace camera with the same name.
+Arm cameras are excluded from triangulation. Until the calibration wave skips them too,
+disable the physical `wrist` record during the wave.
+
+Set `hue_deg`, `hue_window_deg`, `min_saturation` and `min_value` for the block and lighting.
+The default `hue_deg: -1` samples the first usable frame inside the expected visible silhouette
+at the aim. It selects the hue window with the most pixels above `min_saturation` and `min_value`.
+The window spans ±`hue_window_deg`, or ±20° by default, and must cover at least 30% of that region.
+The status reports `hue_deg` and `hue_share`. Bare wood falls below `min_saturation`, so the look
+is skipped and the grasp continues from the detector's aim.
+
+`focal_px` overrides focal length from field of view.
+Set both `tip_pixel_x` and `tip_pixel_y` to the closed-tip midpoint in
+the received frame to correct mount alignment. `rotate_180` handles an upside-down camera.
+
+Each look waits for all arm joints to settle before measuring. `max_frame_age_s` and
+`frame_wait_s` limit stale or missing frames. The model masks the jaws before fitting.
+Blob area, visible share and `min_fit_iou` reject unsuitable or ambiguous silhouettes.
+`max_shift_m` limits corrections. `centre_tol_m` sets position tolerance and `rounds`
+limits moves. A final measurement checks each move. An inconsistent result returns to
+the original aim when reachable.
+
+A look that cannot settle or obtain a usable measurement is skipped. The straddle (or probe)
+then continues from the settled aim. Looks consume no grasp attempts. Focal length, mount
+alignment and colour thresholds still need calibration on the stand.
+
+See [wrist settings](soarm_lab/strategies/wrist.py) for the full interface.
 
 ## Dream Labs
 

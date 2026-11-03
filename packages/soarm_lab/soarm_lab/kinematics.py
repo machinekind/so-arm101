@@ -19,7 +19,8 @@ from galaxeo-manipulators, with two changes:
 The jaw helpers read openings, fingertip positions and collision reach from the model.
 
 All poses are in the arm's BASE frame, not the scene's world frame: a camera calibrated relative to the
-base stays correct wherever the arm stands.
+base stays correct wherever the arm stands. `camera` returns arm-camera poses in this frame with
+OpenCV axes. `collision_points` returns jaw primitive points in the same frame.
 """
 
 from __future__ import annotations
@@ -215,6 +216,49 @@ class RobotKinematics:
         i = self.model.site(self.prefix + name).id
         d = self.data
         return self._base_inv() @ pose(d.site_xmat[i].reshape(3, 3), d.site_xpos[i])
+
+    def camera(self, name: str, joints: Mapping[str, float]) -> np.ndarray:
+        """Return the camera-to-base pose (4x4) for an entry in `spec.cameras`.
+
+        OpenCV axes are x right, y down and z forward. Compose the body pose with `T_cam2body`.
+        The result requires no model camera update.
+        """
+        cam = self.spec.cameras.get(name)
+        if cam is None:
+            known = ", ".join(self.spec.cameras) or "none"
+            raise ValueError(f"{self.spec.name}: no camera {name!r} in the robot description "
+                             f"(cameras: {known})")
+        return self.body(cam.body, joints) @ np.asarray(cam.pose, float)
+
+    def collision_points(self, body: str, joints: Mapping[str, float]) -> np.ndarray:
+        """Return collision-primitive extreme points (N, 3) [m, base frame] on `body`.
+
+        Sample box corners and sphere or capsule axis extents. Skip meshes and other geom types.
+        Return (0, 3) when empty. Collision geoms have nonzero contype or conaffinity.
+        An unknown body raises KeyError.
+        """
+        self._apply(self.to_q(joints))
+        m, d = self.model, self.data
+        i = m.body(self.prefix + body).id
+        Bi = self._base_inv()
+        out = []
+        for g in np.flatnonzero(m.geom_bodyid == i):
+            if not (m.geom_contype[g] or m.geom_conaffinity[g]):
+                continue
+            size, kind = m.geom_size[g], int(m.geom_type[g])
+            if kind == mujoco.mjtGeom.mjGEOM_BOX:
+                local = np.array([[x, y, z] for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)]) * size
+            elif kind == mujoco.mjtGeom.mjGEOM_SPHERE:
+                local = np.vstack([np.eye(3), -np.eye(3)]) * size[0]
+            elif kind == mujoco.mjtGeom.mjGEOM_CAPSULE:
+                r, half = float(size[0]), float(size[1])
+                local = np.array([[r, 0, 0], [-r, 0, 0], [0, r, 0], [0, -r, 0], [0, 0, half + r],
+                                  [0, 0, -half - r]], float)
+            else:
+                continue                                       # Skip unsupported geom types.
+            world = local @ d.geom_xmat[g].reshape(3, 3).T + d.geom_xpos[g]
+            out.append(world @ Bi[:3, :3].T + Bi[:3, 3])
+        return np.vstack(out) if out else np.zeros((0, 3))
 
     def tool_axes(self, joints: Mapping[str, float]) -> tuple[np.ndarray, np.ndarray]:
         """(approach direction, jaw closing axis) in the base frame."""

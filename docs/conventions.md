@@ -23,7 +23,8 @@ loaded and no `machinekind_twin` module did.
 
 Running a policy needs no jax, torch, hydra or omegaconf.
 The strategies, the policy file, evaluation and the `soarm-lab` commands other than `train` and `convert`
-import numpy, never jax, optax or torch.
+import numpy, never jax, optax or torch. `grasp_wrist` loads OpenCV in `start` only when a camera is named.
+The twin supplies OpenCV. Importing the strategy does not require it.
 Training needs the optional extra `soarm-lab[train]`: PPO in JAX and optax on MuJoCo Warp, with the CUDA 12
 build of jax on Linux. Only `rl.ppo`, `rl.jax_policy`, `rl.batch` and `rl.mixed` import jax directly.
 `rl.experiment` imports Hydra and OmegaConf only on the `train` command path.
@@ -100,6 +101,8 @@ The twin owns the contracts these packages follow.
 The plugin contracts are the package `machinekind-twin-api` (see the root README for how it installs).
 
 - The `robot.yaml` schema is `RobotSpec` in `machinekind_twin.robots`. `load_robot(folder)` checks a folder strictly.
+  `cameras:` declares arm cameras in OpenCV axes. The lab parses entries strictly into `RobotSpec.cameras`.
+  `RobotKinematics.camera` returns their poses in the base frame.
 - The backend contract is `machinekind_twin_api.backend`: `BackendContext`, `BackendPlugin`, `RobotBackend` and `RobotInfo`.
   A backend factory `create(ctx)` takes a `BackendContext` and returns the backend.
   `FeetechArm` and `LeRobotArm` subclass `RobotBackend`, so the twin uses them without its `PluginBackend` wrapper.
@@ -123,7 +126,10 @@ The plugin contracts are the package `machinekind-twin-api` (see the root README
   `soarm_lab.strategies.jaw.JawMonitor` verifies the hold with the same thresholds as the twin's tracker.
   Each carrying tick checks the jaw and `Observation.objects`. A sighting after a drop can trigger
   a regrasp through `retarget`. `release()` ends monitoring and opens the jaw.
+  `soarm_lab.strategies.wrist.WristGraspStrategy` refines the aim from `Observation.frames` at the hover.
+  It fits the block shape to a colour blob through `before_straddle`, and `before_descent` with `probe` on.
+  A named camera requires OpenCV.
 - `packages/soarm_lab/pyproject.toml` registers these strategies under `machinekind_twin.strategies` (`STRATEGIES`)
-  as `policy`, `ik`, `touch`, `touch_jev`, `grasp` and `dream`. `soarm_lab.strategies.dream.DreamStrategy` imports the Dream client only in `start`.
+  as `policy`, `ik`, `touch`, `touch_jev`, `grasp`, `grasp_wrist` and `dream`. `soarm_lab.strategies.dream.DreamStrategy` imports the Dream client only in `start`.
 - The station export is `Workspace.export` in the twin (`twin export`). `soarm_lab.station.Station` reads it.
   `soarm_lab.robot.RobotSpec` reads only the `robot.yaml` fields the lab uses and skips the others.

@@ -5,6 +5,7 @@ drives the TCP to a goal with `kinematics`, `touch` touches an object from `obs.
 `touch_jev` adds a decision step after each descent, asking TypeSafe's Jev model (`judges`, `jev`) over
 the network. `grasp` picks up a block from above. `jaw` supplies the shared contact rule.
 `dream` runs Dream Labs' Dream-1 model over the network.
+`grasp_wrist` (`wrist`) refines the grasp aim and yaw from the wrist camera.
 `packages/soarm_lab/pyproject.toml` registers each strategy under the `machinekind_twin.strategies` entry
 point group. The twin finds it there and runs it through its
 `StrategyRunner`.
@@ -17,7 +18,9 @@ from .jaw import JawMonitor, JawReading
 from .policy import PolicySettings, PolicyStrategy
 from .touch import TouchSettings, TouchStrategy
 from .touch_jev import JevTouchSettings, JevTouchStrategy
+from .wrist import WristGraspSettings, WristGraspStrategy, WristStatus
 
 __all__ = ["DreamSettings", "DreamStrategy", "GraspSettings", "GraspStrategy", "IKSettings", "IKStrategy",
            "JawMonitor", "JawReading", "JevTouchSettings", "JevTouchStrategy", "PolicySettings",
-           "PolicyStrategy", "TouchSettings", "TouchStrategy"]
+           "PolicyStrategy", "TouchSettings", "TouchStrategy", "WristGraspSettings", "WristGraspStrategy",
+           "WristStatus"]
