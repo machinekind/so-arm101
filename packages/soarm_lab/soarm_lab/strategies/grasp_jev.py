@@ -820,7 +820,7 @@ class GraspJevStrategy(GraspStrategy):
             self._released = False
             self._enter(LET_GO)
             return None
-        down_s = self.grasp_settings.lift_m / self.config.descend_speed_mps
+        down_s = self._lift_m / self.config.descend_speed_mps
         if self._t - self._phase_t0 >= down_s + JAW_WAIT_S:
             self._hold_measured()
             return self._halt("ramie nie opuscilo bloku na stol w czasie", self.kin.from_q(self.q_cmd))
@@ -998,7 +998,7 @@ class GraspJevStrategy(GraspStrategy):
             commanded_gap_m=kin.jaw_gap(kin.from_q(self.q_cmd)[spec.gripper]), margin_gap_m=self.margin_gap_m,
             jaw_still=reading.still, jaw_moved_after_close=moved,
             lifted_m=self.grasp.lifted_m if point == POINT_LIFT else math.nan,
-            lift_m=self.grasp_settings.lift_m, gap_open_m=self.gap_open_m, blob_share=self._blob_share(obs),
+            lift_m=self._lift_m, gap_open_m=self.gap_open_m, blob_share=self._blob_share(obs),
             sighting=self._block_sighting(obs, reading), aim_xy=self.grasp.block_xy, heading_rad=self._psi,
             heading_from="guess" if guessed else "block_rotation", yaw_period_rad=self.block.yaw_period,
             wider_possible=self.gap_open_m + 2 * margin <= kin.jaw_gap(100.0) + 1e-9, now_t=float(obs.t),
