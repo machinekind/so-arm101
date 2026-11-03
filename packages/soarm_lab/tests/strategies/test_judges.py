@@ -16,6 +16,7 @@ from typing import Any
 
 import numpy as np
 import pytest
+from machinekind_twin_api.strategy import Decision as ApiDecision
 
 from soarm_lab.strategies.judges import (
     ASKS_PER_QUESTION,
@@ -174,8 +175,9 @@ def test_confidence_is_clamped_and_filled_from_the_probabilities():
 
 
 # ------------------------------------------------------------ the record
-def test_the_decision_record_has_the_twin_apis_fields():
-    """machinekind_twin_api 0.1.3's `Decision`: these names in this order, frozen, compared by identity."""
+def test_the_decision_record_is_the_twin_apis_decision():
+    """`judges.Decision` is the api's class: these names in this order, frozen, compared by identity."""
+    assert Decision is ApiDecision
     names = [f.name for f in dataclasses.fields(Decision)]
     assert names == ["question", "answer", "state", "confidence", "response_s"]
     first, second = Decision("touched", "{}"), Decision("touched", "{}")

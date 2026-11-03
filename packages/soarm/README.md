@@ -50,6 +50,11 @@ The twin discovers robot `so101` and backends `feetech` and `lerobot` through
 entry points. The [robot folder](soarm/robot/README.md) contains its MuJoCo model,
 meshes and `robot.yaml` configuration.
 
+The twin can also watch an SO-101 it does not drive, such as a second arm on the
+stand. `feetech` then opens the arm read-only: only PING, READ and SYNC READ reach
+the servos, so it never sets torque or goals, also not on connect or disconnect.
+`lerobot` has no read-only mode.
+
 The base dependency is `machinekind-twin-api`. Optional extras provide:
 
 - `feetech`: serial communication and the bridge.

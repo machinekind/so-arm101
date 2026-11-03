@@ -9,20 +9,22 @@ after the goal register has been overwritten. The late-reply test runs through t
 
 from __future__ import annotations
 
+import dataclasses
 import threading
 import time
 
 import pytest
-from machinekind_twin_api.backend import BackendContext
+from machinekind_twin_api.backend import BackendContext, supports_read_only
 
 from fake_bus import REST_TICKS, FakeBusLink
-from soarm import serial_bridge
+from soarm import feetech, serial_bridge
 from soarm.feetech import (
     ADDR_GOAL_POSITION,
     ADDR_PRESENT_POSITION,
     ADDR_TORQUE_ENABLE,
     INST_READ,
     INST_SYNC_READ,
+    INST_WRITE,
     FeetechArm,
     FeetechBus,
     checksum,
@@ -281,3 +283,63 @@ def test_disconnect_leaves_the_arm_holding_by_default(arm_ctx):
     arm.disconnect()
     assert all(regs[ADDR_TORQUE_ENABLE] == 1 for regs in link.registers.values())
     assert link.closed
+
+
+# ------------------------------------------------------------------ read-only
+def test_read_only_reads_the_arm_and_never_writes(so101_context):
+    ctx = dataclasses.replace(so101_context(torque_off_on_exit=True), read_only=True)
+    link = FakeBusLink(start_ticks=2048 + 512)
+    bus = FeetechBus("COM_TEST", read_only=True)
+    bus.open(link=link)
+    arm = FeetechArm(ctx, bus=bus)
+    arm.connect()
+    assert arm.read_joints()["shoulder_pan"] == pytest.approx(45.0)
+    with pytest.raises(RuntimeError, match="tylko do odczytu"):
+        arm.send_joints({"shoulder_pan": 0.0})
+    arm.disconnect()
+
+    assert not [op for op in link.log if op[0] in ("write", "sync")]
+    assert all(regs[ADDR_TORQUE_ENABLE] == 0 and regs[ADDR_GOAL_POSITION] == 3000 for regs in link.registers.values())
+
+
+def test_a_read_only_bus_refuses_every_write_before_it_reaches_the_port():
+    link = FakeBusLink()
+    bus = FeetechBus("COM_TEST", read_only=True)
+    bus.open(link=link)
+    with pytest.raises(PermissionError):
+        bus.write(1, ADDR_TORQUE_ENABLE, 1, 1)
+    with pytest.raises(PermissionError):
+        bus.sync_write(ADDR_GOAL_POSITION, 2, {1: 2048})
+    with pytest.raises(PermissionError):                 # past the bus methods too
+        bus._send(1, INST_WRITE, bytes([ADDR_TORQUE_ENABLE, 1]))
+    assert bus.read(1, ADDR_PRESENT_POSITION, 2) == 2048
+    assert not [op for op in link.log if op[0] in ("write", "sync")]
+
+
+def test_the_read_only_link_refuses_a_write_hidden_behind_a_read():
+    """Every packet of one write call is checked, also one a READ's length byte would run over."""
+    link = FakeBusLink()
+    bus = FeetechBus("COM_TEST", read_only=True)
+    bus.open(link=link)
+
+    def packet(instruction: int, params: bytes) -> bytes:
+        body = bytes([1, len(params) + 2, instruction]) + params
+        return b"\xff\xff" + body + bytes([checksum(body)])
+
+    read = packet(INST_READ, bytes([ADDR_PRESENT_POSITION, 2]))
+    write = packet(INST_WRITE, bytes([ADDR_TORQUE_ENABLE, 1]))
+    with pytest.raises(PermissionError, match="0x03"):
+        bus._link.write(read + write)
+    with pytest.raises(PermissionError, match="niepelny"):
+        bus._link.write(read[:3] + bytes([40]) + read[4:])
+    assert link.log == []
+
+
+def test_the_factory_is_marked_read_only_capable():
+    assert supports_read_only(feetech.create)
+
+
+def test_read_only_needs_a_read_only_bus(so101_context):
+    ctx = dataclasses.replace(so101_context(), read_only=True)
+    with pytest.raises(ValueError, match="read_only"):
+        FeetechArm(ctx, bus=FeetechBus("COM_TEST"))

@@ -22,7 +22,9 @@ mujoco = pytest.importorskip("mujoco")
 pytest.importorskip("machinekind_twin")
 
 from machinekind_twin import scene as twin_scene  # noqa: E402
+from machinekind_twin.cli import main as twin_main  # noqa: E402
 from machinekind_twin.clock import VirtualClock  # noqa: E402
+from machinekind_twin.episode import EpisodeLog, EpisodeOptions  # noqa: E402
 from machinekind_twin.kinematics import inverse  # noqa: E402
 from machinekind_twin.perception import CubeDetection, ObjectTracker  # noqa: E402
 from machinekind_twin.runtime import Twin  # noqa: E402
@@ -342,6 +344,31 @@ def test_jev_in_the_loop_lifts_the_cube_and_the_twin_says_w_dloni(twin):
     assert {s for t, s, _ in sources if t >= in_hand[0]} == {"w dloni"}
     assert strategy.judging.disagreements == 0 and not strategy.judging.needs_review
     assert twin.owner is None
+
+
+def test_the_episode_recording_keeps_every_decision_and_twin_episode_reads_it(twin, tmp_path, capsys):
+    add_block(twin, "cube")
+    clock = Clock()
+    strategy = built(GraspContactJudge(twin))
+    runner = StrategyRunner(twin, strategy, objects=tracked(twin, "cube", clock, []),
+                            episode=EpisodeOptions(folder=tmp_path, name="grasp_jev"))
+
+    runner.start(threaded=False)
+    drive(twin, runner, 60.0, clock)
+
+    assert runner.status.stopped_because == "zadanie wykonane", (strategy.status, strategy.grasp)
+    assert runner.wait_for_episode(5.0) and runner.status.episode is not None
+    log = EpisodeLog.load(runner.status.episode)
+    assert log.end.code == "done" and log.recording["telemetry_complete"]
+    recorded = [d for step in log.steps for d in step["decisions"]]
+    kept = strategy.judging.decisions
+    assert ([(d["question"], d["state"]["point"]) for d in recorded]
+            == [(d.question, d.state["point"]) for d in kept])
+    assert [d["answer"] for d in recorded] == [d.answer for d in kept]
+    assert [d["confidence"] for d in recorded] == pytest.approx([d.confidence for d in kept], abs=1e-3)
+
+    assert twin_main(["episode", str(log.path)]) == 0
+    assert "Model decisions: 4" in capsys.readouterr().out
 
 
 @pytest.mark.render

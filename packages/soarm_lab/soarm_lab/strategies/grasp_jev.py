@@ -21,6 +21,7 @@ Grasp's drop monitoring remains active while awaiting answers and lowering. A dr
 the pending consultation and starts recovery. Recovered attempts are judged again.
 
 Each call records its state, questions and outcome, including failures and cancellations.
+Each tick's `Action.decisions` carries the records new since the previous tick, for the run's log.
 Model waits count toward `time_limit_s`. Optional frames are limited to the named wrist
 camera and checked for size and age. `blob=` supplies colour occupancy between the jaws;
 without it the state reports unknown.
@@ -33,7 +34,7 @@ import math
 import time
 import uuid
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import numpy as np
@@ -523,11 +524,9 @@ class GraspJevStrategy(GraspStrategy):
         return self._with_decisions(action)
 
     def _with_decisions(self, action: Action) -> Action:
-        """Return the action while retaining records for `drain_decisions`.
-
-        The pinned API has no `Action.decisions` field.
-        """
-        return action
+        """Return the action carrying the records drained since the previous tick, for the run's log."""
+        drained = self.drain_decisions()
+        return replace(action, decisions=(*action.decisions, *drained)) if drained else action
 
     def wait_for_answer(self, timeout_s: float | None = None) -> None:
         """Wait for an in-flight call in tests. The next tick collects its result."""

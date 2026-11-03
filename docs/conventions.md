@@ -11,7 +11,7 @@ The twin and `soarm_lab` meet only through data and entry points:
 - the twin exports the measured station as a folder (`twin export`): `scene.xml`, `assets/`, `station.json`;
 - the twin finds the lab's strategies under the `machinekind_twin.strategies` entry point and runs them through its `StrategyRunner`.
 
-The contracts are a base dependency of both packages, `machinekind-twin-api>=0.1,<0.2`. They need only numpy.
+The contracts are a base dependency of both packages, `machinekind-twin-api>=0.1.4,<0.2`. They need only numpy.
 The twin is a dev dependency. Tests that run a package through the twin's loaders, factory and runner are
 marked `twin` and skip when it is not installed. A test that imports only `machinekind_twin_api` needs no marker.
 Each package's `tests/test_dependency_rule.py` checks every import in the package's source, also one under
@@ -107,6 +107,7 @@ The plugin contracts are the package `machinekind-twin-api` (see the root README
   `RobotKinematics.camera` returns their poses in the base frame.
 - The backend contract is `machinekind_twin_api.backend`: `BackendContext`, `BackendPlugin`, `RobotBackend` and `RobotInfo`.
   A backend factory `create(ctx)` takes a `BackendContext` and returns the backend.
+  `feetech.create` is marked `read_only_capable`: with `BackendContext.read_only` it only reads the servos.
   `FeetechArm` and `LeRobotArm` subclass `RobotBackend`, so the twin uses them without its `PluginBackend` wrapper.
 - `machinekind_twin_api.entry_points` names the entry point groups: `ROBOTS`, `BACKENDS`, `STRATEGIES` and `DETECTORS`.
   `packages/soarm/pyproject.toml` registers the robot folder under `machinekind_twin.robots` (`ROBOTS`)
@@ -121,7 +122,7 @@ The plugin contracts are the package `machinekind-twin-api` (see the root README
   `soarm_lab.strategies.touch.TouchStrategy` does the same and reads `Observation.objects`.
   `soarm_lab.strategies.touch_jev.JevTouchStrategy` subclasses it and asks a judge (`soarm_lab.strategies.judges.Judge`) after each descent.
   It asks on a thread of its own and never waits in `act`. Its Jev client uses the standard library's `urllib` and reads `TYPESAFE_API_KEY` in `start`.
-  Its decision records have the five fields of the api 0.1.3 `Decision`, and go to `Action.decisions` once the pin reaches that version.
+  Its decision records are the api's `Decision`s; each tick's `Action.decisions` carries the new ones to the twin's episode recording.
   `soarm_lab.strategies.grasp.GraspStrategy` also subclasses `TouchStrategy`.
   It opens, straddles below the catalog top height, closes and lifts.
   With `probe: true`, it first measures the top with a closed-jaw descent as `touch` does.

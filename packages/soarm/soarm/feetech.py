@@ -20,6 +20,12 @@ There is no LeRobot calibration file here: converting ticks to degrees takes tic
 that is, because it subtracts the homing offset stored in its EEPROM. LeRobot's calibration
 sets that offset at its "middle" step, so the pose held there must be the MJCF's zero
 (docs/first-contact.md). There is no per-joint zero offset or direction setting here.
+
+Read-only
+---------
+The twin may open an arm it only watches (`BackendContext.read_only`). The bus then goes through
+`ReadOnlyLink`, which refuses every packet but PING, READ and SYNC READ before it reaches the port.
+`connect` and `disconnect` skip every write (no goal, no torque) and `send_joints` raises.
 """
 
 from __future__ import annotations
@@ -32,7 +38,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from machinekind_twin_api.backend import BackendContext, RobotBackend, RobotInfo
+from machinekind_twin_api.backend import BackendContext, RobotBackend, RobotInfo, read_only_capable
 
 from .settings import from_mapping
 
@@ -44,6 +50,8 @@ INST_WRITE = 0x03
 INST_SYNC_READ = 0x82
 INST_SYNC_WRITE = 0x83
 BROADCAST_ID = 0xFE
+#: The only instructions a read-only bus sends.
+READ_INSTRUCTIONS = frozenset({INST_PING, INST_READ, INST_SYNC_READ})
 
 #: The servo's own angle limits, stored in its EEPROM. The servo silently clamps EVERY
 #: command to them, so an application that does not know them commands poses the servo
@@ -108,13 +116,36 @@ def describe_servo_error(name: str, dev_id: int, bits: int) -> str:
     return f"{name} (serwo {dev_id}): {', '.join(what)}"
 
 
+class ReadOnlyLink:
+    """A serial link that passes only PING, READ and SYNC READ packets; anything else raises unsent."""
+
+    def __init__(self, link: Any):
+        self._link = link
+
+    def write(self, data: bytes) -> Any:
+        data = bytes(data)
+        i = 0
+        while i < len(data):
+            if data[i:i + 2] != b"\xff\xff" or len(data) < i + 5 or len(data) < i + 4 + data[i + 3]:
+                raise PermissionError("feetech tylko do odczytu: niepelny pakiet - nic nie wyslano")
+            if data[i + 4] not in READ_INSTRUCTIONS:
+                raise PermissionError(f"feetech tylko do odczytu: instrukcja 0x{data[i + 4]:02X} - nic nie wyslano")
+            i += 4 + data[i + 3]
+        return self._link.write(data)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._link, name)
+
+
 class FeetechBus:
     """Protocol layer over the serial port. Kept separate so that it can be tested."""
 
-    def __init__(self, port: str, baudrate: int = 1_000_000, timeout: float = 0.02):
+    def __init__(self, port: str, baudrate: int = 1_000_000, timeout: float = 0.02, *, read_only: bool = False):
         self.port = port
         self.baudrate = baudrate
         self.timeout = timeout
+        #: Only PING, READ and SYNC READ reach the servos (`ReadOnlyLink`).
+        self.read_only = read_only
         self._link: Any = None
         #: Last error byte from a valid reply of each servo {id: bits}.
         self.errors: dict[int, int] = {}
@@ -136,7 +167,7 @@ class FeetechBus:
     def open(self, link: Any = None) -> None:
         """Opens the port. `link` substitutes a ready object (tests) for pyserial."""
         if link is not None:
-            self._link = link
+            self._link = ReadOnlyLink(link) if self.read_only else link
             return
         try:
             import serial
@@ -155,6 +186,8 @@ class FeetechBus:
             self._disable_nagle()
         else:
             self._link = serial.Serial(self.port, self.baudrate, timeout=self.timeout, write_timeout=1.0)
+        if self.read_only:
+            self._link = ReadOnlyLink(self._link)
         self._link.reset_input_buffer()
         self._link.reset_output_buffer()
 
@@ -168,7 +201,7 @@ class FeetechBus:
         whole 0.25 s timeout. The bridge sets TCP_NODELAY only on its own side, which
         covers the replies, not the commands.
         """
-        sock = getattr(self._link, "_socket", None)
+        sock = getattr(getattr(self._link, "_link", self._link), "_socket", None)
         if sock is None:
             return
         try:
@@ -321,6 +354,8 @@ class FeetechBus:
         return self._finish(out, [dev_id], length, t0).get(dev_id)
 
     def write(self, dev_id: int, addr: int, value: int, length: int) -> None:
+        if self.read_only:
+            raise PermissionError("feetech tylko do odczytu: zapis zablokowany")
         self._send(dev_id, INST_WRITE, bytes([addr]) + value.to_bytes(length, "little"))
         if self._receive(dev_id) is None and self._last_rx == "lost":
             self._settle([], 0)
@@ -360,6 +395,8 @@ class FeetechBus:
         """
         if not values:
             return
+        if self.read_only:
+            raise PermissionError("feetech tylko do odczytu: zapis zablokowany")
         params = bytearray([addr, length])
         for dev_id, value in sorted(values.items()):
             params.append(dev_id)
@@ -389,6 +426,7 @@ class FeetechSettings:
     torque_off_on_exit: bool = False
 
 
+@read_only_capable
 def create(ctx: BackendContext) -> FeetechArm:
     """Entry point of the `feetech` backend plugin."""
     return FeetechArm(ctx)
@@ -408,7 +446,11 @@ class FeetechArm(RobotBackend):
         self.joints = tuple(ctx.joints)
         self.gripper = ctx.gripper
         self.limits: dict[str, tuple[float, float]] = dict(ctx.limits)
-        self.bus = bus or FeetechBus(self.port, self.settings.baudrate)
+        #: Only reads: `connect`, `send_joints` and `disconnect` write nothing.
+        self.read_only = bool(getattr(ctx, "read_only", False))
+        self.bus = bus or FeetechBus(self.port, self.settings.baudrate, read_only=self.read_only)
+        if self.read_only and not self.bus.read_only:
+            raise ValueError("feetech: odczyt bez zapisu wymaga magistrali tylko do odczytu (FeetechBus(read_only=True))")
         # The SO-101 numbers its servos from the base to the gripper, in joint order.
         self.ids = {name: index for index, name in enumerate(self.joints, start=1)}
         self._connected = False
@@ -476,6 +518,20 @@ class FeetechArm(RobotBackend):
         self._read_servo_limits()
         ticks = self._read_start_positions()
 
+        if not self.read_only:
+            self._hold_where_it_stands(ticks)
+        self._positions = {name: self._to_units(name, int(value)) for name, value in ticks.items()}
+        self._failed_cycles, self._stale, self._link_silent = 0, [], False
+        self._last_full_read = time.monotonic()
+        self._connected = True
+        logger.info(
+            "Polaczono z ramieniem na %s%s. Pozycja startowa: %s",
+            self.port, " (tylko odczyt)" if self.read_only else "",
+            ", ".join(f"{name}={value:.1f}" for name, value in self._positions.items()),
+        )
+
+    def _hold_where_it_stands(self, ticks: dict[str, int]) -> None:
+        """Goal = the measured position, then torque on."""
         # ORDER MATTERS. The goal register keeps its value from the previous
         # session, so enabling torque alone would jerk the arm to that pose.
         # First set the goal to where the arm actually stands.
@@ -484,16 +540,6 @@ class FeetechArm(RobotBackend):
         )
         for dev_id in self.ids.values():
             self.bus.write(dev_id, ADDR_TORQUE_ENABLE, 1, 1)
-
-        self._positions = {name: self._to_units(name, int(value)) for name, value in ticks.items()}
-        self._failed_cycles, self._stale, self._link_silent = 0, [], False
-        self._last_full_read = time.monotonic()
-        self._connected = True
-        logger.info(
-            "Polaczono z ramieniem na %s. Pozycja startowa: %s",
-            self.port,
-            ", ".join(f"{name}={value:.1f}" for name, value in self._positions.items()),
-        )
 
     def _read_start_positions(self) -> dict[str, int]:
         """Start position from TWO matching reads of each joint.
@@ -573,7 +619,7 @@ class FeetechArm(RobotBackend):
             return
         # Torque stays on unless `torque_off_on_exit` is set: a limp arm would drop
         # under its own weight. By default the arm stays where it stopped.
-        if self.settings.torque_off_on_exit:
+        if self.settings.torque_off_on_exit and not self.read_only:
             for dev_id in self.ids.values():
                 try:
                     self.bus.write(dev_id, ADDR_TORQUE_ENABLE, 0, 1)
@@ -682,6 +728,8 @@ class FeetechArm(RobotBackend):
         return out
 
     def send_joints(self, targets: dict[str, float]) -> dict[str, float]:
+        if self.read_only:
+            raise RuntimeError("feetech: ramie otwarte tylko do odczytu")
         if not self._connected:
             raise RuntimeError("Ramie nie jest polaczone")
         if self._link_silent:

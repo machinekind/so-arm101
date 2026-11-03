@@ -56,10 +56,9 @@ run ends for review. A failed call is never read as an answer. Model waits count
 
 The records. Every call gives one `judges.Decision` per question, with the answer as received (or the
 error), the exact state sent, the confidence and the response time; failed, timed-out and cancelled calls
-too. They collect in `judging.decisions` and in `drain_decisions`, and a summary goes into the notes, the
-stop reason and one log line per call. The pinned api (0.1.2) has no `Action.decisions`: the twin's runner
-would drop an extra attribute, so `act` returns plain `Action`s. Once the pin reaches api 0.1.3,
-`_with_decisions` hands the drained records to `Action.decisions` and the twin's episode log keeps them.
+too. They collect in `judging.decisions`; each tick's `Action.decisions` carries the ones that came back
+since the previous tick, and the twin's episode recording keeps them. A summary goes into the notes, the
+stop reason and one log line per call.
 `state.sent` and `state.questions_sent`, with `QUESTIONS_VERSION`, let Claude, Jev or a person be asked the
 identical input later.
 
@@ -76,7 +75,7 @@ import math
 import time
 import uuid
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import numpy as np
@@ -447,13 +446,9 @@ class JevTouchStrategy(TouchStrategy):
         return self._with_decisions(action)
 
     def _with_decisions(self, action: Action) -> Action:
-        """The tick's answer, to carry the decisions that came back since the previous tick.
-
-        The pinned api (0.1.2) has no `Action.decisions`, so the records stay in `drain_decisions` and
-        `judging.decisions` and the notes carry the summary. Once the pin reaches api 0.1.3 this returns
-        `dataclasses.replace(action, decisions=self.drain_decisions())`.
-        """
-        return action
+        """The tick's answer, carrying the records drained since the previous tick, for the run's log."""
+        drained = self.drain_decisions()
+        return replace(action, decisions=(*action.decisions, *drained)) if drained else action
 
     def wait_for_answer(self, timeout_s: float | None = None) -> None:
         """Waits for the call in flight, if any (tests); the next tick collects its answer."""

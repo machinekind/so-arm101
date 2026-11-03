@@ -12,13 +12,20 @@ import pytest
 pytestmark = pytest.mark.twin
 pytest.importorskip("machinekind_twin")
 
-from machinekind_twin.backends import BackendPlugin, RobotBackend, backend_context, create_backend, factory  # noqa: E402
+from machinekind_twin.backends import (  # noqa: E402
+    BackendPlugin,
+    RobotBackend,
+    backend_context,
+    create_backend,
+    factory,
+    open_read_only,
+)
 from machinekind_twin.robots import load_robot, robot_config  # noqa: E402
 from machinekind_twin_api.entry_points import BACKENDS  # noqa: E402
 
 import soarm  # noqa: E402
 from fake_bus import FakeBusLink  # noqa: E402
-from soarm.feetech import ADDR_GOAL_POSITION, FeetechArm  # noqa: E402
+from soarm.feetech import ADDR_GOAL_POSITION, ADDR_TORQUE_ENABLE, FeetechArm  # noqa: E402
 from soarm.lerobot_backend import LeRobotArm  # noqa: E402
 
 
@@ -81,6 +88,28 @@ def test_the_twin_runs_the_feetech_backend_as_it_is(spec, soarm_backends) -> Non
     finally:
         arm.disconnect()
     assert not arm.is_connected and link.closed
+
+
+def test_the_twin_watches_an_arm_read_only_through_the_feetech_backend(spec, soarm_backends) -> None:
+    """`open_read_only`, as for a second arm on the stand: the twin reads the joints, nothing is written."""
+    watched = open_read_only(config(spec, "feetech"), spec, "feetech", "COM_TEST")
+    arm = watched._plugin
+    assert type(arm) is FeetechArm and arm.read_only and arm.bus.read_only
+    link = FakeBusLink(start_ticks=2048 + 512)
+    arm.bus.open(link=link)
+    watched.connect()
+    try:
+        assert watched.read_joints()["shoulder_pan"] == pytest.approx(45.0)
+        assert watched.faults() == []
+    finally:
+        watched.disconnect()
+    assert link.closed and not link.ops("write") and not link.ops("sync")
+    assert all(regs[ADDR_TORQUE_ENABLE] == 0 for regs in link.registers.values())
+
+
+def test_the_twin_refuses_to_watch_an_arm_through_lerobot(spec, soarm_backends) -> None:
+    with pytest.raises(ValueError, match="read_only"):
+        open_read_only(config(spec, "lerobot"), spec, "lerobot", "COM_TEST")
 
 
 def test_the_backend_section_of_the_twin_config_reaches_the_backend(spec, soarm_backends) -> None:
