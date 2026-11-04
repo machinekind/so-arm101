@@ -4,9 +4,11 @@ and physics.
 A seed puts the cubes on the table: the blue base where a three-high tower fits with the hand straight
 down, green and red anywhere in reach. Each block has its own tracker, fed with simulation poses while the
 hand is not near it. The plan comes from `plan_json` or a scripted fake planner, so no model, key or camera
-is needed. The simulation's own poses check the tower, and that no block sank into the table, flew,
-was dragged or stayed in the jaws. A knocked tower has its middle cube moved to the table while the top
-one is carried to it. The bridge sets a cube beside another and lays a cuboid across both.
+is needed. The simulation's own poses check the tower, and that no block sank into another or into the
+table at any physics step, flew, was dragged or stayed in the jaws. The physics step is shorter than the
+twin's own, so a block let go above another lands without sinking into it. A knocked tower has its middle
+cube moved to the table while the top one is carried to it. The bridge sets a cube beside another and lays
+a cuboid across both.
 
 `SOARM_CAMPAIGN_RUNS=<runs>` or `SOARM_CAMPAIGN_DIR=<folder>` also runs the seeded campaign: towers, also with
 the wrist camera and a camera error, knocked towers and bridges (default 10 seeds each), one JSON file per
@@ -18,7 +20,7 @@ from __future__ import annotations
 import json
 import math
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
@@ -53,7 +55,11 @@ CLOCK_STEP = 0.01
 TWIN_PERIOD = 0.02
 #: The hand hides a block from the cameras nearer than this [m].
 HIDDEN_M = 0.05
-STIFF_SOLREF = (0.01, 1.0)
+#: The physics step [s]. A short step keeps a block let go a few millimetres above another from sinking
+#: into it as it lands.
+PHYSICS_STEP = 0.001
+#: Stiff contact uses a time constant twice the physics step, MuJoCo's floor, and high impedance.
+STIFF_SOLREF = (2 * PHYSICS_STEP, 1.0)
 STIFF_SOLIMP = (0.95, 0.99)
 COLOURS = {"blue": (0.2, 0.4, 0.9, 1.0), "green": (0.2, 0.75, 0.3, 1.0), "red": (0.85, 0.25, 0.2, 1.0),
            "yellow": (0.9, 0.8, 0.2, 1.0)}
@@ -65,8 +71,8 @@ HALF = block("cube").half_size[2]
 TOWER_XY_M = 0.008
 TOWER_Z_M = 0.002
 TOWER_TILT_DEG = 3.0
-#: Artefact limits: how far a block may sink below its resting height, its speed, and how far the base
-#: may move [m, m/s, m].
+#: Artefact limits: how far two blocks, or a block and the table, may sink into each other, a block's
+#: speed, and how far the base may move [m, m/s, m].
 SINK_M = 0.0007
 SPEED_MPS = 0.5
 BASE_SHIFT_M = 0.003
@@ -136,14 +142,16 @@ def drive(twin: Twin, runner: StrategyRunner, seconds: float, clock: Clock,
             break
 
 
-def add_blocks(twin: Twin, *blocks: Placed) -> None:
-    """Add yawed blocks with stiff contacts and jaw sensors, then connect the simulated arm."""
+def add_blocks(twin: Twin, *blocks: Placed) -> Sinking:
+    """Add yawed blocks with stiff contacts and jaw sensors, connect the simulated arm on the short physics
+    step, and return the watch on how deep the blocks sink."""
     twin.configure(objects=[twin_scene.Box(b.name, block(b.kind).half_size, b.xy, rgba=COLOURS[b.name],
                                            mass=block(b.kind).mass) for b in blocks],
                    grasp_sensors=[b.name for b in blocks])
     twin.connect("sim", threaded=False)
     with twin.lock:
         model, data = twin.scene.model, twin.scene.data
+        model.opt.timestep = PHYSICS_STEP
         for b in blocks:
             g = model.geom(b.name).id
             model.geom_solref[g] = STIFF_SOLREF
@@ -153,6 +161,58 @@ def add_blocks(twin: Twin, *blocks: Placed) -> None:
             adr = model.jnt_qposadr[model.body_jntadr[model.body(b.name).id]]
             data.qpos[adr + 3:adr + 7] = (math.cos(yaw / 2), 0.0, 0.0, math.sin(yaw / 2))
         mujoco.mj_forward(model, data)
+    return Sinking(twin, {b.name: b.name for b in blocks})
+
+
+class Sinking:
+    """The deepest contact of each pair of blocks, and of each block with the table, at every physics step.
+
+    It splits the scene's step into single physics steps, so a contact that lasts only a few milliseconds
+    is seen too. `names` maps a block's simulation name to the name it is reported by.
+    """
+
+    TABLE = "the table"
+
+    def __init__(self, twin: Twin, names: Mapping[str, str]):
+        scene = twin.scene
+        model, data = scene.model, scene.data
+        self.names = {model.geom(name).id: label for name, label in names.items()}
+        self.names[model.geom("table").id] = self.TABLE
+        self.ids = np.array(sorted(self.names))
+        #: The deepest contact of each pair seen so far [m]; a pair with the table has the table second.
+        self.depth: dict[tuple[str, str], float] = {}
+        step = scene.step
+
+        def substeps(seconds: float) -> None:
+            for _ in range(max(1, round(seconds / model.opt.timestep))):
+                step(model.opt.timestep)
+                self.look(data)
+
+        scene.step = substeps
+
+    def look(self, data: Any) -> None:
+        if not data.ncon:
+            return
+        geom, dist = data.contact.geom, data.contact.dist
+        deep = np.isin(geom, self.ids).all(axis=1) & (dist < 0.0)
+        for (a, b), d in zip(geom[deep], dist[deep], strict=True):
+            pair = sorted((self.names[int(a)], self.names[int(b)]), key=lambda n: (n == self.TABLE, n))
+            key = (pair[0], pair[1])
+            self.depth[key] = max(self.depth.get(key, 0.0), -float(d))
+
+    def deepest(self) -> float:
+        """The deepest contact of any pair so far [m]."""
+        return max(self.depth.values(), default=0.0)
+
+    def artefacts(self) -> list[str]:
+        """Each pair that sank more than `SINK_M` into each other."""
+        out = []
+        for (a, b), depth in sorted(self.depth.items()):
+            if depth > SINK_M:
+                who = a if b == self.TABLE else f"{a} and {b}"
+                into = b if b == self.TABLE else "each other"
+                out.append(f"{who} sank {depth * 1000:.2f} mm into {into}")
+        return out
 
 
 def truth(twin: Twin, name: str) -> tuple[np.ndarray, np.ndarray]:
@@ -300,25 +360,24 @@ class Result:
     timeline: list[tuple[float, str, int, str]] = field(default_factory=list)
     steps_run: list[dict[str, Any]] = field(default_factory=list)
     records: list[dict[str, Any]] = field(default_factory=list)
-    #: Looks between the open jaw tips that found a block off centre, over every pick_place run, and blocks
-    #: that sank into each other (`Recorder.dips`).
+    #: Looks between the open jaw tips that found a block off centre, over every pick_place run, and the
+    #: deepest contact of any two blocks or a block and the table [m].
     corrections: int = 0
-    dips: list[str] = field(default_factory=list)
+    sank_m: float = 0.0
 
 
 class Recorder:
-    """Watches a build: each block's lowest height and top speed, the deepest contact between two blocks, how
-    far the base moved, the phases, and every pick_place run the build starts."""
+    """Watches a build: how deep the blocks sink (`Sinking`), each block's top speed, how far the base moved,
+    the phases, and every pick_place run the build starts."""
 
-    def __init__(self, twin: Twin, strategy: BuildStrategy, clock: Clock, names: tuple[str, ...], base: str):
+    def __init__(self, twin: Twin, strategy: BuildStrategy, clock: Clock, names: tuple[str, ...], base: str,
+                 sinking: Sinking):
         self.twin, self.strategy, self.clock, self.names = twin, strategy, clock, names
-        self.lowest = {n: math.inf for n in names}
+        self.sinking = sinking
         self.fastest = {n: 0.0 for n in names}
         self.last = {n: truth(twin, n)[0] for n in names}
         self.base, self.base0 = base, self.last[base].copy()
         self.base_shift = 0.0
-        #: The deepest contact between two blocks [m, negative into each other] and the pair.
-        self.deepest, self.pair = 0.0, ("", "")
         self.timeline: list[tuple[float, str, int, str]] = []
         self.children: list[Any] = []
         factory = strategy.step_factory
@@ -333,37 +392,20 @@ class Recorder:
     def __call__(self) -> None:
         for n in self.names:
             p = truth(self.twin, n)[0]
-            self.lowest[n] = min(self.lowest[n], float(p[2]))
             self.fastest[n] = max(self.fastest[n], float(np.linalg.norm(p - self.last[n])) / TWIN_PERIOD)
             self.last[n] = p
         self.base_shift = max(self.base_shift, float(np.linalg.norm(self.last[self.base] - self.base0)))
-        with self.twin.lock:
-            model, data = self.twin.scene.model, self.twin.scene.data
-            for c in data.contact[:data.ncon]:
-                pair = (model.geom(c.geom1).name, model.geom(c.geom2).name)
-                if set(pair) <= set(self.names) and c.dist < self.deepest:
-                    self.deepest, self.pair = float(c.dist), pair
         st, child = self.strategy.status, self.strategy.current_step
         phase = getattr(getattr(child, "status", None), "phase", "") if child is not None else ""
         now = (st.phase, st.index + 1, phase)
         if not self.timeline or self.timeline[-1][1:] != now:
             self.timeline.append((round(self.clock.t, 2), *now))
 
-    def dips(self) -> list[str]:
-        """Two blocks that sank into each other, as a block let go above another lands on it. Kept apart from
-        `artefacts`, which the tests' checks assert; the campaign records count both."""
-        if self.deepest >= -SINK_M:
-            return []
-        a, b = self.pair
-        return [f"{a} and {b} sank {-self.deepest * 1000:.2f} mm into each other"]
-
-    def artefacts(self, rest: dict[str, float]) -> list[str]:
-        """Blocks that sank below their resting height on the table, flew, or stayed in the jaws, and a base
-        that moved."""
-        out = []
+    def artefacts(self) -> list[str]:
+        """Blocks that sank into each other or into the table, flew, or stayed in the jaws, and a base that
+        moved."""
+        out = self.sinking.artefacts()
         for n in self.names:
-            if self.lowest[n] < rest[n] - SINK_M:
-                out.append(f"{n} sank {(rest[n] - self.lowest[n]) * 1000:.2f} mm into the table")
             if self.fastest[n] > SPEED_MPS:
                 out.append(f"{n} moved at {self.fastest[n]:.2f} m/s")
             if max(contact(self.twin, n)) > 0.5:
@@ -422,7 +464,7 @@ def build_tower(twin: Twin, seed: int, *, planned: bool, knock: bool = False, se
     """Run one seeded build of the tower to its end, then judge it by truth; `extra` goes to the settings,
     `offset` shifts every detection."""
     placed = scene(seed)
-    add_blocks(twin, *placed)
+    sinking = add_blocks(twin, *placed)
     settle(twin, 0.5)
     rng = np.random.default_rng(1000 + seed)
     clock = Clock()
@@ -438,7 +480,7 @@ def build_tower(twin: Twin, seed: int, *, planned: bool, knock: bool = False, se
     strategy = BuildStrategy(BuildSettings(**settings), planner=planner, threaded=False)
     wrist = ("wrist",) if settings["wrist_camera"] else ()
     runner = StrategyRunner(twin, strategy, objects=Cameras(twin, clock, NAMES, offset=offset), cameras=wrist)
-    seen = Recorder(twin, strategy, clock, NAMES, "blue")
+    seen = Recorder(twin, strategy, clock, NAMES, "blue", sinking)
     base0 = seen.base0
     knocked: list[float] = []
 
@@ -467,10 +509,9 @@ def build_tower(twin: Twin, seed: int, *, planned: bool, knock: bool = False, se
     why = tower_problem(twin)
     st = strategy.status
     return Result(seed, not why, why, st.outcome, st.success, st.done, st.replans, st.retries, clock.t, wall,
-                  bool(knocked), seen.artefacts({n: HALF for n in NAMES}),
-                  [r.outcome.split(":")[0] for r in st.records], st.stopped_because, len(seen.children),
-                  tower_offset(twin), seen.timeline, seen.steps_run(), [r.to_dict() for r in st.records],
-                  seen.corrections(), seen.dips())
+                  bool(knocked), seen.artefacts(), [r.outcome.split(":")[0] for r in st.records],
+                  st.stopped_because, len(seen.children), tower_offset(twin), seen.timeline, seen.steps_run(),
+                  [r.to_dict() for r in st.records], seen.corrections(), sinking.deepest())
 
 
 # --------------------------------------------------------------------------- discovery
@@ -542,21 +583,19 @@ def test_a_fixed_plan_sets_a_cube_beside_another_and_lays_a_cuboid_across_both(t
     the two cubes, blue stays put, and no block sinks, flies or stays in the jaws."""
     names = tuple(b.name for b in BRIDGE_BLOCKS)
     rest = {b.name: block(b.kind).half_size[2] for b in BRIDGE_BLOCKS}
-    add_blocks(twin, *BRIDGE_BLOCKS)
+    sinking = add_blocks(twin, *BRIDGE_BLOCKS)
     settle(twin, 0.5)
     clock = Clock()
     settings = BuildSettings(plan_json=BRIDGE_JSON, judge="none", wrist_camera="")
     strategy = BuildStrategy(settings, threaded=False)
     runner = StrategyRunner(twin, strategy, objects=Cameras(twin, clock, names, kinds={"yellow": "cuboid"}))
     blue0 = truth(twin, "blue")[0]
-    lowest = {n: math.inf for n in names}
     fastest = {n: 0.0 for n in names}
     last = {n: truth(twin, n)[0] for n in names}
 
     def watch() -> None:
         for n in names:
             p = truth(twin, n)[0]
-            lowest[n] = min(lowest[n], float(p[2]))
             fastest[n] = max(fastest[n], float(np.linalg.norm(p - last[n])) / TWIN_PERIOD)
             last[n] = p
 
@@ -573,8 +612,8 @@ def test_a_fixed_plan_sets_a_cube_beside_another_and_lays_a_cuboid_across_both(t
     assert yellow[2] == pytest.approx(2 * HALF + rest["yellow"], abs=TOWER_Z_M)
     assert max(tilt_deg(r) for r in (rb, rg, ry)) < TOWER_TILT_DEG
     assert np.linalg.norm(blue - blue0) < BASE_SHIFT_M
+    assert not sinking.artefacts(), sinking.depth
     for n in names:
-        assert lowest[n] >= rest[n] - SINK_M, (n, lowest[n])
         assert fastest[n] <= SPEED_MPS, (n, fastest[n])
         assert max(contact(twin, n)) < 0.5, n
 
@@ -614,13 +653,13 @@ def build_bridge(twin: Twin, seed: int, seconds: float = 600.0) -> Result:
     placed, plan_json, gap = bridge_layout(seed)
     names = tuple(b.name for b in placed)
     rest = {b.name: block(b.kind).half_size[2] for b in placed}
-    add_blocks(twin, *placed)
+    sinking = add_blocks(twin, *placed)
     settle(twin, 0.5)
     clock = Clock()
     settings = BuildSettings(plan_json=plan_json, judge="none", wrist_camera="")
     strategy = BuildStrategy(settings, threaded=False)
     runner = StrategyRunner(twin, strategy, objects=Cameras(twin, clock, names, kinds={"yellow": "cuboid"}))
-    seen = Recorder(twin, strategy, clock, names, "blue")
+    seen = Recorder(twin, strategy, clock, names, "blue", sinking)
     t0 = time.monotonic()
     runner.start(threaded=False)
     drive(twin, runner, seconds, clock, watch=seen)
@@ -643,9 +682,9 @@ def build_bridge(twin: Twin, seed: int, seconds: float = 600.0) -> Result:
     why = "; ".join(problems)
     st = strategy.status
     return Result(seed, not why, why, st.outcome, st.success, st.done, st.replans, st.retries, clock.t, wall,
-                  False, seen.artefacts(rest), [r.outcome.split(":")[0] for r in st.records],
+                  False, seen.artefacts(), [r.outcome.split(":")[0] for r in st.records],
                   st.stopped_because, len(seen.children), off if level else math.nan, seen.timeline,
-                  seen.steps_run(), [r.to_dict() for r in st.records], seen.corrections(), seen.dips())
+                  seen.steps_run(), [r.to_dict() for r in st.records], seen.corrections(), sinking.deepest())
 
 
 #: Runs per scenario without `SOARM_CAMPAIGN_RUNS`; the campaign runs only when either variable is set.
@@ -669,9 +708,8 @@ BARS = {"tower, fixed plan": 0.8, "tower, fake planner": 0.8, "tower, fixed plan
 
 
 def as_run(scenario: str, result: Result, settings: dict[str, Any]) -> Run:
-    """A campaign record of `result`: the pick_place runs, and the structure's offset by truth. Blocks that
-    sank into each other count as artefacts here."""
-    artefacts = result.artefacts + result.dips
+    """A campaign record of `result`: the pick_place runs, and the structure's offset by truth."""
+    artefacts = result.artefacts
     if result.outcome != BUILT:
         last = result.step_outcomes[-1] if result.step_outcomes else ""
         reason = f"{result.outcome or 'no outcome'}" + (f" after {last}" if last else "")
@@ -684,7 +722,8 @@ def as_run(scenario: str, result: Result, settings: dict[str, Any]) -> Run:
     details = {"settings": settings, "why": why,
                "outcome": result.outcome, "steps": result.steps, "replans": result.replans,
                "retries": result.retries, "knocked": result.knocked, "step_outcomes": result.step_outcomes,
-               "records": result.records, "steps_run": result.steps_run, "timeline": result.timeline}
+               "records": result.records, "steps_run": result.steps_run, "timeline": result.timeline,
+               "sank_m": result.sank_m}
     return Run(f"build: {scenario}", result.seed, good, result.picks, result.offset_m, reason, artefacts,
                result.sim_s, result.wall_s, details, result.corrections)
 
@@ -716,6 +755,6 @@ def test_seeded_campaign(twin_robots, scenario, capsys):
             print(f"  {mark} seed {r.seed}: built={r.tower} outcome={r.outcome} steps={r.steps} "
                   f"picks={r.picks} replans={r.replans} retries={r.retries} sim={r.sim_s:.0f}s "
                   f"wall={r.wall_s:.0f}s knocked={r.knocked} steps={r.step_outcomes} {r.why} "
-                  f"{'; '.join(r.artefacts + r.dips)}"
+                  f"{'; '.join(r.artefacts)} deepest contact {r.sank_m * 1000:.2f} mm"
                   f"{'' if r in good else ' | ' + r.reason}")
     assert len(good) >= math.ceil(BARS[scenario] * len(results) - 1e-9)

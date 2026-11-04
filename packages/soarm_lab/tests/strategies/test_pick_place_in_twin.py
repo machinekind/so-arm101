@@ -1,7 +1,9 @@
 """Test pick-and-place through the twin's discovery, runner, supervisor and physics.
 
 Each block has its own tracker fed with simulation poses while the hand is not near it. A fake
-judge answers from the jaw contact sensors. Simulation poses check where the blocks end up.
+judge answers from the jaw contact sensors. Simulation poses check where the blocks end up, and a watch at
+every physics step that no block sinks into another or into the table. The physics step is shorter than
+the twin's own, so a block let go above another lands without sinking into it.
 The wrist-camera case needs rendering. No test here needs a model key.
 `twin_robots` pins discovery to soarm's folder.
 """
@@ -51,9 +53,14 @@ PICK_XY = (0.2, -0.04)
 TARGET_XY = (0.2, 0.06)
 #: The hand hides a block from the cameras nearer than this [m].
 HIDDEN_M = 0.05
-#: Stiff contact uses a time constant twice the physics step and high impedance.
-STIFF_SOLREF = (0.01, 1.0)
+#: The physics step [s]. A short step keeps a block let go a few millimetres above another from sinking
+#: into it as it lands.
+PHYSICS_STEP = 0.001
+#: Stiff contact uses a time constant twice the physics step, MuJoCo's floor, and high impedance.
+STIFF_SOLREF = (2 * PHYSICS_STEP, 1.0)
 STIFF_SOLIMP = (0.95, 0.99)
+#: How far two blocks, or a block and the table, may sink into each other [m].
+SINK_M = 0.0007
 RED = (0.85, 0.25, 0.2, 1.0)
 BLUE = (0.2, 0.4, 0.9, 1.0)
 SPEC = load_robot()
@@ -112,14 +119,16 @@ def drive(twin: Twin, runner: StrategyRunner, seconds: float, clock: Clock,
             break
 
 
-def add_blocks(twin: Twin, *blocks: Placed) -> None:
-    """Add yawed blocks with stiff contacts and jaw sensors, then connect the simulated arm."""
+def add_blocks(twin: Twin, *blocks: Placed, labels: Mapping[str, str] | None = None) -> Sinking:
+    """Add yawed blocks with stiff contacts and jaw sensors, connect the simulated arm on the short physics
+    step, and return the watch on how deep the blocks sink, which names them by `labels` if given."""
     twin.configure(objects=[twin_scene.Box(b.name, block(b.kind).half_size, b.xy, rgba=b.rgba,
                                            mass=block(b.kind).mass) for b in blocks],
                    grasp_sensors=[b.name for b in blocks])
     twin.connect("sim", threaded=False)
     with twin.lock:
         model, data = twin.scene.model, twin.scene.data
+        model.opt.timestep = PHYSICS_STEP
         for b in blocks:
             g = model.geom(b.name).id
             model.geom_solref[g] = STIFF_SOLREF
@@ -130,6 +139,58 @@ def add_blocks(twin: Twin, *blocks: Placed) -> None:
                 adr = model.jnt_qposadr[model.body_jntadr[model.body(b.name).id]]
                 data.qpos[adr + 3:adr + 7] = (math.cos(yaw / 2), 0.0, 0.0, math.sin(yaw / 2))
         mujoco.mj_forward(model, data)
+    return Sinking(twin, labels or {b.name: b.name for b in blocks})
+
+
+class Sinking:
+    """The deepest contact of each pair of blocks, and of each block with the table, at every physics step.
+
+    It splits the scene's step into single physics steps, so a contact that lasts only a few milliseconds
+    is seen too. `names` maps a block's simulation name to the name it is reported by.
+    """
+
+    TABLE = "the table"
+
+    def __init__(self, twin: Twin, names: Mapping[str, str]):
+        scene = twin.scene
+        model, data = scene.model, scene.data
+        self.names = {model.geom(name).id: label for name, label in names.items()}
+        self.names[model.geom("table").id] = self.TABLE
+        self.ids = np.array(sorted(self.names))
+        #: The deepest contact of each pair seen so far [m]; a pair with the table has the table second.
+        self.depth: dict[tuple[str, str], float] = {}
+        step = scene.step
+
+        def substeps(seconds: float) -> None:
+            for _ in range(max(1, round(seconds / model.opt.timestep))):
+                step(model.opt.timestep)
+                self.look(data)
+
+        scene.step = substeps
+
+    def look(self, data: Any) -> None:
+        if not data.ncon:
+            return
+        geom, dist = data.contact.geom, data.contact.dist
+        deep = np.isin(geom, self.ids).all(axis=1) & (dist < 0.0)
+        for (a, b), d in zip(geom[deep], dist[deep], strict=True):
+            pair = sorted((self.names[int(a)], self.names[int(b)]), key=lambda n: (n == self.TABLE, n))
+            key = (pair[0], pair[1])
+            self.depth[key] = max(self.depth.get(key, 0.0), -float(d))
+
+    def deepest(self) -> float:
+        """The deepest contact of any pair so far [m]."""
+        return max(self.depth.values(), default=0.0)
+
+    def artefacts(self) -> list[str]:
+        """Each pair that sank more than `SINK_M` into each other."""
+        out = []
+        for (a, b), depth in sorted(self.depth.items()):
+            if depth > SINK_M:
+                who = a if b == self.TABLE else f"{a} and {b}"
+                into = b if b == self.TABLE else "each other"
+                out.append(f"{who} sank {depth * 1000:.2f} mm into {into}")
+        return out
 
 
 def truth(twin: Twin, name: str) -> tuple[np.ndarray, np.ndarray]:
@@ -303,7 +364,8 @@ def test_with_judge_none_it_runs_without_a_key(twin, monkeypatch):
 
 def test_a_cube_goes_on_another_cube_and_stays_there(twin):
     """The placed cube sits flat and aligned on the lower one, which neither sinks nor moves."""
-    add_blocks(twin, Placed("red", "cube", PICK_XY, rgba=RED), Placed("blue", "cube", TARGET_XY, 20.0, BLUE))
+    sinking = add_blocks(twin, Placed("red", "cube", PICK_XY, rgba=RED),
+                         Placed("blue", "cube", TARGET_XY, 20.0, BLUE))
     clock = Clock()
     strategy = built(label="red", place_on="blue")
     cameras = Cameras(twin, clock, ("red", "blue"))
@@ -331,6 +393,7 @@ def test_a_cube_goes_on_another_cube_and_stays_there(twin):
     assert tilt_deg(red_rot) < 2.0 and tilt_deg(blue_rot) < 2.0
     assert abs(((yaw_deg(red_rot) - yaw_deg(blue_rot) + 45) % 90) - 45) < 4.0
     assert all(c < 0.5 for c in contact(twin, "red"))
+    assert not sinking.artefacts(), sinking.depth
 
 
 def test_a_third_cube_goes_on_two_and_the_open_jaw_leaves_the_stack_untouched(twin):
@@ -340,8 +403,9 @@ def test_a_third_cube_goes_on_two_and_the_open_jaw_leaves_the_stack_untouched(tw
     uses the pose seen on the way there.
     """
     half = block("cube").half_size[2]
-    add_blocks(twin, Placed("red", "cube", PICK_XY, rgba=RED), Placed("base", "cube", TARGET_XY, rgba=BLUE),
-               Placed("blue", "cube", (0.2, 0.12), rgba=BLUE))
+    sinking = add_blocks(twin, Placed("red", "cube", PICK_XY, rgba=RED),
+                         Placed("base", "cube", TARGET_XY, rgba=BLUE),
+                         Placed("blue", "cube", (0.2, 0.12), rgba=BLUE))
     move(twin, "blue", TARGET_XY, 3 * half)
     settle(twin)
     clock = Clock()
@@ -368,6 +432,7 @@ def test_a_third_cube_goes_on_two_and_the_open_jaw_leaves_the_stack_untouched(tw
     assert max(tilt_deg(r) for r in (red_rot, blue_rot, base_rot)) < 2.0
     assert abs(((yaw_deg(red_rot) - yaw_deg(blue_rot) + 45) % 90) - 45) < 4.0
     assert all(c < 0.5 for c in contact(twin, "red"))
+    assert not sinking.artefacts(), sinking.depth
 
 
 def square(xy: tuple[float, float]) -> float:
@@ -375,19 +440,19 @@ def square(xy: tuple[float, float]) -> float:
     return math.degrees(math.atan2(xy[1] - PAN_XY[1], xy[0] - PAN_XY[0]))
 
 
-def tower_of(twin: Twin, xy: tuple[float, float], under: int, red_yaw: float) -> list[str]:
+def tower_of(twin: Twin, xy: tuple[float, float], under: int, red_yaw: float) -> tuple[list[str], Sinking]:
     """Stack `under` blue cubes square to the arm at `xy`, with the red cube at `PICK_XY` and `red_yaw` [deg].
-    Return the stack's names, bottom first."""
+    Return the stack's names, bottom first, and the watch on sinking."""
     half = block("cube").half_size[2]
     names = [f"base{k}" for k in range(under - 1)] + ["blue"]
     aside = [(0.12, 0.2), (0.12, -0.2), (0.3, 0.2)]
-    add_blocks(twin, Placed("red", "cube", PICK_XY, red_yaw, RED),
-               *(Placed(name, "cube", aside[k], square(xy), BLUE) for k, name in enumerate(names)))
+    sinking = add_blocks(twin, Placed("red", "cube", PICK_XY, red_yaw, RED),
+                         *(Placed(name, "cube", aside[k], square(xy), BLUE) for k, name in enumerate(names)))
     for k, name in enumerate(names):
         move(twin, name, xy, (2 * k + 1) * half)
         settle(twin, 0.5)
     settle(twin)
-    return names
+    return names, sinking
 
 
 def without_yaw(objects: Objects, label: str) -> Objects:
@@ -407,7 +472,7 @@ def test_a_cube_out_of_straight_down_reach_goes_on_its_stack_with_the_hand_tilte
     """The hand tilts for the pick and keeps the tilt, so the cube stays level and lands square; the stack
     neither moves nor sinks."""
     half = block("cube").half_size[2]
-    names = tower_of(twin, xy, under, square(PICK_XY))
+    names, sinking = tower_of(twin, xy, under, square(PICK_XY))
     clock = Clock()
     strategy = built(label="red", place_on="blue")
     runner = StrategyRunner(twin, strategy, objects=Cameras(twin, clock, ("red", *names)))
@@ -438,15 +503,16 @@ def test_a_cube_out_of_straight_down_reach_goes_on_its_stack_with_the_hand_tilte
     assert max(tilt_deg(truth(twin, name)[1]) for name in ("red", *names)) < 2.0
     assert abs(((yaw_deg(red_rot) - yaw_deg(blue_rot) + 45) % 90) - 45) < 4.0
     assert all(c < 0.5 for c in contact(twin, "red"))
+    assert not sinking.artefacts(), sinking.depth
 
 
 def test_a_tilted_pick_closes_on_the_cube_without_pressing_it_into_the_table(twin):
     """The hand tilts for a place on a two-cube stack. The jaw closes on the picked cube slowly enough that
     the cube never sinks below its rest height, from the straddle through the lift."""
     half = block("cube").half_size[2]
-    add_blocks(twin, Placed("red", "cube", (0.178, 0.041), 63.0, RED),
-               Placed("base", "cube", (0.196, -0.033), 16.0, BLUE),
-               Placed("blue", "cube", (0.2, 0.11), 9.0, BLUE))
+    sinking = add_blocks(twin, Placed("red", "cube", (0.178, 0.041), 63.0, RED),
+                         Placed("base", "cube", (0.196, -0.033), 16.0, BLUE),
+                         Placed("blue", "cube", (0.2, 0.11), 9.0, BLUE))
     move(twin, "blue", (0.196, -0.033), 3 * half)
     settle(twin)
     clock = Clock()
@@ -465,6 +531,7 @@ def test_a_tilted_pick_closes_on_the_cube_without_pressing_it_into_the_table(twi
     assert runner.status.stopped_because == "zadanie wykonane", (strategy.status, strategy.place)
     assert strategy.place.outcome == "placed" and strategy.grasp.tilt_deg > 0.0
     assert lowest and min(lowest) > half - 0.0007, min(lowest)
+    assert not sinking.artefacts(), sinking.depth
 
 
 @pytest.mark.render
@@ -473,7 +540,7 @@ def test_a_tilted_pick_of_a_cube_without_yaw_in_its_pose_follows_the_wrist_look(
     """The pose has no yaw, so the tilted pick guesses the cube square to the arm and the wrist camera checks
     it. A square cube goes on the stack; one 40 degrees off is left where it lies, untouched."""
     half = block("cube").half_size[2]
-    names = tower_of(twin, (0.24, 0.0), 2, square(PICK_XY) + off)
+    names, sinking = tower_of(twin, (0.24, 0.0), 2, square(PICK_XY) + off)
     clock = Clock()
     strategy = built(label="red", place_on="blue", wrist_camera="wrist")
     cameras = without_yaw(Cameras(twin, clock, ("red", *names)), "red")
@@ -500,18 +567,22 @@ def test_a_tilted_pick_of_a_cube_without_yaw_in_its_pose_follows_the_wrist_look(
         assert strategy.wrist.verdicts[:1] == ["centred"], strategy.wrist
         assert np.linalg.norm(red[:2] - blue[:2]) < 0.004 and red[2] == pytest.approx(5 * half, abs=0.001)
         assert tilt_deg(red_rot) < 2.0
+        assert not sinking.artefacts(), sinking.depth
         return
     assert strategy.place.outcome == "unreachable", (strategy.status, strategy.place, strategy.wrist)
     assert strategy.status.stopped_because.startswith("blok w kamerze obrocony o "), strategy.status
     assert max(touched) < 0.5 and np.linalg.norm(red - red0) < 0.001
     assert abs(yaw_deg(red_rot) - yaw_deg(red_rot0)) < 1.0
+    assert not sinking.artefacts(), sinking.depth
 
 
-def stacked(twin: Twin, lower: Placed, *others: Placed) -> None:
-    """Put a red cube on `lower` at the pick spot, with `others` around, and let the stack settle."""
-    add_blocks(twin, lower, Placed("red", "cube", (0.2, 0.12), rgba=RED), *others)
+def stacked(twin: Twin, lower: Placed, *others: Placed) -> Sinking:
+    """Put a red cube on `lower` at the pick spot, with `others` around, and let the stack settle. Return the
+    watch on sinking."""
+    sinking = add_blocks(twin, lower, Placed("red", "cube", (0.2, 0.12), rgba=RED), *others)
     move(twin, "red", lower.xy, 2 * block(lower.kind).half_size[2] + block("cube").half_size[2])
     settle(twin)
+    return sinking
 
 
 def watched(twin: Twin, name: str) -> tuple[np.ndarray, list[float], list[float], Callable[[], None]]:
@@ -530,7 +601,8 @@ def watched(twin: Twin, name: str) -> tuple[np.ndarray, list[float], list[float]
 
 def test_the_top_cube_of_a_two_cube_stack_goes_on_another_cube_and_the_lower_one_stays(twin):
     half = block("cube").half_size[2]
-    stacked(twin, Placed("base", "cube", PICK_XY, rgba=BLUE), Placed("blue", "cube", TARGET_XY, 20.0, BLUE))
+    sinking = stacked(twin, Placed("base", "cube", PICK_XY, rgba=BLUE),
+                      Placed("blue", "cube", TARGET_XY, 20.0, BLUE))
     clock = Clock()
     strategy = built(label="red", place_on="blue")
     cameras = Cameras(twin, clock, ("red", "base", "blue"), nearest_grab=True)
@@ -553,10 +625,11 @@ def test_the_top_cube_of_a_two_cube_stack_goes_on_another_cube_and_the_lower_one
     assert max(shift) < 0.002 and min(heights) > half - 0.0004 and base[2] == pytest.approx(half, abs=0.0005)
     assert max(tilt_deg(r) for r in (red_rot, blue_rot, base_rot)) < 2.0
     assert all(c < 0.5 for c in contact(twin, "red"))
+    assert not sinking.artefacts(), sinking.depth
 
 
 def test_a_cube_comes_off_a_cuboid_to_a_table_spot_and_the_cuboid_stays(twin):
-    stacked(twin, Placed("long", "cuboid", PICK_XY, -30.0, BLUE))
+    sinking = stacked(twin, Placed("long", "cuboid", PICK_XY, -30.0, BLUE))
     clock = Clock()
     spot = (0.22, 0.07)
     strategy = built(label="red", place_x_m=spot[0], place_y_m=spot[1])
@@ -578,11 +651,13 @@ def test_a_cube_comes_off_a_cuboid_to_a_table_spot_and_the_cuboid_stays(twin):
     assert red[2] == pytest.approx(block("cube").half_size[2], abs=0.0005) and tilt_deg(red_rot) < 2.0
     assert max(shift) < 0.002 and min(heights) > half - 0.0004 and long[2] == pytest.approx(half, abs=0.0005)
     assert tilt_deg(long_rot) < 2.0
+    assert not sinking.artefacts(), sinking.depth
 
 
 def test_a_target_that_disappears_sends_the_cube_back_onto_its_stack(twin):
     half = block("cube").half_size[2]
-    stacked(twin, Placed("base", "cube", PICK_XY, rgba=BLUE), Placed("blue", "cube", TARGET_XY, rgba=BLUE))
+    sinking = stacked(twin, Placed("base", "cube", PICK_XY, rgba=BLUE),
+                      Placed("blue", "cube", TARGET_XY, rgba=BLUE))
     clock = Clock()
     strategy = built(label="red", place_on="blue")
     cameras = Cameras(twin, clock, ("red", "base", "blue"), nearest_grab=True)
@@ -605,10 +680,11 @@ def test_a_target_that_disappears_sends_the_cube_back_onto_its_stack(twin):
     assert max(shift) < 0.002 and min(heights) > half - 0.0004 and base[2] == pytest.approx(half, abs=0.0005)
     assert tilt_deg(red_rot) < 2.0 and tilt_deg(base_rot) < 2.0
     assert all(c < 0.5 for c in contact(twin, "red"))
+    assert not sinking.artefacts(), sinking.depth
 
 
 def test_a_cube_goes_to_a_table_spot(twin):
-    add_blocks(twin, Placed("red", "cube", PICK_XY, rgba=RED))
+    sinking = add_blocks(twin, Placed("red", "cube", PICK_XY, rgba=RED))
     clock = Clock()
     spot = (0.22, 0.07)
     strategy = built(label="red", place_x_m=spot[0], place_y_m=spot[1])
@@ -624,11 +700,12 @@ def test_a_cube_goes_to_a_table_spot(twin):
     red, rotation = truth(twin, "red")
     assert np.linalg.norm(red[:2] - np.array(spot)) < 0.004
     assert red[2] == pytest.approx(block("cube").half_size[2], abs=0.0005) and tilt_deg(rotation) < 2.0
+    assert not sinking.artefacts(), sinking.depth
 
 
 def test_a_cube_goes_on_a_yawed_cuboid_lined_up_with_it(twin):
-    add_blocks(twin, Placed("red", "cube", PICK_XY, rgba=RED),
-               Placed("long", "cuboid", TARGET_XY, -30.0, BLUE))
+    sinking = add_blocks(twin, Placed("red", "cube", PICK_XY, rgba=RED),
+                         Placed("long", "cuboid", TARGET_XY, -30.0, BLUE))
     clock = Clock()
     strategy = built(label="red", place_on="long", place_on_block="cuboid")
     runner = StrategyRunner(twin, strategy, objects=Cameras(twin, clock, ("red", "long")))
@@ -645,10 +722,12 @@ def test_a_cube_goes_on_a_yawed_cuboid_lined_up_with_it(twin):
     assert red[2] == pytest.approx(2 * block("cuboid").half_size[2] + block("cube").half_size[2], abs=0.001)
     assert long[2] == pytest.approx(block("cuboid").half_size[2], abs=0.0005)
     assert abs(((yaw_deg(red_rot) - yaw_deg(long_rot) + 45) % 90) - 45) < 4.0 and tilt_deg(red_rot) < 2.0
+    assert not sinking.artefacts(), sinking.depth
 
 
 def test_a_target_that_disappears_sends_the_cube_back_where_it_was(twin):
-    add_blocks(twin, Placed("red", "cube", PICK_XY, rgba=RED), Placed("blue", "cube", TARGET_XY, rgba=BLUE))
+    sinking = add_blocks(twin, Placed("red", "cube", PICK_XY, rgba=RED),
+                         Placed("blue", "cube", TARGET_XY, rgba=BLUE))
     clock = Clock()
     strategy = built(label="red", place_on="blue")
     cameras = Cameras(twin, clock, ("red", "blue"))
@@ -668,6 +747,7 @@ def test_a_target_that_disappears_sends_the_cube_back_where_it_was(twin):
     assert np.linalg.norm(red[:2] - picked[:2]) < 0.004
     assert red[2] == pytest.approx(block("cube").half_size[2], abs=0.0005) and tilt_deg(rotation) < 2.0
     assert all(c < 0.5 for c in contact(twin, "red"))
+    assert not sinking.artefacts(), sinking.depth
 
 
 def test_a_cube_that_falls_off_is_reported(twin):
@@ -688,7 +768,8 @@ def test_a_cube_that_falls_off_is_reported(twin):
 
 
 def test_a_cube_dropped_on_the_way_is_picked_again_and_placed(twin):
-    add_blocks(twin, Placed("red", "cube", PICK_XY, rgba=RED), Placed("blue", "cube", TARGET_XY, rgba=BLUE))
+    sinking = add_blocks(twin, Placed("red", "cube", PICK_XY, rgba=RED),
+                         Placed("blue", "cube", TARGET_XY, rgba=BLUE))
     clock = Clock()
     strategy = built(label="red", place_on="blue", wait_s=10.0)
     runner = StrategyRunner(twin, strategy, objects=Cameras(twin, clock, ("red", "blue")))
@@ -705,10 +786,12 @@ def test_a_cube_dropped_on_the_way_is_picked_again_and_placed(twin):
     blue, _ = truth(twin, "blue")
     assert np.linalg.norm(red[:2] - blue[:2]) < 0.004
     assert red[2] == pytest.approx(blue[2] + 2 * block("cube").half_size[2], abs=0.001)
+    assert not sinking.artefacts(), sinking.depth
 
 
 def test_jev_judges_the_pick_and_the_cube_still_goes_on_top(twin):
-    add_blocks(twin, Placed("red", "cube", PICK_XY, rgba=RED), Placed("blue", "cube", TARGET_XY, 15.0, BLUE))
+    sinking = add_blocks(twin, Placed("red", "cube", PICK_XY, rgba=RED),
+                         Placed("blue", "cube", TARGET_XY, 15.0, BLUE))
     clock = Clock()
     judge = ContactJudge(twin, "red")
     strategy = built(judge, label="red", place_on="blue")
@@ -720,12 +803,13 @@ def test_jev_judges_the_pick_and_the_cube_still_goes_on_top(twin):
     assert runner.status.stopped_because == "zadanie wykonane", (strategy.status, strategy.place)
     assert judge.points == ["close", "lift"] and strategy.place.outcome == "placed"
     assert not strategy.judging.needs_review
+    assert not sinking.artefacts(), sinking.depth
 
 
 @pytest.mark.render
 def test_the_wrist_look_and_jev_pick_a_cube_and_place_it_on_another(twin):
-    add_blocks(twin, Placed("red", "cube", (0.205, -0.05), 25.0, RED),
-               Placed("blue", "cube", TARGET_XY, 10.0, BLUE))
+    sinking = add_blocks(twin, Placed("red", "cube", (0.205, -0.05), 25.0, RED),
+                         Placed("blue", "cube", TARGET_XY, 10.0, BLUE))
     clock = Clock()
     judge = ContactJudge(twin, "red")
     strategy = built(judge, label="red", place_on="blue", wrist_camera="wrist")
@@ -743,12 +827,13 @@ def test_the_wrist_look_and_jev_pick_a_cube_and_place_it_on_another(twin):
     assert np.linalg.norm(red[:2] - blue[:2]) < 0.004 and tilt_deg(red_rot) < 2.0
     assert red[2] == pytest.approx(blue[2] + 2 * block("cube").half_size[2], abs=0.001)
     assert abs(((yaw_deg(red_rot) - yaw_deg(blue_rot) + 45) % 90) - 45) < 4.0
+    assert not sinking.artefacts(), sinking.depth
 
 
 @pytest.mark.render
 def test_a_cube_pushed_after_the_wrist_look_is_centred_between_the_jaw_tips_and_still_placed(twin):
-    add_blocks(twin, Placed("red", "cube", (0.205, -0.05), 25.0, RED),
-               Placed("blue", "cube", TARGET_XY, 10.0, BLUE))
+    sinking = add_blocks(twin, Placed("red", "cube", (0.205, -0.05), 25.0, RED),
+                         Placed("blue", "cube", TARGET_XY, 10.0, BLUE))
     clock = Clock()
     strategy = built(label="red", place_on="blue", wrist_camera="wrist")
     cameras = Cameras(twin, clock, ("red", "blue"))
@@ -773,6 +858,7 @@ def test_a_cube_pushed_after_the_wrist_look_is_centred_between_the_jaw_tips_and_
     red, red_rot = truth(twin, "red")
     blue, _ = truth(twin, "blue")
     assert np.linalg.norm(red[:2] - blue[:2]) < 0.004 and tilt_deg(red_rot) < 2.0
+    assert not sinking.artefacts(), sinking.depth
 
 
 # --------------------------------------------------------------------------- places at a pose
@@ -833,8 +919,10 @@ class PoseRun:
     #: (simulated time [s], attempt, phase) at each change of phase, and the strategy's last status.
     timeline: list[tuple[float, int, str]] = field(default_factory=list)
     status: dict[str, Any] = field(default_factory=dict)
-    #: Looks between the open jaw tips that found the block off centre.
+    #: Looks between the open jaw tips that found the block off centre, and the deepest contact of any two
+    #: blocks or a block and the table [m].
     corrections: int = 0
+    sank_m: float = 0.0
 
     @property
     def ok(self) -> bool:
@@ -880,8 +968,7 @@ def next_to_scene(seed: int) -> PoseScene:
     return PoseScene(blocks, labels, Step("red cube", Place("next_to", ("blue cube",), side, gap)))
 
 
-#: Artefact limits: how far a block may sink below where it rests, and its speed [m, m/s].
-SINK_M = 0.0007
+#: How fast a block may move [m/s].
 SPEED_MPS = 0.5
 
 
@@ -892,11 +979,10 @@ def place_at_pose(twin: Twin, scene: PoseScene, on_carry: Callable[[Twin], None]
     pose with truth-fed trackers and measure the result. An "on" step goes to its block (`place_on`), the
     others to the pose. `on_carry` runs once as the carry starts; `offset` shifts every detection.
 
-    The watch also looks for artefacts: a block below its resting height on the table, the placed block
-    below its resting height on its supports, a block faster than `SPEED_MPS`, a block in the jaws at the
-    end."""
+    The watch also looks for artefacts: blocks that sink into each other or into the table, a block faster
+    than `SPEED_MPS`, a block in the jaws at the end."""
     started = time.monotonic()
-    add_blocks(twin, *scene.blocks)
+    sinking = add_blocks(twin, *scene.blocks, labels=scene.labels)
     settle(twin)
     held, *others = (b.name for b in scene.blocks)
     names = {label: name for name, label in scene.labels.items()}
@@ -918,12 +1004,8 @@ def place_at_pose(twin: Twin, scene: PoseScene, on_carry: Callable[[Twin], None]
     start = {name: truth(twin, name)[0] for name in others}
     shift: list[float] = [0.0]
     carried: list[bool] = []
-    rest = {b.name: block(b.kind).half_size[2] for b in scene.blocks}
-    lowest = {name: math.inf for name in rest}
-    fastest = {name: 0.0 for name in rest}
-    last = {name: truth(twin, name)[0] for name in rest}
-    #: The placed block's lowest height above where it would rest on its supports, while over them [m].
-    over = [math.inf]
+    fastest = {b.name: 0.0 for b in scene.blocks}
+    last = {name: truth(twin, name)[0] for name in fastest}
     timeline: list[tuple[float, int, str]] = []
 
     def watch() -> None:
@@ -932,17 +1014,10 @@ def place_at_pose(twin: Twin, scene: PoseScene, on_carry: Callable[[Twin], None]
             on_carry(twin)
             start.update({name: truth(twin, name)[0] for name in others})
         shift.append(max(float(np.linalg.norm(truth(twin, n)[0] - p0)) for n, p0 in start.items()))
-        for name in rest:
+        for name in fastest:
             p = truth(twin, name)[0]
-            lowest[name] = min(lowest[name], float(p[2]))
             fastest[name] = max(fastest[name], float(np.linalg.norm(p - last[name])) / TWIN_PERIOD)
             last[name] = p
-        if supports:
-            under = [truth(twin, names[label])[0] for label in supports]
-            centre = np.mean([p[:2] for p in under], axis=0)
-            if np.linalg.norm(last[held][:2] - centre) < block(kinds[held]).half_size[0]:
-                top = max(float(p[2]) + rest[names[label]] for p, label in zip(under, supports, strict=True))
-                over[0] = min(over[0], float(last[held][2]) - top - rest[held])
         phase = strategy.status.phase if strategy.started else ""
         if phase and (not timeline or timeline[-1][2] != phase):
             timeline.append((round(clock.t, 2), strategy.status.attempt, phase))
@@ -958,23 +1033,19 @@ def place_at_pose(twin: Twin, scene: PoseScene, on_carry: Callable[[Twin], None]
         goal = truth(twin, names[supports[0]])[0][:2]
     error = float(np.linalg.norm(position[:2] - goal))
     after = truth_world(twin, scene.labels)
-    artefacts = []
-    for name, height in rest.items():
-        if lowest[name] < height - SINK_M:
-            sank = (height - lowest[name]) * 1000
-            artefacts.append(f"{scene.labels[name]} sank {sank:.2f} mm into the table")
+    artefacts = sinking.artefacts()
+    for name in fastest:
         if fastest[name] > SPEED_MPS:
             artefacts.append(f"{scene.labels[name]} moved at {fastest[name]:.2f} m/s")
         if max(contact(twin, name)) > 0.5:
             artefacts.append(f"{scene.labels[name]} in the jaws")
-    if over[0] < -SINK_M:
-        artefacts.append(f"{scene.labels[held]} sank {-over[0] * 1000:.2f} mm into its supports")
     status = jsonable({"run": strategy.status, "grasp": strategy.grasp, "wrist": strategy.wrist,
                        "place": strategy.place})
     run = PoseRun(strategy.place.outcome, error, tilt_deg(rotation), max(shift), holds(scene.step, after),
                   pose, strategy.status.attempt, artefacts, strategy.status.stopped_because, clock.t,
                   time.monotonic() - started, timeline, status,
-                  sum(look.verdict in ("moved", "off") for look in strategy.wrist.close_looks))
+                  sum(look.verdict in ("moved", "off") for look in strategy.wrist.close_looks),
+                  sinking.deepest())
     return run, strategy
 
 
@@ -985,7 +1056,7 @@ def test_a_cuboid_goes_across_two_cubes_as_a_bridge(twin):
 
     assert run.outcome == "placed", (strategy.status, strategy.place)
     assert run.error_m < 0.004 and run.tilt_deg < 2.0, run.line()
-    assert run.others_shift_m < 0.002 and run.holds[0], run.line()
+    assert run.others_shift_m < 0.002 and run.holds[0] and not run.artefacts, run.line()
     assert strategy.place.rests_on == ("blue cube", "green cube") and strategy.place.error_m < 0.004
     red, red_rot = truth(twin, "red")
     assert red[2] == pytest.approx(run.pose.z_m + block("cuboid").half_size[2], abs=0.001)
@@ -1003,7 +1074,7 @@ def test_a_cube_goes_next_to_a_cube_with_the_jaw_clear_of_it(twin):
 
     assert run.outcome == "placed", (strategy.status, strategy.place)
     assert run.error_m < 0.004 and run.tilt_deg < 2.0 and run.holds[0], run.line()
-    assert run.others_shift_m < 0.001, run.line()
+    assert run.others_shift_m < 0.001 and not run.artefacts, run.line()
     assert all(c < 0.5 for c in contact(twin, "blue"))
     red, _ = truth(twin, "red")
     assert red[2] == pytest.approx(block("cube").half_size[2], abs=0.0005)
@@ -1025,6 +1096,7 @@ def test_cubes_nudged_as_the_cuboid_is_carried_take_the_bridge_with_them(twin):
     red, red_rot = truth(twin, "red")
     assert np.linalg.norm(red[:2] - (np.array([run.pose.x_m, run.pose.y_m]) + nudge)) < 0.004
     assert tilt_deg(red_rot) < 2.0 and run.holds[0] and run.others_shift_m < 0.002, run.line()
+    assert not run.artefacts, run.line()
 
 
 def on_scene(seed: int) -> PoseScene:
@@ -1068,7 +1140,8 @@ def as_run(scenario: str, seed: int, run: PoseRun, offset: tuple[float, float],
         reason = "artefact" if run.artefacts else ""
     details = {"settings": dict(settings), "camera_offset_m": offset, "why": "" if done else run.why,
                "outcome": run.outcome, "tilt_deg": run.tilt_deg, "others_shift_m": run.others_shift_m,
-               "holds": run.holds, "pose": run.pose, "timeline": run.timeline, "status": run.status}
+               "holds": run.holds, "pose": run.pose, "timeline": run.timeline, "status": run.status,
+               "sank_m": run.sank_m}
     return Run(f"pick_place: {scenario}", seed, done and not run.artefacts, run.attempts, run.error_m, reason,
                run.artefacts, run.sim_s, run.wall_s, details, run.corrections)
 
@@ -1079,9 +1152,8 @@ def as_run(scenario: str, seed: int, run: PoseRun, offset: tuple[float, float],
     for name, (_, settings, _, _) in SCENARIOS.items()])
 def test_seeded_campaign(twin_robots, scenario):
     """Seeded scenes, each in a fresh twin: at least the scenario's share of runs places the block within
-    8 mm of its place and level, by truth and by the planner's check. Without a camera error, a block the
-    strategy calls placed is where truth says, and no other block moves 2 mm. Artefacts are printed and
-    kept in the campaign records, where they make a run fail.
+    8 mm of its place and level, by truth and by the planner's check, without an artefact. Without a camera
+    error, a block the strategy calls placed is where truth says, and no other block moves 2 mm.
 
     The runs with a camera error only measure: their bar is zero, and they run only for a campaign folder
     (`SOARM_CAMPAIGN_DIR`)."""
@@ -1100,7 +1172,7 @@ def test_seeded_campaign(twin_robots, scenario):
         results.append(run)
     report = "\n".join(f"seed {k}: {run.line()}" for k, run in enumerate(results))
     print(report)
-    good = [r for r in results if r.outcome == "placed" and r.ok and r.holds[0]]
+    good = [r for r in results if r.outcome == "placed" and r.ok and r.holds[0] and not r.artefacts]
     assert len(good) >= math.ceil(share * runs - 1e-9), report
     if not error:
         assert all(r.ok and r.holds[0] for r in results if r.outcome == "placed"), report

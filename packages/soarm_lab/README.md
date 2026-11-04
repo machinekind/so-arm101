@@ -629,6 +629,10 @@ No arm moves and no model is asked.
   the wrist camera, also with every camera 5 mm off; both plans again with the middle cube knocked off
   mid-build; a bridge.
 
+The pick_place and build scenarios step the physics every 1 ms, not the twin's own 5 ms, so a block let
+go a few millimetres above another lands without sinking into it. They check at every physics step that
+no block sinks more than 0.7 mm into another block or the table; a run where one does counts as failed.
+
 ```bash
 RUNS=50 OUT=workspace/campaign/tonight bash jobs/overnight.sh
 uv run soarm-lab campaign report workspace/campaign/tonight
