@@ -329,10 +329,11 @@ class RobotKinematics:
         Ti = inverse(self.tcp(joints))
         return Ti[:3, :3] @ (0.5 * (fixed + moving)) + Ti[:3, 3]
 
-    def jaw_reach(self, gripper: float) -> float:
+    def jaw_reach(self, gripper: float, *, moving: bool = False) -> float:
         """Return the farthest jaw collision point beyond the TCP along `spec.tcp_approach` [m].
 
-        Use collision geoms on `spec.jaw_bodies` at `gripper` [app units].
+        Use collision geoms on `spec.jaw_bodies` at `gripper` [app units]. With `moving`, use only the
+        jaw body that carries the moving fingertip. A negative value lies behind the TCP.
         Raise ValueError if those bodies are missing or have no supported collision geoms."""
         bodies = [name for name in self.spec.jaw_bodies if name]
         if not bodies:
@@ -343,6 +344,11 @@ class RobotKinematics:
         a = d.site_xmat[self.site_id].reshape(3, 3) @ self._approach
         a = a / np.linalg.norm(a)
         ids = {m.body(self.prefix + name).id for name in bodies}
+        if moving:
+            tip = self.spec.fingertips[1]
+            if not tip:
+                raise ValueError(f"{self.spec.name}: no moving fingertip in the robot description")
+            ids &= {int(m.geom_bodyid[m.geom(self.prefix + tip).id])}
         best = -np.inf
         for g in range(m.ngeom):
             if int(m.geom_bodyid[g]) not in ids or not (m.geom_contype[g] or m.geom_conaffinity[g]):

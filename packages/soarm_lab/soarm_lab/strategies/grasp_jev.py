@@ -427,6 +427,8 @@ class GraspJevStrategy(GraspStrategy):
     """Grasps a block as `grasp` does; Jev judges each close and lift and picks the next step."""
 
     settings = GraspJevSettings
+    #: Refuse an empty `wrist_camera`. Subclasses with an optional camera turn this off.
+    camera_required = True
 
     def __init__(self, settings: GraspJevSettings | None = None, *, judge: Judge | None = None,
                  threaded: bool = True, clock: Callable[[], float] = time.monotonic,
@@ -448,7 +450,7 @@ class GraspJevStrategy(GraspStrategy):
                              f"is {config.answer_timeout_s}")
         #: Case-sensitive camera key in `obs.frames`.
         self.wrist_camera = config.wrist_camera.strip()
-        if not self.wrist_camera:
+        if not self.wrist_camera and self.camera_required:
             raise ValueError("grasp_jev: wrist_camera must not be empty")
         #: Judge setup is deferred until `start`.
         self.judge: Judge = judge if judge is not None else JevJudge(config.model.strip())
@@ -831,7 +833,7 @@ class GraspJevStrategy(GraspStrategy):
         Then rise with the jaw open before re-aiming.
         """
         if not self._released:
-            self._set_jaw_goal(self.cmd_open)
+            self._set_jaw_goal(self.release_cmd)
             self._ramp_jaw()
             jaw_open = abs(self.reading.q - float(self.q_cmd[self._g])) <= self.kin.spec.jaw.margin
             if self._jaw_ready() and jaw_open:
@@ -839,10 +841,9 @@ class GraspJevStrategy(GraspStrategy):
                 # Move toward the fixed jaw (-u) to clear its tip before rising.
                 u = np.array([math.cos(self._psi), math.sin(self._psi)])
                 eased = self.tcp_cmd[:2] - self.ease_off_m * u
-                hover_z = self.config.touch_z + self.config.hover_m
                 self._eased = False
                 self._ease_point = np.array([*eased, float(self.tcp_cmd[2])])
-                self._release_point = np.array([*eased, max(hover_z, float(self.tcp_cmd[2]))])
+                self._release_point = np.array([*eased, self._let_go_rise_z()])
             elif self._t - self._phase_t0 >= JAW_WAIT_S:
                 gaps = f"{self.grasp.jaw_gap_m * 1000:.0f} mm zamiast {self.gap_open_m * 1000:.0f} mm"
                 return self._halt(f"szczeka nie otworzyla sie w {JAW_WAIT_S:.0f} s ({gaps})",
@@ -854,11 +855,25 @@ class GraspJevStrategy(GraspStrategy):
                 return self._drive(self._ease_point, self.descend_step_m)
             self._eased = True
         if self._arrived(self._release_point):
-            assert self._regrasp_xy is not None
-            self._retarget_xy = self._regrasp_xy.copy()
-            self._start_rise(RETARGET)
-            return None
+            return self._after_let_go()
         return self._drive(self._release_point, self.approach_step_m)
+
+    @property
+    def release_cmd(self) -> float:
+        """Return the gripper command that releases a held block [app units]."""
+        return self.cmd_open
+
+    def _let_go_rise_z(self) -> float:
+        """Return the TCP height the open hand rises to after easing off [m, base frame]."""
+        hover_z = self.config.touch_z + self.config.hover_m
+        return max(hover_z, float(self.tcp_cmd[2]))
+
+    def _after_let_go(self) -> Action | None:
+        """Re-aim at the released block once the open hand has risen."""
+        assert self._regrasp_xy is not None
+        self._retarget_xy = self._regrasp_xy.copy()
+        self._start_rise(RETARGET)
+        return None
 
     @property
     def ease_off_m(self) -> float:

@@ -53,6 +53,7 @@ touch_jev = "soarm_lab.strategies.touch_jev:JevTouchStrategy"
 grasp = "soarm_lab.strategies.grasp:GraspStrategy"
 grasp_jev = "soarm_lab.strategies.grasp_jev:GraspJevStrategy"
 grasp_wrist = "soarm_lab.strategies.wrist:WristGraspStrategy"
+pick_place = "soarm_lab.strategies.pick_place:PickPlaceStrategy"
 
 [project.scripts]
 soarm-lab = "soarm_lab.cli:main"
