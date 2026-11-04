@@ -213,6 +213,7 @@ def test_its_settings_become_the_panel_form():
     fields = {field.name: field for field in load_strategy(NAME).fields}
 
     assert list(fields) == TOUCH_FIELDS + ["block", "probe", "open_margin_m", "squeeze_m", "grasp_depth",
+                                           "straddle_push_m", "close_on_stall_m",
                                            "lift_m", "hold_s", "max_attempts", "carry_s", "release", "wait_s",
                                            "recover_m", "grasp_source", "library_dir", "min_score",
                                            "max_tilt_deg"]
@@ -363,6 +364,64 @@ def test_a_coarse_pose_off_along_the_jaws_is_grasped_after_a_sideways_retarget(t
     assert strategy.status.attempt == (2 if sign < 0 else 3)
     assert max(pushed) < 0.015
     assert truth(twin, "cube")[0][2] > 0.04
+
+
+#: A lower block standing against the cube along the jaws: its half sizes [m] and a mass the jaw cannot push.
+STEP_HALF = (0.03, 0.0145, 0.010)
+STEP_MASS = 2.0
+
+
+def add_cube_by_a_step(twin: Twin, side: int) -> None:
+    """The cube at `BLOCK_XY` and, 3 mm from it on the moving jaw's side (`side` 1) or the fixed jaw's
+    (`side` -1), a heavy block lower than the cube, across the jaws."""
+    cube = block("cube")
+    psi = closing_heading()
+    u = np.array([math.cos(psi), math.sin(psi)])
+    xy = np.asarray(BLOCK_XY) + side * u * (cube.half_size[0] + 0.003 + STEP_HALF[1])
+    twin.configure(objects=[twin_scene.Box("cube", cube.half_size, BLOCK_XY, rgba=(0.85, 0.25, 0.2, 1.0),
+                                           mass=cube.mass),
+                            twin_scene.Box("step", STEP_HALF, (float(xy[0]), float(xy[1])),
+                                           rgba=(0.2, 0.4, 0.85, 1.0), mass=STEP_MASS)],
+                   grasp_sensors=["cube"])
+    twin.connect("sim", threaded=False)
+    with twin.lock:
+        model, data = twin.scene.model, twin.scene.data
+        for name in ("cube", "step"):
+            g = model.geom(name).id
+            model.geom_solref[g] = STIFF_SOLREF
+            model.geom_solimp[g][:2] = STIFF_SOLIMP
+            model.geom_priority[g] = 1
+        yaw = psi + math.pi / 2
+        adr = model.jnt_qposadr[model.body_jntadr[model.body("step").id]]
+        data.qpos[adr + 3:adr + 7] = (math.cos(yaw / 2), 0.0, 0.0, math.sin(yaw / 2))
+        mujoco.mj_forward(model, data)
+
+
+@pytest.mark.parametrize("side", [1, -1], ids=["under the moving tip", "under the fixed tip"])
+@pytest.mark.parametrize("close_on_stall_m", [0.003, 0.0], ids=["default", "off"])
+def test_a_jaw_tip_stopped_low_beside_the_cube_closes_there(twin, side: int, close_on_stall_m: float):
+    """One open tip comes down on the edge of a lower block standing against the cube, below the cube's top.
+    The jaw closes where it stopped and lifts the cube. With `close_on_stall_m` off it reads as a tip on the
+    cube, rises, tries beside and runs out of attempts."""
+    add_cube_by_a_step(twin, side)
+    clock = Clock()
+    strategy = load_strategy(NAME).create({"carry_s": 1.0, "close_on_stall_m": close_on_stall_m})
+    assert isinstance(strategy, GraspStrategy)
+    runner = StrategyRunner(twin, strategy, objects=coarse(twin, "cube", clock, np.zeros(2)))
+    step, _ = truth(twin, "step")
+
+    runner.start(threaded=False)
+    drive(twin, runner, 60.0, clock)
+
+    if close_on_stall_m:
+        assert runner.status.stopped_because == "zadanie wykonane", (strategy.status, strategy.grasp)
+        assert strategy.grasp.low_closes == 1 and strategy.grasp.straddle_stalls == 0
+        assert strategy.status.attempt == 1
+        assert truth(twin, "cube")[0][2] > 0.04 and all(c > 0.5 for c in contact(twin, "cube"))
+    else:
+        assert not runner.status.success and strategy.status.stopped_because.startswith("wyczerpane proby")
+        assert strategy.grasp.low_closes == 0 and strategy.grasp.straddle_stalls == 3
+    assert np.linalg.norm(truth(twin, "step")[0] - step) < 0.002
 
 
 @pytest.mark.parametrize("probe", [False, True], ids=["default", "probe"])

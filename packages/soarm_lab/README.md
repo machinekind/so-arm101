@@ -115,7 +115,11 @@ grasp:
   open_margin_m: 0.008
   squeeze_m: 0.008
   grasp_depth: 0.5
+  straddle_push_m: 0.004   # how far the straddle pushes past a light touch
+  close_on_stall_m: 0.003  # a stall with both tips this far below the top closes there; 0: off
   lift_m: 0.04
+  sag_m: 0.02              # a still arm this far below a lift or hover point counts as there
+  stall_s: 2.0             # a still arm short of its point this long ends the run
   carry_s: 10.0
   wait_s: 20.0
   time_limit_s: 120.0
@@ -326,10 +330,23 @@ either, the hand stays straight down and the stop reason says "dlon pochylona po
 bloku". `GraspStatus.tilt_deg` reports the tilt, and the panel shows it. With `probe: true` the
 hand stays straight down.
 
+The straddle stops on a stall once the arm stands more than `straddle_push_m` above where it should
+be. If both jaw tips are then at least `close_on_stall_m` below the block's top, or the hand is within
+5 mm of the grasp point, the fingers are already beside the block: the jaw closes where the arm stands,
+and the usual close, look and lift checks decide whether it holds. Otherwise a tip stands on the block.
 A tip stall retries half the short side away. Retries alternate sides within `max_attempts`.
 With the probe on, each retry probes again. Without the probe, an empty close after a sideways
 retry tries the other side while attempts remain. Any other empty close or motion timeout
 ends the run. Touch's lag guard, `time_limit_s` and the panel's Stop also apply.
+
+Servos without an integral term settle short under load, and friction then holds a joint where it
+hangs until its command comes back down to it. So on the way up and at the hover an arm that stands
+still at most `sag_m` below its point, and mostly straight below it, counts as there. A descent expects
+a joint that hung short at its start to stay put until its command reaches it, so that slack is not
+read as a stall. An arm that stands still `stall_s` short of any point the strategy waits for ends the
+run; the note names the phase, how far the hand stands from the point and the joints that lag, in
+degrees, for example "w gore znad bloku: ramie stoi 29 mm pod celem (wrist_flex 12.7 st., elbow_flex
+10.3 st., shoulder_lift 2.4 st. za malo) - koniec". The same holds for `touch`, `grasp_wrist`, `grasp_jev` and `pick_place`.
 
 The twin's simulated blocks have stiff contacts, so the probe stalls on their top as on the real
 arm and `need_contact` can stay on. With `need_contact: false`, reaching the probe bottom uses the

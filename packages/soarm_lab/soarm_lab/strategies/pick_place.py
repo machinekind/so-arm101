@@ -875,7 +875,7 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         centre = aim + float((mid - aim) @ u) * u
         T = kin.tcp(measured)
         self._hand_xy = rot2(-heading(kin, measured)) @ (centre - T[:2, 3])
-        self._hang = self._grasp_z - self._bottom()
+        self._hang = float(self._close_at[2]) - self._bottom()
         self._pick_xy, self._pick_aim = centre, aim.copy()
         yaw = known_yaw(self.block_rotation)
         # Squeezed faces lie flat on the pads, so the block sits a whole quarter turn from the heading.

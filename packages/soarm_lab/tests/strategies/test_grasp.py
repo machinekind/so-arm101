@@ -262,6 +262,7 @@ def follow(s: GraspStrategy, joints: dict[str, float], objects: Objects | None, 
            command: Mapping[str, float] | None = None,
            on_phase: dict[str, Callable[[float], None]] | None = None,
            trace: list[tuple[float, GraspStatus]] | None = None,
+           offset_of: Callable[[Mapping[str, float]], float] | None = None,
            ) -> tuple[list[Action], list[str], dict[str, float], float]:
     """Run up to `ticks` ticks, stopping on `done`.
 
@@ -275,6 +276,7 @@ def follow(s: GraspStrategy, joints: dict[str, float], objects: Objects | None, 
     the first tick entering a phase. The next observation records a drop in `block.dropped_t`.
     `commands`, `measured` and `trace` collect commands, measured joints and timestamped grasp
     states. `command` supplies the initial supervisor command, defaulting to measured joints.
+    `offset_of` gives the TCP height offset for each command instead of `offset_z`.
     Return actions, phases, final joints and final time.
     """
     answers, phases = [], []
@@ -298,7 +300,7 @@ def follow(s: GraspStrategy, joints: dict[str, float], objects: Objects | None, 
             on_phase[phases[-1]](t)
         t += 1 / s.hz
         command = supervised(command, a.target, None if cap_deg_s is None else cap_deg_s / s.hz)
-        arm = servo(joints, held(s, command, offset_z), share)
+        arm = servo(joints, held(s, command, offset_z if offset_of is None else offset_of(command)), share)
         # Keep the previous jaw angle until the contact model runs.
         arm[g] = joints[g]
         between = block is not None and block.between(arm)
@@ -429,6 +431,8 @@ def test_the_probe_height_comes_from_the_block_and_touch_z_zero_means_automatic(
     ({"close_jaw": False, "probe": True}, "grasp: close_jaw must be on"),
     ({"max_tilt_deg": -1.0}, r"grasp: max_tilt_deg must lie within \[0, 45\]"),
     ({"max_tilt_deg": 50.0}, r"grasp: max_tilt_deg must lie within \[0, 45\]"),
+    ({"straddle_push_m": 0.0}, "grasp: straddle_push_m must be positive"),
+    ({"close_on_stall_m": -0.001}, "grasp: close_on_stall_m must be zero or more"),
 ])
 def test_settings_are_validated(settings: dict, match: str):
     with pytest.raises(ValueError, match=match):
@@ -653,6 +657,45 @@ def test_a_rise_that_stops_beyond_sag_m_ends_and_names_the_joints_that_lag():
     assert s.status.stopped_because == note
     # It ends `stall_s` after the arm stopped, not at the run's time limit.
     assert s.config.stall_s <= phases.count("rise") / s.hz <= s.config.stall_s + 0.6
+
+
+def drifting(s: GraspStrategy, below_z: float, offset_z: float) -> Callable[[Mapping[str, float]], float]:
+    """An arm whose TCP stands `offset_z` above a command lower than `below_z` [m]: a sag that changes with
+    the arm's pose, so the stall reference drifts with no contact."""
+    return lambda command: offset_z if tcp(command)[2] < below_z else 0.0
+
+
+@pytest.mark.parametrize("close_on_stall_m", [0.003, 0.0], ids=["default", "off"])
+def test_a_straddle_that_stalls_with_the_tips_below_the_top_closes_there(close_on_stall_m: float):
+    """The reference drifts by 6 mm once the tips are below the block's top: the jaw closes where the arm
+    stands and the block is lifted. Off, it reads as a tip on the block and rises to try beside."""
+    s = started(seen(), close_on_stall_m=close_on_stall_m)
+    answers, phases, *_ = follow(s, dict(SPEC.home), seen(), 3000, block=block_at(),
+                                 offset_of=drifting(s, 0.021, 0.006))
+
+    if close_on_stall_m:
+        assert answers[-1].success and s.grasp.verdict == "lifted", answers[-1].note
+        assert s.grasp.low_closes == 1 and s.grasp.straddle_stalls == 0 and s.status.attempt == 1
+        assert "szczeka nisko przy bloku - zamykam" in [a.note for a in answers]
+        # It closed where the arm stood, above the grasp target, and the lift counts from there.
+        assert s.grasp.grasp_point is not None and s.grasp.grasp_point[2] > s.grasp_target[2] + 0.005
+        assert s.grasp.lifted_m == pytest.approx(s.grasp_settings.lift_m, abs=0.003)
+    else:
+        assert s.grasp.straddle_stalls >= 1 and s.grasp.low_closes == 0
+        assert contains(runs(phases), ["straddle", "straddled", "rise"])
+
+
+def test_a_straddle_that_stalls_at_the_grasp_target_closes_there():
+    """A drift of 3 mm right at the grasp target: the arm stands there, and the jaw closes."""
+    s = started(seen(), close_on_stall_m=0.0)
+
+    def at_the_target(command: Mapping[str, float]) -> float:
+        return 0.003 if s.status.phase == "straddle" and tcp(command)[2] < s.grasp_target[2] + 5e-4 else 0.0
+
+    answers, *_ = follow(s, dict(SPEC.home), seen(), 3000, block=block_at(), offset_of=at_the_target)
+
+    assert answers[-1].success and s.grasp.verdict == "lifted", answers[-1].note
+    assert s.grasp.low_closes == 1 and s.grasp.straddle_stalls == 0 and s.status.attempt == 1
 
 
 class Aims(GraspStrategy):
