@@ -620,6 +620,8 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         self._table_trusted = True
         self._leg_done = True
         self._releg = False
+        #: The arm did not get to a leg's start in this carry, so the rest of it goes without the leg.
+        self._leg_given_up = False
 
     def start(self, run: RunInfo, obs: Observation) -> None:
         """Start the grasp family's checks, clear the place state and read the approach table."""
@@ -1237,6 +1239,7 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         self._placing, self._place_plan, self._replans, self._over_top = True, None, 0, 0.0
         self._retrying = ""
         self._target_seen, self._rest_seen = None, {}
+        self._leg_given_up = False
         self._check_table()
         self._enter(TARGET)
 
@@ -1325,12 +1328,16 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         assert plan is not None
         lead = plan.lead_point
         if not self._leg_done and lead is not None:
-            if self._arrived(lead, sag=True):
+            # A still arm short of the leg's start gives the leg up in time instead of stopping the run.
+            if self._arrived(lead, sag=True, watch=False):
                 self._leg_done = True
             elif self._timed_out():
-                mm = self.status.distance * 1000
-                return self._halt(f"ramie nie doszlo do poczatku podejscia ({mm:.0f} mm od niego)",
-                                  self.kin.from_q(self.q_cmd))
+                # The arm does not get to the leg's start: on to the hover without the leg.
+                logger.warning("Ramie nie doszlo do poczatku podejscia - niose wprost nad cel")
+                self._leg_done, self._leg_given_up = True, True
+                self._take_plan_place(replace(plan, leg=None))
+                self._move(CARRY_OVER, plan.hover, plan.turn)
+                return self.hold()
             else:
                 return self._drive(lead, self.approach_step_m)
         if self._settled(plan.hover, sag=True) and self._vertical():
@@ -1414,6 +1421,8 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         new = self._plan_place(xy, top, yaw)
         if isinstance(new, str):
             return self._put_back(UNREACHABLE, new)
+        if self._leg_given_up:
+            new = replace(new, leg=None)
         if small and abs(wrap(new.psi - plan.psi)) <= math.radians(LATCH_SAME_DEG):
             if new.leg is not None and float(np.linalg.norm(new.cmd_xy - plan.cmd_xy)) > RELEG_M:
                 # The hand must still arrive along the final leg: back to the leg's start and along it again,

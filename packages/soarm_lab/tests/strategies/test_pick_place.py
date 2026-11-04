@@ -1599,3 +1599,22 @@ def test_after_the_wrist_look_moves_the_aim_the_hand_comes_along_the_leg_again()
     j = min(range(len(opened)), key=lambda i: float(np.linalg.norm(opened[i] - start)))
     assert float(np.linalg.norm(opened[j] - start)) < 5e-4
     assert on_leg(opened[j:], opened[-1], d, 0.03 - 5e-4)
+
+
+def test_a_leg_start_the_arm_does_not_get_to_is_given_up_and_the_run_goes_on(tmp_path):
+    s, world = table_stack(tmp_path)
+    arrived = s._arrived
+
+    def never_at_a_leg_start(point: np.ndarray) -> bool:
+        plan = s._place_plan
+        starts = [s._lead_point] + ([plan.lead_point] if plan is not None else [])
+        if any(start is not None and np.allclose(point, start) for start in starts):
+            return False
+        return arrived(point)
+
+    s._arrived = never_at_a_leg_start  # type: ignore[method-assign]
+    actions, _ = run(s, world, seconds=120.0)
+
+    assert actions[-1].success and s.place.outcome == "placed", s.status.stopped_because
+    assert s.grasp.lead_m == 0.0 and s.place.lead_m == 0.0 and s.place.correction_from == FROM_TABLE
+    assert np.linalg.norm(world.body("red").xy - world.body("blue").xy) < 0.002

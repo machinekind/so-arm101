@@ -35,7 +35,8 @@ bottom of the straddle with the open jaw around the block, before the jaw closes
 with the hand straight down, `lead_in` may give the last horizontal leg into the open-jaw hover. Every
 straddle then starts from a hover the hand reached along that leg: the approach goes to the leg's start
 first, and after the aim moves (a look, a correction or a retry) the hand goes back to the start of the
-leg for the new hover and runs it again, so it always arrives from the same side.
+leg for the new hover and runs it again, so it always arrives from the same side. A leg's start the arm
+does not get to in time is given up, and the hand goes straight on.
 `after_grasp_failed` handles grasp failures. A subclass that can look again (`_looks_again`) also treats
 a jaw closed well inside the block's width as a failed close (`EDGE_GRIP_M`), and retries an empty or
 edge close from the hover within `max_attempts`, with the jaw open on the way up.
@@ -538,6 +539,8 @@ class GraspStrategy(TouchStrategy):
         self._lead_point: np.ndarray | None = None
         self._lead_pending = False
         self._leg_end: np.ndarray | None = None
+        #: Where the TCP was sent when the approach began [m, base frame].
+        self._approach_from = np.zeros(3)
         # Hover hooks remain pending until they return None.
         self._before_descent_pending = False
         self._before_straddle_pending = False
@@ -1128,6 +1131,7 @@ class GraspStrategy(TouchStrategy):
             self._learn_jaw()
         if phase == APPROACH:
             self._lead_point = self._lead_start()
+            self._approach_from = self.tcp_cmd.copy()
         if phase == DESCEND:
             self._before_descent_pending, self._descent_waited = True, False
         if phase == OPEN:
@@ -1157,6 +1161,19 @@ class GraspStrategy(TouchStrategy):
         self.grasp.lead_m = float(np.linalg.norm(leg))
         return start
 
+    def _lead_time(self, start: np.ndarray) -> float:
+        """How long the hand may take from `start` to the leg's start [s]: twice the travel, and
+        `JAW_WAIT_S`."""
+        assert self._lead_point is not None
+        return 2 * float(np.linalg.norm(self._lead_point - start)) / self.config.speed_mps + JAW_WAIT_S
+
+    def _give_up_leg(self) -> None:
+        """The arm did not get to the leg's start in time: go straight on, without the leg."""
+        logger.warning("Ramie nie doszlo do poczatku podejscia - podchodze wprost")
+        self._lead_point, self.grasp.lead_m = None, 0.0
+        # Not again into this hover.
+        self._leg_end = self.straddle_hover.copy()
+
     def _leg_needed(self) -> bool:
         """Whether a leg applies and the hand did not reach the current straddle hover along it. Sets the
         leg's start."""
@@ -1174,10 +1191,14 @@ class GraspStrategy(TouchStrategy):
         With a leg from `lead_in` the hover is the leg's start, and OPEN runs the leg.
         """
         self._ramp_jaw()
+        if self._lead_point is not None and self._t - self._phase_t0 >= self._lead_time(self._approach_from):
+            self._give_up_leg()
         hover = self.hover_point if self._lead_point is None else self._lead_point
+        # A still arm short of a leg's start gives the leg up in time instead of stopping the run.
+        watch = self._lead_point is None
         if self._rot is not None and not self._vertical():
             # Finish turning at the hover within `JAW_WAIT_S`.
-            if self._arrived(hover, sag=True):
+            if self._arrived(hover, sag=True, watch=watch):
                 if not np.isfinite(self._turn_t0):
                     self._turn_t0 = self._t
                 elif self._t - self._turn_t0 >= JAW_WAIT_S:
@@ -1186,13 +1207,14 @@ class GraspStrategy(TouchStrategy):
             return self._drive(hover, self.approach_step_m)
         self._turn_t0 = float("nan")
         # Keep this check here so `_settled` counts only once per tick.
-        if self._settled(hover, sag=True):
+        if self._settled(hover, sag=True, watch=watch):
             if not self.grasp_settings.probe:
                 self.status.attempt += 1
                 # OPEN times its travel to the straddle hover from here, along the leg if there is one.
                 self._rise_point = hover
                 self._lead_pending = False
-                self._leg_end = None if self._lead_point is None else self.straddle_hover.copy()
+                if self._lead_point is not None:
+                    self._leg_end = self.straddle_hover.copy()
                 self._enter(OPEN)
                 return None
             if not self._jaw_ready():
@@ -1322,17 +1344,16 @@ class GraspStrategy(TouchStrategy):
         if self._lead_pending and self._lead_point is not None:
             # Back to the start of the leg into this hover first.
             lead = self._lead_point
-            if not self._arrived(lead, sag=True):
-                travel = float(np.linalg.norm(lead - self._rise_point)) / self.config.speed_mps
-                if self._t - self._phase_t0 >= JAW_WAIT_S + travel:
-                    mm = float(np.linalg.norm(lead - self._tcp_measured)) * 1000
-                    return self._halt(f"ramie nie doszlo do poczatku podejscia ({mm:.0f} mm od niego)",
-                                      self.kin.from_q(self.q_cmd))
+            late = self._t - self._phase_t0 >= self._lead_time(self._rise_point)
+            # A still arm short of the leg's start gives the leg up in time instead of stopping the run.
+            if not self._arrived(lead, sag=True, watch=False) and not late:
                 return self._drive(lead, self.approach_step_m)
+            if late:
+                self._give_up_leg()
             self._lead_pending = False
             self._leg_end = self.straddle_hover.copy()
-            # The rest of the phase is timed from the leg's start.
-            self._rise_point, self._phase_t0, self._settle_count = lead.copy(), self._t, 0
+            # The rest of the phase is timed from here.
+            self._rise_point, self._phase_t0, self._settle_count = self.tcp_cmd.copy(), self._t, 0
         reading = self.reading
         settled = self._settled(self.straddle_hover, sag=True)
         jaw_open = abs(reading.q - float(self.q_cmd[self._g])) <= self.kin.spec.jaw.margin
