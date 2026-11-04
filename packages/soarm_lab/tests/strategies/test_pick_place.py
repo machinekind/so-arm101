@@ -246,6 +246,12 @@ def run(s: PickPlaceStrategy, world: World, seconds: float = 60.0,
     return actions, entered
 
 
+def jaw_low(joints: Mapping[str, float]) -> float:
+    """The jaw's lowest point at `joints` [m above the table]."""
+    T = KIN.tcp(joints)
+    return float((np.vstack(KIN.jaw_points(joints[G])) @ T[:3, :3].T + T[:3, 3])[:, 2].min())
+
+
 def built(**settings: Any) -> PickPlaceStrategy:
     settings.setdefault("judge", "none")
     settings.setdefault("wrist_camera", "")
@@ -272,13 +278,16 @@ def test_its_settings_are_the_grasp_familys_and_the_places():
     jev = [f.name for f in dataclasses.fields(GraspJevSettings)]
 
     assert names[:len(wrist)] == wrist and set(jev) <= set(names)
-    assert names[-18:] == ["judge", "place_on", "place_on_block", "place_x_m", "place_y_m", "place_z_m",
+    assert names[-22:] == ["judge", "place_on", "place_on_block", "place_x_m", "place_y_m", "place_z_m",
                            "place_yaw_deg", "supports", "align_yaw", "carry_clearance_m", "place_gap_m",
-                           "place_speed_mps", "release_margin_m", "retreat_m", "fresh_pose_s",
-                           "target_wait_s", "verify_wait_s", "place_tol_m"]
+                           "place_speed_mps", "release_margin_m", "release_ease_m", "retreat_m",
+                           "retreat_speed_mps", "retreat_clear_m", "fresh_pose_s", "target_wait_s",
+                           "verify_wait_s", "place_tol_m", "place_retries"]
     defaults = PickPlaceSettings()
     assert defaults.judge == "jev" and defaults.wrist_camera == "wrist" and defaults.time_limit_s == 240.0
-    assert defaults.max_tilt_deg == 30.0
+    assert defaults.max_tilt_deg == 30.0 and defaults.place_retries == 2
+    retreat = (defaults.release_ease_m, defaults.retreat_speed_mps, defaults.retreat_clear_m)
+    assert retreat == (0.002, 0.02, 0.02)
     assert OUTCOMES == ("placed", "not_found", "target_not_seen", "pick_failed", "dropped", "fell_off",
                         "target_moved", "unreachable", "stopped")
 
@@ -288,6 +297,11 @@ def test_its_settings_are_the_grasp_familys_and_the_places():
     ({"place_on_block": "ball"}, "place_on_block must be one of cube, cuboid, cylinder"),
     ({"place_speed_mps": 0.0}, "place_speed_mps must be positive"),
     ({"release_margin_m": -0.001}, "release_margin_m must be positive"),
+    ({"release_ease_m": 0.004}, "release_ease_m must lie within"),
+    ({"release_ease_m": -0.001}, "release_ease_m must lie within"),
+    ({"retreat_speed_mps": 0.0}, "retreat_speed_mps must be positive"),
+    ({"retreat_clear_m": 0.0}, "retreat_clear_m must be positive"),
+    ({"place_retries": -1}, "place_retries must be zero or more"),
     ({"place_gap_m": -0.001}, "place_gap_m must be zero or more"),
     ({"place_x_m": math.nan}, "place_x_m must be finite"),
     ({"place_yaw_deg": math.inf}, "place_yaw_deg must be finite"),
@@ -596,6 +610,68 @@ def test_a_target_top_higher_than_planned_stalls_the_descent_and_the_cube_still_
     assert not world.hits
 
 
+# ------------------------------------------------------------ leaving the placed block
+def leaving(track: list[tuple[str, np.ndarray, float]]) -> Hook:
+    """Record the phase, the TCP and the jaw's lowest point from the moment the placing jaw is open."""
+
+    def record(world: World, s: PickPlaceStrategy) -> None:
+        if s._placing and s.status.phase in ("let_go", "park") and s._released:
+            track.append((s.status.phase, KIN.tcp(world.joints)[:3, 3].copy(), jaw_low(world.joints)))
+
+    return record
+
+
+@pytest.mark.parametrize("onto", ["stack", "table"])
+def test_the_open_hand_eases_2_mm_then_rises_slowly_clear_of_the_cube_before_it_moves_away(onto: str):
+    """As on the stand, with a 10 mm release margin: the hand still eases only 2 mm."""
+    if onto == "stack":
+        s, world = stack(release_margin_m=0.010)
+    else:
+        s = built(place_x_m=0.22, place_y_m=0.08, release_margin_m=0.010)
+        world = World([cube("red", PICK_XY)])
+    track: list[tuple[str, np.ndarray, float]] = []
+    actions, _ = run(s, world, watch=leaving(track))
+    red = world.body("red")
+    clear = s.place_settings.retreat_clear_m
+
+    assert actions[-1].success and s.place.outcome == "placed", s.status.stopped_because
+    assert track and s.place.jaw_clear_m >= clear - 0.001 and not s.place.opened_wide
+    opened = track[0][1]
+    # Until the jaw clears the cube, the hand moves only the ease across.
+    low = [tcp for _, tcp, jaw in track if jaw < red.top + clear - 0.001]
+    assert low and max(float(np.linalg.norm(tcp[:2] - opened[:2])) for tcp in low) <= 0.002 + 1e-4
+    rises = [b[1][2] - a[1][2] for a, b in zip(track, track[1:], strict=False) if a[0] == b[0] == "let_go"]
+    assert max(rises) <= 0.02 / s.hz + 1e-4
+    # Near the cube the way to the start position keeps the jaw that high, and the hand about that slow.
+    near = [(tcp, jaw) for phase, tcp, jaw in track
+            if phase == "park" and float(np.linalg.norm(tcp[:2] - red.xy)) < s._near_m]
+    assert near and min(jaw for _, jaw in near) >= red.top + clear - 0.001
+    steps = [float(np.linalg.norm(b[0] - a[0])) for a, b in zip(near, near[1:], strict=False)]
+    assert max(steps) <= 1.5 * 0.02 / s.hz
+    assert not world.hits
+
+
+def test_an_arm_that_settles_short_on_the_way_up_rises_until_the_open_jaw_clears_the_cube():
+    """The pitch joints hang 2.5 deg short once the hand rises: the rise goes on by what is missing. A short
+    `retreat_m` plans the rise to just the clearance."""
+    s, world = built(place_x_m=0.22, place_y_m=0.08, retreat_m=0.03), World([cube("red", PICK_XY)])
+    hung: list[float] = []
+
+    def sag(world: World, s: PickPlaceStrategy) -> None:
+        if s._placing and s.status.phase == "let_go" and s._released and s._eased:
+            joints = dict(world.joints, shoulder_lift=world.joints["shoulder_lift"] + 2.5,
+                          elbow_flex=world.joints["elbow_flex"] + 2.5)
+            hung.append(float(KIN.tcp(world.joints)[2, 3] - KIN.tcp(joints)[2, 3]))
+            world.joints = joints
+
+    actions, _ = run(s, world, watch=sag)
+
+    assert actions[-1].success and s.place.outcome == "placed", s.status.stopped_because
+    assert max(hung) > 0.01
+    assert s.place.jaw_clear_m >= s.place_settings.retreat_clear_m - 0.001
+    assert s._rise_extra > 0.0 and not world.hits
+
+
 # ------------------------------------------------------------ picked off a stack
 def picked_off(lower: Body, **settings: Any) -> tuple[PickPlaceStrategy, World]:
     """A red cube on `lower` at the pick spot and a blue cube to place it on."""
@@ -832,35 +908,123 @@ def test_a_cube_taken_away_on_the_way_is_dropped():
     assert s.status.stopped_because.startswith("blok zabrany ze szczeki")
 
 
+def slip(world: World, s: PickPlaceStrategy) -> None:
+    """The red cube slips out of the jaw onto the table, once."""
+    if s.grasp.drops == 0:
+        red = world.body("red")
+        red.gripped = False
+        red.xy, red.z = np.array([0.19, 0.0]), CUBE[2]
+
+
 def test_a_cube_dropped_on_the_way_is_picked_again_and_placed():
     s, world = stack()
-
-    def slip(world: World, s: PickPlaceStrategy) -> None:
-        if s.grasp.drops == 0:
-            red = world.body("red")
-            red.gripped = False
-            red.xy, red.z = np.array([0.19, 0.0]), CUBE[2]
-
     actions, phases = run(s, world, seconds=90.0, on_phase={"carry_over": slip})
 
     assert actions[-1].success and s.place.outcome == "placed"
     assert s.grasp.drops == 1 and s.grasp.recoveries == 1
+    assert s.place.retries == 1 and s.place.retried == ("dropped",)
     assert phases.count("carry_up") == 2
     assert world.body("red").z == pytest.approx(world.body("blue").top + CUBE[2])
+    assert s.status.stopped_because.endswith("; ponowienia: 1 z 2")
+
+
+def test_with_no_retry_left_a_cube_dropped_on_the_way_is_dropped():
+    s, world = stack(place_retries=0)
+    actions, phases = run(s, world, seconds=90.0, on_phase={"carry_over": slip})
+
+    assert not actions[-1].success and s.place.outcome == "dropped" and s.grasp.recoveries == 0
+    assert s.status.stopped_because == "blok wypadl ze szczeki w drodze" and phases[-1] == "recover"
+
+
+def push_off(world: World, s: PickPlaceStrategy) -> None:
+    """Knock the placed red cube off onto the table beside the blue one."""
+    red = world.body("red")
+    red.xy, red.z = np.array([0.2, 0.11]), CUBE[2]
 
 
 def test_a_cube_that_falls_off_after_the_release_is_fell_off():
+    s, world = stack(place_retries=0)
+    actions, phases = run(s, world, on_phase={"park": push_off})
+
+    assert not actions[-1].success and s.place.outcome == "fell_off" and "retry" not in phases
+    assert s.status.stopped_because.startswith("blok 'red' nie lezy na 'blue': ")
+    assert s.place.height_error_m == pytest.approx(-2 * CUBE[2]) and s.place.retries == 0
+
+
+def test_a_cube_that_falls_off_is_picked_again_and_placed():
     s, world = stack()
 
-    def push(world: World, s: PickPlaceStrategy) -> None:
-        red = world.body("red")
-        red.xy, red.z = np.array([0.2, 0.11]), CUBE[2]
+    def once(world: World, s: PickPlaceStrategy) -> None:
+        if s.place.retries == 0:
+            push_off(world, s)
 
-    actions, _ = run(s, world, on_phase={"park": push})
+    actions, phases = run(s, world, seconds=120.0, on_phase={"park": once})
+    red, blue = world.body("red"), world.body("blue")
+
+    assert actions[-1].success and s.place.outcome == "placed", s.status.stopped_because
+    assert s.place.retries == 1 and s.place.retried == ("fell_off",)
+    assert phases.count("retry") == 1 and phases.count("verify") == 2
+    assert red.z == pytest.approx(blue.top + CUBE[2]) and np.linalg.norm(red.xy - blue.xy) < 0.002
+    # The fake squeeze is not exact, so only the blue cube counts for hits after the first lift.
+    assert s.status.stopped_because.endswith("; ponowienia: 1 z 2")
+    assert not [hit for hit in world.hits if hit[1] != "red"]
+    # The new pick got the whole attempt budget.
+    assert s.grasp_settings.max_attempts == s.status.attempt - 1 + 3
+
+
+def test_a_cube_that_falls_off_a_stack_is_picked_again_with_the_hand_over_it_clear_of_the_stack():
+    """Over a stack taller than the new hover, the hand first moves over the fallen cube at a height where
+    the jaw clears the stack."""
+    s, world = tower()
+    blue = world.body("blue")
+    notes: list[str] = []
+    lows: list[float] = []
+
+    def once(world: World, s: PickPlaceStrategy) -> None:
+        if s.place.retries == 0:
+            push_off(world, s)
+
+    def note(world: World, s: PickPlaceStrategy) -> None:
+        notes.append(s._note())
+
+    def over(world: World, s: PickPlaceStrategy) -> None:
+        if s.status.phase == "transit":
+            lows.append(jaw_low(world.joints) - blue.top)
+
+    actions, phases = run(s, world, seconds=120.0, on_phase={"park": once, "transit": note}, watch=over)
+    red = world.body("red")
+
+    assert actions[-1].success and s.place.outcome == "placed", s.status.stopped_because
+    assert phases.count("transit") == 1 and s.place.retries == 1
+    assert notes and notes[0].startswith("przenosze reke nad blok: ")
+    assert notes[0].endswith(" | ponowienie 1 z 2")
+    assert lows and min(lows) > 0.02 - 0.001
+    assert red.z == pytest.approx(blue.top + CUBE[2]) and np.linalg.norm(red.xy - blue.xy) < 0.002
+    assert not [hit for hit in world.hits if hit[1] != "red"]
+
+
+def test_a_cube_that_keeps_falling_off_is_fell_off_once_the_retries_run_out():
+    s, world = stack()
+    actions, phases = run(s, world, seconds=180.0, on_phase={"park": push_off})
 
     assert not actions[-1].success and s.place.outcome == "fell_off"
+    assert s.place.retries == 2 and s.place.retried == ("fell_off", "fell_off")
+    assert phases.count("retry") == 2 and phases.count("verify") == 3
     assert s.status.stopped_because.startswith("blok 'red' nie lezy na 'blue': ")
-    assert s.place.height_error_m == pytest.approx(-2 * CUBE[2])
+    assert s.status.stopped_because.endswith("; ponowienia: 2 z 2")
+
+
+def test_a_fallen_cube_is_not_picked_again_without_a_fresh_pose_of_the_target():
+    s, world = stack(target_wait_s=1.0)
+
+    def hide(world: World, s: PickPlaceStrategy) -> None:
+        push_off(world, s)
+        world.body("blue").seen = False
+
+    actions, phases = run(s, world, on_phase={"park": hide})
+
+    assert s.place.outcome == "fell_off" and s.place.retries == 0 and phases[-1] == "retry"
+    assert s.status.stopped_because.endswith(" - bez ponowienia: cel 'blue' niewidoczny w kamerach")
 
 
 def test_a_target_knocked_during_the_place_is_target_moved():
@@ -1112,7 +1276,8 @@ def test_a_block_left_leaning_at_a_pose_fell_off():
     run(s, world, on_phase={"park": lean})
 
     assert s.place.outcome == "fell_off" and s.place.placed_tilt_deg == pytest.approx(12.0)
-    assert s.status.stopped_because.endswith(", pochylony o 12 st."), s.status.stopped_because
+    assert s.place.retries == 0
+    assert s.status.stopped_because.endswith(", pochylony o 12 st. - bez ponowienia: blok pochylony")
 
 
 def test_the_latch_note_names_the_supports():

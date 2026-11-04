@@ -104,6 +104,8 @@ class Plays:
     decisions: tuple[Decision, ...] = ()
     #: Joint targets the step ends with, over the start pose.
     ends_at: dict[str, float] = field(default_factory=dict)
+    #: Picks of a fallen block the step made before it ended (`PlaceStatus.retries`).
+    retries: int = 0
 
 
 class FakeStep:
@@ -111,7 +113,7 @@ class FakeStep:
 
     def __init__(self, settings: PickPlaceSettings, plays: Plays, table: Table):
         self.settings, self.plays, self.table = settings, plays, table
-        self.place = SimpleNamespace(outcome="")
+        self.place = SimpleNamespace(outcome="", retries=0)
         self.status = SimpleNamespace(stopped_because="")
         self.stops: list[str] = []
         self.obs: list[Observation] = []
@@ -134,7 +136,7 @@ class FakeStep:
                 self.table.stack(s.label, s.place_on)
             else:
                 self.table.put(s.label, (s.place_x_m, s.place_y_m))
-        self.place.outcome = self.plays.outcome
+        self.place.outcome, self.place.retries = self.plays.outcome, self.plays.retries
         self.status.stopped_because = f"{self.plays.outcome} ({s.label})"
         return Action(target={**HOME, **self.plays.ends_at}, done=True,
                       success=self.plays.outcome == "placed", note=self.status.stopped_because)
@@ -372,6 +374,20 @@ def test_a_second_miss_of_the_same_step_replans() -> None:
     ran = run(strategy, table)
 
     assert ran.action.success and strategy.status.retries == 1 and strategy.status.replans == 1
+
+
+def test_a_step_whose_pick_place_already_tried_again_is_replanned_not_run_once_more() -> None:
+    """pick_place picked the knocked block again and the target moved once more: the build replans."""
+    table = Table()
+    strategy, steps = build(table, "placed", Plays("target_moved", retries=2), "placed")
+
+    ran = run(strategy, table)
+
+    assert ran.action.success and tower_stands(table)
+    assert strategy.status.retries == 0 and strategy.status.replans == 1
+    assert strategy.status.place_retries == 2
+    assert steps.moves() == [("green cube", "blue cube"), ("red cube", "green cube"),
+                             ("red cube", "green cube")]
 
 
 def test_a_block_that_stays_unseen_is_not_retried() -> None:
