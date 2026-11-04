@@ -22,12 +22,17 @@ outcome decides what follows:
 
 - `placed` and the check passes: the next step;
 - `not_found`, `target_not_seen`, `target_moved`: once the blocks are seen again, the same step once
-  more, unless it already holds;
+  more, unless it already holds or its pick_place already picked the block again;
 - `unreachable`, `dropped`, `fell_off`, `pick_failed` or a failed check: a replan from the world seen
   now. The model gets the steps so far and the failed one, so it can choose another place. A fixed plan
   runs again from its first step that no longer holds, with blocks in the way set aside on free table
   spots (`planner.steps.remaining`); it ends when the same step is unreachable twice in a row;
 - `stopped`: the run ends.
+
+A block that falls off its target or out of the jaw is picked and placed again inside the step, up to
+`place_retries` times; the step ends `fell_off`, `target_moved` or `dropped` only after those, and the
+stop reason the model gets counts them. So the build does not run such a step once more as it stands:
+it replans.
 
 At most `max_replans` replans. The run succeeds when the last step's check passes, or when the model
 answers that the world already fulfils the task. A model's question ends the run with the question.
@@ -195,6 +200,8 @@ class BuildStatus:
     bad_answers: int = 0
     replans: int = 0
     retries: int = 0
+    #: Picks of a fallen block inside the steps' pick_place runs (`PlaceStatus.retries`), in all.
+    place_retries: int = 0
     #: The outcome of the last step run (`pick_place.OUTCOMES`) and its stop reason.
     step_outcome: str = ""
     step_reason: str = ""
@@ -315,6 +322,8 @@ class BuildStrategy(Strategy[BuildSettings]):
         #: When the last step ended [s, `obs.t`].
         self._ended_t = 0.0
         self._retried = False
+        #: Picks of a fallen block inside the last step's pick_place.
+        self._step_retries = 0
         #: The last step that ended unreachable, until a step is verified.
         self._unreachable: Step | None = None
         #: Steps verified in place that later steps have not moved: the structure built so far.
@@ -374,6 +383,7 @@ class BuildStrategy(Strategy[BuildSettings]):
         self.decisions, self._outbox = [], []
         self._child = None
         self._retried = self._second_try = False
+        self._step_retries = 0
         self._failed = None
         self._unreachable = None
         self._standing = []
@@ -642,6 +652,8 @@ class BuildStrategy(Strategy[BuildSettings]):
         self._collect(child, None)
         place = getattr(child, "place", None)
         outcome = str(getattr(place, "outcome", "") or (PLACED if action.success else STOPPED))
+        self._step_retries = int(getattr(place, "retries", 0) or 0)
+        st.place_retries += self._step_retries
         reason = str(getattr(getattr(child, "status", None), "stopped_because", "") or action.note)
         return self._step_ended(step, outcome, reason)
 
@@ -683,7 +695,8 @@ class BuildStrategy(Strategy[BuildSettings]):
             return self._next_step(obs)
         record = StepRecord(step, False, f"{outcome}: {st.step_reason}")
         if outcome in RETRY:
-            if not self._retried and not stale:
+            # A step whose pick_place already picked the block again is replanned instead.
+            if not self._retried and not stale and not self._step_retries:
                 self._retried = True
                 st.retries += 1
                 logger.info("Krok %s: jeszcze raz po %s", self._number(), outcome)

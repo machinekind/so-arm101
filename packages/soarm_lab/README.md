@@ -151,6 +151,7 @@ pick_place:
   judge: jev                 # or none
   wrist_camera: wrist        # empty: no wrist look
   max_tilt_deg: 30           # 0 keeps the hand straight down
+  place_retries: 2           # picks of a block that fell off the target or out of the jaw
 build:
   task: "a tower of the three cubes, blue at the bottom"
   plan_json: ""              # a fixed plan: no model is asked
@@ -530,15 +531,43 @@ new hover, twice at most.
 The descent is fast down to 1.5 cm above the release height, or starts at the carry height when that
 is lower, and settles. The rest runs at `place_speed_mps` and stops on a stall or with `place_gap_m`
 between the blocks, plus 3 mm for a block that slid down in the grip on the way. The jaw opens
-`release_margin_m` past the block on each side and the hand eases off toward the fixed jaw, as in
-`grasp_jev`. It then rises up to `retreat_m`, and at least until the jaw clears the placed block.
-Where the arm cannot reach that high, as for a third cube on two, the jaw opens fully so that its
-moving side clears the block, and the way to the start position must lead away from the fixed jaw.
-Plans prefer the first exit. With neither, the run ends `unreachable` before the pick. The hand then
-moves to the start position, so the cameras see the result. Poses captured after the release must
-put the block within `place_tol_m` of the target's centre, at the target's top plus half its height.
-A target not seen at the hover, an unreachable place or a target that keeps moving puts the block
-back where it was picked. The carry back stays at least 1 cm above the target the hand hovered over.
+`release_margin_m` past the block on each side, where the hand stands. The hand then leaves the
+block without a touch:
+
+1. It moves `release_ease_m` (2 mm, 3 mm at most) toward the fixed jaw, so the fixed pad leaves the
+   block's face. The moving jaw opened to the other side, so it keeps its room.
+2. It rises straight up at `retreat_speed_mps` (2 cm/s), `retreat_m` and at least until the open jaw's
+   lowest point stands `retreat_clear_m` (2 cm) over the block's top. The check uses the jaw's points
+   at the measured joints, so an arm that settles short rises further, up to `sag_m`, where it
+   reaches. A rise that stands still short of its point ends the run, as in `grasp`.
+3. Only then does it move to the start position, never lower. While any part of the open jaw could
+   reach over the block, it moves at `retreat_speed_mps` and keeps the hand's orientation as long as
+   the arm can, so the jaw does not swing down; beyond that it moves at `speed_mps`.
+
+Where the arm cannot rise that high, a jaw 4 mm clear of the top still leaves; below that, as for a
+third cube on two, the jaw opens fully so that its moving side clears the block, and the way to the
+start position must lead away from the fixed jaw. Plans prefer the first exit. With neither, the run
+ends `unreachable` before the pick. At the start position the cameras see the result. Poses captured
+after the release must put the block within `place_tol_m` of the target's centre, at the target's
+top plus half its height. A target not seen at the hover, an unreachable place or a target that
+keeps moving puts the block back where it was picked. The carry back stays at least 1 cm above the
+target the hand hovered over.
+
+A block that fell is picked and placed again inside the run, at most `place_retries` times (2 by
+default, 0 turns it off):
+
+- after the release the check finds it off the target, or the target or a support moved and it no
+  longer sits on them. It needs fresh poses, captured after the release, of the block lying flat and
+  of the target or every support, within `target_wait_s`. The hand first moves over the block at a
+  height where the jaw clears every block the cameras see by `retreat_clear_m`, then picks it as at
+  the start;
+- it dropped out of the jaw on the way: grasp's recovery picks it again, as before, but now as one of
+  these retries. With none left the run ends `dropped` once the hand is up.
+
+Each new pick gets the whole `max_attempts`. The panel note says "... - ponawiam (1 z 2)" and then
+"| ponowienie 1 z 2" after each note; the stop reason ends with "; ponowienia: 1 z 2", and
+`place.retries` and `place.retried` count them. When they run out, the run ends with the last
+failure's outcome.
 
 Where the place is out of reach with the hand straight down, the pick takes the least tilt up to
 `max_tilt_deg` (30° by default) at which both the pick and the whole place fit, and the hand keeps
@@ -568,9 +597,9 @@ on the table or on a block.
 | `not_found` | no usable pose of `label` before the pick, or none fresh after the release | where it was / unknown |
 | `target_not_seen` | no usable pose of the target or a support before the pick, or none fresh at the hover | where it was / put back |
 | `pick_failed` | the grasp failed, or Jev stopped it | on the table |
-| `dropped` | dropped and not picked again | on the table |
-| `fell_off` | seen after the release, but not on the target or at the pose, or leaning at a pose | near the target |
-| `target_moved` | the target or a support moved by the check, the target kept moving at the hover, or the supports moved apart | near the target / put back |
+| `dropped` | dropped and not picked again, or no retry left | on the table |
+| `fell_off` | seen after the release, but not on the target or at the pose, or leaning at a pose, and no retry left or possible | near the target |
+| `target_moved` | the target or a support moved by the check (and no retry left or possible, unless the block still sits on them), the target kept moving at the hover, or the supports moved apart | near the target / put back |
 | `unreachable` | the block or the place cannot be reached with the hand down, straight or tilted, or the open hand could not leave the placed block untouched | where it was / put back |
 | `stopped` | stopped by a person, the time limit or a motion guard | anywhere |
 
@@ -596,8 +625,9 @@ third cube on two fits only around 20 cm from the base, where the hand can leave
 jaw toward the start position. With the hand tilted, a third cube fits out to about 30 cm and a
 fourth from about 18 to 26 cm, on stacks square to the arm. Moves do not go around other blocks, so a tall stack
 within about 10 cm of the pick or in the way from the start position can be hit. A block that slid
-down in the grip by more than those 3 mm is pressed onto its target by the rest. A dropped block that lands high on another block, such as a cube on a cube, is not picked
-again: recovery waits for a person.
+down in the grip by more than those 3 mm is pressed onto its target by the rest. A block dropped on
+the way that lands high on another block, such as a cube on a cube, is not picked again: recovery
+waits for a person. One the check after the release finds there, lying flat, is.
 
 [`reach`](soarm_lab/reach.py) helps a planner choose where to build: `can_place(kind, x, y, bottom_z)`
 says whether a block fits with its bottom at that height, and with what tilt, and `reach_map` gives
@@ -643,9 +673,14 @@ What follows depends on the step:
 | step ended | then |
 | --- | --- |
 | `placed`, check passes | the next step |
-| `not_found`, `target_not_seen`, `target_moved` | once the blocks are seen again, the same step once more |
+| `not_found`, `target_not_seen`, `target_moved` | once the blocks are seen again, the same step once more, unless its `pick_place` already picked the block again |
 | `unreachable`, `dropped`, `fell_off`, `pick_failed`, or the check fails | a new plan from the scene seen now |
 | `stopped` | the run ends |
+
+A block that falls is picked again inside the step, up to `place_retries` times, so a step ends
+`fell_off`, `target_moved` or `dropped` only after those tries, and its stop reason counts them. The
+build does not repeat such a step as it stands: it replans, so the model can choose another place.
+The time a step may take, `step_time_limit_s`, covers its retries.
 
 A new plan comes from the model, told what ran and what failed, or, with a fixed plan, from the
 fixed plan itself: every step again from the first one that no longer holds, with blocks lying on a

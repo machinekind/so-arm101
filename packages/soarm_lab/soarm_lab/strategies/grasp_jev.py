@@ -864,7 +864,7 @@ class GraspJevStrategy(GraspStrategy):
             self._eased = True
         if self._arrived(self._release_point, sag=True):
             return self._after_let_go()
-        return self._drive(self._release_point, self.approach_step_m)
+        return self._drive(self._release_point, self.rise_step_m)
 
     @property
     def release_cmd(self) -> float:
@@ -896,6 +896,11 @@ class GraspJevStrategy(GraspStrategy):
         self._retarget_xy = self._regrasp_xy.copy()
         self._start_rise(RETARGET)
         return None
+
+    @property
+    def rise_step_m(self) -> float:
+        """Return the open hand's rise per tick after the release [m]: at the approach speed."""
+        return self.approach_step_m
 
     @property
     def ease_off_m(self) -> float:

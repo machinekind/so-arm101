@@ -750,10 +750,10 @@ def test_a_target_that_disappears_sends_the_cube_back_where_it_was(twin):
     assert not sinking.artefacts(), sinking.depth
 
 
-def test_a_cube_that_falls_off_is_reported(twin):
+def test_with_no_retries_a_cube_that_falls_off_is_reported(twin):
     add_blocks(twin, Placed("red", "cube", PICK_XY, rgba=RED), Placed("blue", "cube", TARGET_XY, rgba=BLUE))
     clock = Clock()
-    strategy = built(label="red", place_on="blue")
+    strategy = built(label="red", place_on="blue", place_retries=0)
     runner = StrategyRunner(twin, strategy, objects=Cameras(twin, clock, ("red", "blue")))
 
     runner.start(threaded=False)
@@ -1258,4 +1258,106 @@ def test_a_gripper_that_reads_10_mm_wide_grips_and_releases_a_cube_on_a_table_sp
     # Uncalibrated, where the cube sits in the hand is off by about half the reading's error.
     assert np.linalg.norm(red[:2] - np.array(spot)) < (0.004 if calibrated else 0.007)
     assert red[2] == pytest.approx(block("cube").half_size[2], abs=0.0005) and tilt_deg(rotation) < 2.0
+    assert not sinking.artefacts(), sinking.depth
+
+
+# --------------------------------------------------------------------------- leaving the placed cube
+def jaw_low(joints: Mapping[str, float]) -> float:
+    """The jaw's lowest point at `joints` [m above the table, base frame]."""
+    T = KIN.tcp(joints)
+    gripper = SPEC.gripper
+    assert gripper is not None
+    return float((np.vstack(KIN.jaw_points(joints[gripper])) @ T[:3, :3].T + T[:3, 3])[:, 2].min())
+
+
+@pytest.mark.parametrize("onto", ["stack", "table"])
+def test_the_open_hand_leaves_the_placed_cube_where_it_let_go(twin, onto: str):
+    """As on the stand: the gripper reads 10 mm wide, `jaw_gap_offset_m` says so, and the release margin is
+    10 mm. The hand eases 2 mm, rises until the jaw is 2 cm over the cube and only then leaves."""
+    if onto == "stack":
+        sinking = add_blocks(twin, Placed("red", "cube", PICK_XY, rgba=RED),
+                             Placed("blue", "cube", TARGET_XY, 20.0, BLUE))
+        names, place = ("red", "blue"), {"place_on": "blue"}
+    else:
+        sinking = add_blocks(twin, Placed("red", "cube", PICK_XY, rgba=RED))
+        names, place = ("red",), {"place_x_m": 0.22, "place_y_m": 0.07}
+    clock = Clock()
+    strategy = built(label="red", jaw_gap_offset_m=0.010, release_margin_m=0.010, **place)
+    runner = StrategyRunner(twin, WideGripper(strategy, 0.010), objects=Cameras(twin, clock, names))
+    opened: list[np.ndarray] = []
+    near: list[float] = []
+
+    def watch() -> None:
+        if strategy.started and strategy._placing and strategy._released:
+            opened.append(truth(twin, "red")[0])
+            if strategy.status.phase == "park":
+                measured = dict(twin.status.measured)
+                if np.linalg.norm(KIN.tcp(measured)[:2, 3] - opened[0][:2]) < strategy._near_m:
+                    near.append(jaw_low(measured))
+
+    runner.start(threaded=False)
+    drive(twin, runner, 120.0, clock, watch=watch)
+
+    assert runner.status.stopped_because == "zadanie wykonane", (strategy.status, strategy.place)
+    assert strategy.place.outcome == "placed" and not strategy.place.opened_wide
+    settle(twin)
+    red, rotation = truth(twin, "red")
+    assert opened and max(float(np.linalg.norm(p - opened[0])) for p in [*opened, red]) < 0.001
+    top = red[2] + block("cube").half_size[2]
+    assert strategy.place.jaw_clear_m > 0.019 and near and min(near) > top + 0.019
+    assert tilt_deg(rotation) < 2.0 and not sinking.artefacts(), sinking.depth
+
+
+def misplacing(cameras: Cameras, strategy: PickPlaceStrategy, label: str, shift: tuple[float, float],
+               once: bool) -> Objects:
+    """`cameras` with `label` seen `shift` off [m, base frame x and y], until the run looks for a fallen block
+    to pick again when `once`, or always."""
+    fooled = [True]
+
+    def objects() -> dict[str, ObjectPose]:
+        out = cameras()
+        if once and strategy.started and strategy.status.phase == "retry":
+            fooled[0] = False
+        if fooled[0] and label in out:
+            p = out[label]
+            out[label] = ObjectPose(p.position + np.array([*shift, 0.0]), p.rotation, p.source, p.age_s)
+        return out
+
+    return objects
+
+
+@pytest.mark.parametrize("once", [True, False], ids=["seen off once", "always seen off"])
+def test_a_cube_set_down_off_its_target_falls_and_is_picked_again(twin, once: bool):
+    """The cameras put the blue cube 22 mm off, so the red one goes down over its edge and falls to the table.
+    Seen right again, the next pick puts it on top; seen off every time, the retries run out."""
+    sinking = add_blocks(twin, Placed("red", "cube", PICK_XY, rgba=RED), Placed("blue", "cube", TARGET_XY,
+                                                                                rgba=BLUE))
+    clock = Clock()
+    strategy = built(label="red", place_on="blue")
+    cameras = Cameras(twin, clock, ("red", "blue"), nearest_grab=True)
+    runner = StrategyRunner(twin, strategy, objects=misplacing(cameras, strategy, "blue", (0.0, 0.022), once))
+    phases: list[str] = []
+
+    runner.start(threaded=False)
+    drive(twin, runner, 240.0, clock, until=phases_of(strategy, phases))
+
+    place = strategy.place
+    settle(twin)
+    red, rotation = truth(twin, "red")
+    blue, _ = truth(twin, "blue")
+    half = block("cube").half_size[2]
+    if once:
+        assert runner.status.stopped_because == "zadanie wykonane", (strategy.status, place)
+        assert place.outcome == "placed" and place.retries == 1 and place.retried == ("fell_off",)
+        assert strategy.status.stopped_because.endswith("; ponowienia: 1 z 2")
+        assert np.linalg.norm(red[:2] - blue[:2]) < 0.004
+        # A cube that rolled over on its fall lies flat on another face.
+        flat = math.degrees(math.acos(min(1.0, float(np.abs(rotation[2]).max()))))
+        assert red[2] == pytest.approx(blue[2] + 2 * half, abs=0.001) and flat < 2.0
+    else:
+        assert place.outcome == "fell_off" and place.retries == 2 and phases.count("retry") == 2
+        assert strategy.status.stopped_because.startswith("blok 'red' nie lezy na 'blue': ")
+        assert strategy.status.stopped_because.endswith("; ponowienia: 2 z 2")
+        assert red[2] == pytest.approx(half, abs=0.001)
+    assert blue[2] == pytest.approx(half, abs=0.0005) and np.linalg.norm(blue[:2] - TARGET_XY) < 0.002
     assert not sinking.artefacts(), sinking.depth
