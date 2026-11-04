@@ -7,19 +7,16 @@ lifted and held, the jaw tips' midpoint lay within `BAR_M` of the cube's centre 
 closing, and it took at most `MAX_ATTEMPTS` attempts, in at least `BAR_SHARE` of the runs. In every run the
 cube stays where it lies until the jaw closes on it, neither pushed by the corrections nor sinking.
 
-`SOARM_CAMPAIGN_RUNS` scales the runs per campaign (default `RUNS`, half for the nudge); `SOARM_CAMPAIGN_OUT`
-names a JSON file for the results.
+`SOARM_CAMPAIGN_RUNS` scales the runs per campaign (default `RUNS`, half for the nudge);
+`SOARM_CAMPAIGN_DIR` keeps one JSON file per run (`soarm_lab.campaign`).
 """
 
 from __future__ import annotations
 
-import json
 import math
-import os
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field, replace
-from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -38,6 +35,7 @@ from machinekind_twin.strategy import Action, ObjectPose, Observation, StrategyR
 from machinekind_twin.workspace import Workspace  # noqa: E402
 
 from soarm_lab.blocks import block  # noqa: E402
+from soarm_lab.campaign import Run, jsonable, record, runs_per_scenario  # noqa: E402
 from soarm_lab.kinematics import RobotKinematics  # noqa: E402
 from soarm_lab.robot import load_robot  # noqa: E402
 from soarm_lab.strategies.grasp import top_down  # noqa: E402
@@ -71,7 +69,7 @@ Y_RANGE = (-0.07, 0.07)
 
 
 def campaign_runs() -> int:
-    return int(os.environ.get("SOARM_CAMPAIGN_RUNS", RUNS))
+    return runs_per_scenario(RUNS)
 
 
 @dataclass
@@ -233,6 +231,9 @@ class Outcome:
     reason: str = ""
     sim_s: float = 0.0
     wall_s: float = 0.0
+    #: (simulated time [s], attempt, phase) at each change of phase, and the strategy's last status.
+    timeline: list[tuple[float, int, str]] = field(default_factory=list)
+    status: dict[str, Any] = field(default_factory=dict)
 
     @property
     def final_error_m(self) -> float:
@@ -267,6 +268,8 @@ def one_run(seed: int, *, play_m: float = 0.0, nudge_m: float = 0.0, detector_m:
 
         def watch() -> None:
             phase = strategy.status.phase
+            if phase != last["phase"]:
+                out.timeline.append((round(clock.t, 2), strategy.status.attempt, phase))
             if phase in ("straddle", "rise", "open", "close") and last["phase"] != "close":
                 # From the attempt's first look between the tips to its close.
                 where = truth(twin)
@@ -305,21 +308,46 @@ def one_run(seed: int, *, play_m: float = 0.0, nudge_m: float = 0.0, detector_m:
         out.hover_verdicts = list(strategy.wrist.verdicts)
         out.reason = strategy.status.stopped_because
         out.sim_s = clock.t
+        out.status = jsonable({"run": strategy.status, "grasp": strategy.grasp, "wrist": strategy.wrist})
     finally:
         twin.close()
     out.wall_s = time.monotonic() - started
     return out
 
 
+def artefacts(o: Outcome) -> list[str]:
+    """The cube pushed or sunk before the close."""
+    half = block("cube").half_size[2]
+    out = []
+    if o.moved_m > STILL_M:
+        out.append(f"cube pushed {o.moved_m * 1000:.1f} mm before the close")
+    if o.lowest_m < half - SINK_M:
+        out.append(f"cube sank {(half - o.lowest_m) * 1000:.2f} mm into the table")
+    return out
+
+
+def as_run(name: str, o: Outcome, settings: Mapping[str, Any]) -> Run:
+    """A campaign record of `o`: the attempts, and the jaw centre's offset at the last close."""
+    seen = artefacts(o)
+    if not o.lifted:
+        reason = "not lifted"
+    elif o.final_error_m > BAR_M:
+        reason = f"jaw centre more than {BAR_M * 1000:.0f} mm off"
+    elif o.attempts > MAX_ATTEMPTS:
+        reason = f"more than {MAX_ATTEMPTS} attempts"
+    else:
+        reason = "artefact" if seen else ""
+    details = {"settings": dict(settings), "why": "" if o.passed else o.reason, **asdict(o)}
+    corrections = sum(look[4] in ("moved", "off") for look in o.looks)
+    return Run(f"grasp: {name}", o.seed, o.passed and not seen, o.attempts, o.final_error_m, reason, seen,
+               o.sim_s, o.wall_s, details, corrections)
+
+
 def campaign(name: str, seeds: range, **kwargs: Any) -> list[Outcome]:
-    outcomes = [one_run(seed, **kwargs) for seed in seeds]
-    path = os.environ.get("SOARM_CAMPAIGN_OUT")
-    if path:
-        file = Path(path)
-        data = json.loads(file.read_text()) if file.exists() else {}
-        runs = [dict(asdict(o), final_error_m=o.final_error_m, passed=o.passed) for o in outcomes]
-        data[name] = {"settings": dict(kwargs), "runs": runs}
-        file.write_text(json.dumps(data, indent=1))
+    outcomes = []
+    for seed in seeds:
+        outcomes.append(one_run(seed, **kwargs))
+        record(as_run(name, outcomes[-1], {"detector_m": DETECTOR_M, **kwargs}))
     return outcomes
 
 
@@ -333,9 +361,7 @@ def summary(outcomes: list[Outcome]) -> str:
 def assert_bar(outcomes: list[Outcome]) -> None:
     passed = sum(o.passed for o in outcomes)
     assert passed >= math.ceil(BAR_SHARE * len(outcomes) - 1e-9), summary(outcomes)
-    half = block("cube").half_size[2]
-    assert all(o.moved_m <= STILL_M and o.lowest_m >= half - SINK_M for o in outcomes), [
-        (o.seed, o.moved_m, o.lowest_m) for o in outcomes]
+    assert not any(artefacts(o) for o in outcomes), [(o.seed, artefacts(o)) for o in outcomes]
 
 
 # --------------------------------------------------------------------------- the helper
@@ -379,18 +405,21 @@ def test_the_play_is_sized_at_the_hand():
 
 # --------------------------------------------------------------------------- the campaigns
 @pytest.mark.render
+@pytest.mark.campaign
 def test_a_cube_seen_1_5_cm_off_is_lifted_centred():
     outcomes = campaign("detector 1.5 cm", range(campaign_runs()))
     assert_bar(outcomes)
 
 
 @pytest.mark.render
+@pytest.mark.campaign
 def test_with_6_mm_of_hidden_play_a_cube_seen_1_5_cm_off_is_lifted_centred():
     outcomes = campaign("detector 1.5 cm, play 6 mm", range(100, 100 + campaign_runs()), play_m=PLAY_M)
     assert_bar(outcomes)
 
 
 @pytest.mark.render
+@pytest.mark.campaign
 def test_a_cube_nudged_5_mm_after_the_hover_look_is_lifted_centred():
     runs = range(200, 200 + campaign_runs() // 2)
     outcomes = campaign("detector 1.5 cm, nudge 5 mm", runs, nudge_m=NUDGE_M)

@@ -8,13 +8,15 @@ is needed. The simulation's own poses check the tower, and that no block sank in
 was dragged or stayed in the jaws. A knocked tower has its middle cube moved to the table while the top
 one is carried to it. The bridge sets a cube beside another and lays a cuboid across both.
 
-`SOARM_BUILD_CAMPAIGN=<runs>` also runs that many seeds of each scenario and prints the numbers.
+`SOARM_CAMPAIGN_RUNS=<runs>` or `SOARM_CAMPAIGN_DIR=<folder>` also runs the seeded campaign: towers, also with
+the wrist camera and a camera error, knocked towers and bridges (default 10 seeds each), one JSON file per
+run in the folder (`soarm_lab.campaign`).
 """
 
 from __future__ import annotations
 
+import json
 import math
-import os
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -38,6 +40,7 @@ from machinekind_twin.strategy import ObjectPose, StrategyRunner  # noqa: E402
 from machinekind_twin.workspace import Workspace  # noqa: E402
 
 from soarm_lab.blocks import block  # noqa: E402
+from soarm_lab.campaign import Run, campaign_dir, jsonable, record, runs_per_scenario  # noqa: E402
 from soarm_lab.kinematics import RobotKinematics  # noqa: E402
 from soarm_lab.planner.cli import FakePlanner  # noqa: E402
 from soarm_lab.robot import load_robot  # noqa: E402
@@ -198,13 +201,15 @@ class Cameras:
     unless `kinds` says otherwise.
 
     A cube within `HIDDEN_M` of the TCP is not detected. Only the cube nearest the TCP can be taken by a
-    closing jaw, as the twin's stacking tracker does.
+    closing jaw, as the twin's stacking tracker does. `offset` shifts every detection [m, base frame x and
+    y], as a camera calibration error would.
     """
 
     twin: Twin
     clock: Clock
     names: tuple[str, ...]
     kinds: dict[str, str] = field(default_factory=dict)
+    offset: tuple[float, float] = (0.0, 0.0)
 
     def __post_init__(self) -> None:
         spec = self.twin.workspace.spec()
@@ -225,8 +230,8 @@ class Cameras:
             position, rotation = poses[name]
             seen = None
             if np.linalg.norm(position - T_tcp[:3, 3]) > HIDDEN_M:
-                seen = CubeDetection(position, rotation, area_px=0.0, confidence=1.0, n_cameras=2,
-                                     t=self.clock.t)
+                seen = CubeDetection(position + np.array([*self.offset, 0.0]), rotation, area_px=0.0,
+                                     confidence=1.0, n_cameras=2, t=self.clock.t)
             grip_q, grip_cmd = float(KIN.to_q(measured)[self.g]), float(KIN.to_q(command)[self.g])
             if name != nearest:
                 grip_cmd = grip_q
@@ -286,6 +291,112 @@ class Result:
     artefacts: list[str] = field(default_factory=list)
     step_outcomes: list[str] = field(default_factory=list)
     reason: str = ""
+    #: pick_place runs started, and the structure's largest centre offset by truth [m] (NaN when a block is
+    #: not at its level).
+    picks: int = 0
+    offset_m: float = math.nan
+    #: (simulated time [s], build phase, step, step phase) at each change, each pick_place run's account and
+    #: the build's step records.
+    timeline: list[tuple[float, str, int, str]] = field(default_factory=list)
+    steps_run: list[dict[str, Any]] = field(default_factory=list)
+    records: list[dict[str, Any]] = field(default_factory=list)
+    #: Looks between the open jaw tips that found a block off centre, over every pick_place run, and blocks
+    #: that sank into each other (`Recorder.dips`).
+    corrections: int = 0
+    dips: list[str] = field(default_factory=list)
+
+
+class Recorder:
+    """Watches a build: each block's lowest height and top speed, the deepest contact between two blocks, how
+    far the base moved, the phases, and every pick_place run the build starts."""
+
+    def __init__(self, twin: Twin, strategy: BuildStrategy, clock: Clock, names: tuple[str, ...], base: str):
+        self.twin, self.strategy, self.clock, self.names = twin, strategy, clock, names
+        self.lowest = {n: math.inf for n in names}
+        self.fastest = {n: 0.0 for n in names}
+        self.last = {n: truth(twin, n)[0] for n in names}
+        self.base, self.base0 = base, self.last[base].copy()
+        self.base_shift = 0.0
+        #: The deepest contact between two blocks [m, negative into each other] and the pair.
+        self.deepest, self.pair = 0.0, ("", "")
+        self.timeline: list[tuple[float, str, int, str]] = []
+        self.children: list[Any] = []
+        factory = strategy.step_factory
+
+        def counted(settings: Any) -> Any:
+            child = factory(settings)
+            self.children.append(child)
+            return child
+
+        strategy.step_factory = counted
+
+    def __call__(self) -> None:
+        for n in self.names:
+            p = truth(self.twin, n)[0]
+            self.lowest[n] = min(self.lowest[n], float(p[2]))
+            self.fastest[n] = max(self.fastest[n], float(np.linalg.norm(p - self.last[n])) / TWIN_PERIOD)
+            self.last[n] = p
+        self.base_shift = max(self.base_shift, float(np.linalg.norm(self.last[self.base] - self.base0)))
+        with self.twin.lock:
+            model, data = self.twin.scene.model, self.twin.scene.data
+            for c in data.contact[:data.ncon]:
+                pair = (model.geom(c.geom1).name, model.geom(c.geom2).name)
+                if set(pair) <= set(self.names) and c.dist < self.deepest:
+                    self.deepest, self.pair = float(c.dist), pair
+        st, child = self.strategy.status, self.strategy.current_step
+        phase = getattr(getattr(child, "status", None), "phase", "") if child is not None else ""
+        now = (st.phase, st.index + 1, phase)
+        if not self.timeline or self.timeline[-1][1:] != now:
+            self.timeline.append((round(self.clock.t, 2), *now))
+
+    def dips(self) -> list[str]:
+        """Two blocks that sank into each other, as a block let go above another lands on it. Kept apart from
+        `artefacts`, which the tests' checks assert; the campaign records count both."""
+        if self.deepest >= -SINK_M:
+            return []
+        a, b = self.pair
+        return [f"{a} and {b} sank {-self.deepest * 1000:.2f} mm into each other"]
+
+    def artefacts(self, rest: dict[str, float]) -> list[str]:
+        """Blocks that sank below their resting height on the table, flew, or stayed in the jaws, and a base
+        that moved."""
+        out = []
+        for n in self.names:
+            if self.lowest[n] < rest[n] - SINK_M:
+                out.append(f"{n} sank {(rest[n] - self.lowest[n]) * 1000:.2f} mm into the table")
+            if self.fastest[n] > SPEED_MPS:
+                out.append(f"{n} moved at {self.fastest[n]:.2f} m/s")
+            if max(contact(self.twin, n)) > 0.5:
+                out.append(f"{n} in the jaws")
+        if self.base_shift > BASE_SHIFT_M:
+            out.append(f"base moved {self.base_shift * 1000:.1f} mm")
+        return out
+
+    def corrections(self) -> int:
+        """Looks between the open jaw tips that found a block off centre, over every pick_place run."""
+        looks = [look for child in self.children for look in child.wrist.close_looks]
+        return sum(look.verdict in ("moved", "off") for look in looks)
+
+    def steps_run(self) -> list[dict[str, Any]]:
+        """Each pick_place run: its block and place, attempts, outcome, stop reason and place status."""
+        out = []
+        for child in self.children:
+            cfg = child.config
+            out.append(jsonable({
+                "label": cfg.label, "place_on": cfg.place_on, "supports": cfg.supports,
+                "place": (cfg.place_x_m, cfg.place_y_m, cfg.place_z_m, cfg.place_yaw_deg),
+                "attempts": child.status.attempt, "outcome": child.place.outcome,
+                "why": child.status.stopped_because, "grasp": child.grasp, "place_status": child.place}))
+        return out
+
+
+def tower_offset(twin: Twin) -> float:
+    """The largest centre offset between neighbouring cubes of the tower by truth [m]; NaN when a cube is
+    not at its level."""
+    (blue, _), (green, _), (red, _) = (truth(twin, n) for n in NAMES)
+    if any(abs(p[2] - (2 * level - 1) * HALF) > TOWER_Z_M for p, level in ((blue, 1), (green, 2), (red, 3))):
+        return math.nan
+    return max(float(np.linalg.norm(green[:2] - blue[:2])), float(np.linalg.norm(red[:2] - green[:2])))
 
 
 def tower_problem(twin: Twin) -> str:
@@ -307,8 +418,9 @@ def tower_problem(twin: Twin) -> str:
 
 
 def build_tower(twin: Twin, seed: int, *, planned: bool, knock: bool = False, seconds: float = 700.0,
-                **extra: Any) -> Result:
-    """Run one seeded build of the tower to its end, then judge it by truth; `extra` goes to the settings."""
+                offset: tuple[float, float] = (0.0, 0.0), **extra: Any) -> Result:
+    """Run one seeded build of the tower to its end, then judge it by truth; `extra` goes to the settings,
+    `offset` shifts every detection."""
     placed = scene(seed)
     add_blocks(twin, *placed)
     settle(twin, 0.5)
@@ -324,21 +436,14 @@ def build_tower(twin: Twin, seed: int, *, planned: bool, knock: bool = False, se
     else:
         settings["plan_json"] = TOWER_JSON
     strategy = BuildStrategy(BuildSettings(**settings), planner=planner, threaded=False)
-    runner = StrategyRunner(twin, strategy, objects=Cameras(twin, clock, NAMES))
-    lowest = {n: math.inf for n in NAMES}
-    fastest = {n: 0.0 for n in NAMES}
-    last = {n: truth(twin, n)[0] for n in NAMES}
-    base0 = last["blue"].copy()
-    base_shift = [0.0]
+    wrist = ("wrist",) if settings["wrist_camera"] else ()
+    runner = StrategyRunner(twin, strategy, objects=Cameras(twin, clock, NAMES, offset=offset), cameras=wrist)
+    seen = Recorder(twin, strategy, clock, NAMES, "blue")
+    base0 = seen.base0
     knocked: list[float] = []
 
     def watch() -> None:
-        for n in NAMES:
-            p = truth(twin, n)[0]
-            lowest[n] = min(lowest[n], float(p[2]))
-            fastest[n] = max(fastest[n], float(np.linalg.norm(p - last[n])) / TWIN_PERIOD)
-            last[n] = p
-        base_shift[0] = max(base_shift[0], float(np.linalg.norm(last["blue"] - base0)))
+        seen()
         child = strategy.current_step
         if (knock and not knocked and strategy.status.done == 1 and child is not None
                 and getattr(getattr(child, "status", None), "phase", "") == "carry_over"
@@ -346,7 +451,7 @@ def build_tower(twin: Twin, seed: int, *, planned: bool, knock: bool = False, se
             red_from = next(p.xy for p in placed if p.name == "red")
             spot = free_spot(rng, [p.xy for p in placed if p.name != "green"])
             move(twin, "green", spot, rng.uniform(0.0, 90.0))
-            last["green"] = truth(twin, "green")[0]
+            seen.last["green"] = truth(twin, "green")[0]
             knocked.append(clock.t)
             if planner is not None:
                 aside = free_spot(rng, [tuple(base0[:2]), spot, red_from], radius=(0.2, 0.24))
@@ -359,20 +464,13 @@ def build_tower(twin: Twin, seed: int, *, planned: bool, knock: bool = False, se
     if runner.status.running:
         runner.stop()
     settle(twin)
-    artefacts = []
-    for n in NAMES:
-        if lowest[n] < HALF - SINK_M:
-            artefacts.append(f"{n} sank to {lowest[n] * 1000:.1f} mm")
-        if fastest[n] > SPEED_MPS:
-            artefacts.append(f"{n} moved at {fastest[n]:.2f} m/s")
-        if max(contact(twin, n)) > 0.5:
-            artefacts.append(f"{n} in the jaws")
-    if base_shift[0] > BASE_SHIFT_M:
-        artefacts.append(f"base moved {base_shift[0] * 1000:.1f} mm")
     why = tower_problem(twin)
     st = strategy.status
     return Result(seed, not why, why, st.outcome, st.success, st.done, st.replans, st.retries, clock.t, wall,
-                  bool(knocked), artefacts, [r.outcome.split(":")[0] for r in st.records], st.stopped_because)
+                  bool(knocked), seen.artefacts({n: HALF for n in NAMES}),
+                  [r.outcome.split(":")[0] for r in st.records], st.stopped_because, len(seen.children),
+                  tower_offset(twin), seen.timeline, seen.steps_run(), [r.to_dict() for r in st.records],
+                  seen.corrections(), seen.dips())
 
 
 # --------------------------------------------------------------------------- discovery
@@ -483,28 +581,140 @@ def test_a_fixed_plan_sets_a_cube_beside_another_and_lays_a_cuboid_across_both(t
 
 # --------------------------------------------------------------------------- the seeded campaign
 
-CAMPAIGN = int(os.environ.get("SOARM_BUILD_CAMPAIGN", "0") or 0)
-SCENARIOS = {"fixed plan": {"planned": False}, "fake planner": {"planned": True},
-             "knocked, fixed plan": {"planned": False, "knock": True},
-             "knocked, fake planner": {"planned": True, "knock": True}}
-#: Pass bars: successes out of the runs.
-BARS = {"fixed plan": 0.8, "fake planner": 0.8, "knocked, fixed plan": 0.6, "knocked, fake planner": 0.6}
+
+def bridge_layout(seed: int) -> tuple[list[Placed], str, float]:
+    """A seeded bridge: blue in the middle of the reach, the side and gap for green, green and the cuboid
+    anywhere in reach clear of each other and of where green and the bridge go. The fixed plan and the gap."""
+    rng = np.random.default_rng(seed)
+    blue = (rng.uniform(0.19, 0.21), rng.uniform(-0.03, 0.03))
+    side = str(rng.choice(["left", "right"]))
+    gap = float(rng.uniform(0.01, 0.025))
+    placed = [Placed("blue", blue, float(rng.uniform(0.0, 90.0)))]
+    away = 1.0 if side == "left" else -1.0
+    goal = [(blue[0], blue[1] + away * (2 * HALF + gap)), (blue[0], blue[1] + away * (2 * HALF + gap) / 2)]
+    for name, kind in (("green", "cube"), ("yellow", "cuboid")):
+        for _ in range(100_000):
+            xy = polar(rng.uniform(0.16, 0.24), rng.uniform(-0.7, 0.7))
+            clear = all(math.dist(xy, p.xy) >= 0.07 for p in placed)
+            if clear and all(math.dist(xy, g) >= 0.06 for g in goal):
+                break
+        else:
+            raise AssertionError(f"seed {seed}: no free spot")
+        placed.append(Placed(name, xy, float(rng.uniform(0.0, 90.0)), kind))
+    across = {"relation": "across", "targets": ["blue cube", "green cube"]}
+    plan = [{"pick": "green cube", "place": {"relation": "next_to", "targets": ["blue cube"], "side": side,
+                                             "gap_m": round(gap, 3)}},
+            {"pick": "yellow cuboid", "place": across}]
+    return placed, json.dumps(plan), round(gap, 3)
 
 
-@pytest.mark.skipif(CAMPAIGN <= 0, reason="set SOARM_BUILD_CAMPAIGN=<runs> for the seeded campaign")
-@pytest.mark.parametrize("scenario", list(SCENARIOS))
+def build_bridge(twin: Twin, seed: int, seconds: float = 600.0) -> Result:
+    """Run one seeded bridge build from its fixed plan to its end, then judge it by truth."""
+    placed, plan_json, gap = bridge_layout(seed)
+    names = tuple(b.name for b in placed)
+    rest = {b.name: block(b.kind).half_size[2] for b in placed}
+    add_blocks(twin, *placed)
+    settle(twin, 0.5)
+    clock = Clock()
+    settings = BuildSettings(plan_json=plan_json, judge="none", wrist_camera="")
+    strategy = BuildStrategy(settings, threaded=False)
+    runner = StrategyRunner(twin, strategy, objects=Cameras(twin, clock, names, kinds={"yellow": "cuboid"}))
+    seen = Recorder(twin, strategy, clock, names, "blue")
+    t0 = time.monotonic()
+    runner.start(threaded=False)
+    drive(twin, runner, seconds, clock, watch=seen)
+    wall = time.monotonic() - t0
+    if runner.status.running:
+        runner.stop()
+    settle(twin)
+    (blue, rb), (green, rg), (yellow, ry) = (truth(twin, n) for n in names)
+    problems = []
+    beside = float(np.linalg.norm(green[:2] - blue[:2]))
+    if abs(beside - (2 * HALF + gap)) > TOWER_XY_M or abs(green[2] - HALF) > TOWER_Z_M:
+        problems.append(f"green {beside * 1000:.0f} mm from blue, at {green[2] * 1000:.0f} mm")
+    off = float(np.linalg.norm(yellow[:2] - (blue[:2] + green[:2]) / 2))
+    level = abs(yellow[2] - (2 * HALF + rest["yellow"])) <= TOWER_Z_M
+    if off > TOWER_XY_M or not level:
+        problems.append(f"bridge {off * 1000:.1f} mm off, at {yellow[2] * 1000:.1f} mm")
+    tilt = max(tilt_deg(r) for r in (rb, rg, ry))
+    if tilt > TOWER_TILT_DEG:
+        problems.append(f"tilted {tilt:.1f} deg")
+    why = "; ".join(problems)
+    st = strategy.status
+    return Result(seed, not why, why, st.outcome, st.success, st.done, st.replans, st.retries, clock.t, wall,
+                  False, seen.artefacts(rest), [r.outcome.split(":")[0] for r in st.records],
+                  st.stopped_because, len(seen.children), off if level else math.nan, seen.timeline,
+                  seen.steps_run(), [r.to_dict() for r in st.records], seen.corrections(), seen.dips())
+
+
+#: Runs per scenario without `SOARM_CAMPAIGN_RUNS`; the campaign runs only when either variable is set.
+RUNS = 10
+CAMPAIGN = campaign_dir() is not None or runs_per_scenario(0) > 0
+#: Scenarios: `build_tower` keywords, a camera error [m] in a seeded direction, or the bridge.
+SCENARIOS: dict[str, dict[str, Any]] = {
+    "tower, fixed plan": {"planned": False},
+    "tower, fake planner": {"planned": True},
+    "tower, fixed plan, wrist camera": {"planned": False, "wrist_camera": "wrist"},
+    "tower, fixed plan, wrist camera, cameras 5 mm off": {"planned": False, "wrist_camera": "wrist",
+                                                          "camera_error_m": 0.005},
+    "knocked tower, fixed plan": {"planned": False, "knock": True},
+    "knocked tower, fake planner": {"planned": True, "knock": True},
+    "bridge, fixed plan": {"bridge": True}}
+#: Pass bars: the share of runs built by the strategy and by truth, without artefacts. The run with a camera
+#: error only measures.
+BARS = {"tower, fixed plan": 0.8, "tower, fake planner": 0.8, "tower, fixed plan, wrist camera": 0.8,
+        "tower, fixed plan, wrist camera, cameras 5 mm off": 0.0, "knocked tower, fixed plan": 0.6,
+        "knocked tower, fake planner": 0.6, "bridge, fixed plan": 0.8}
+
+
+def as_run(scenario: str, result: Result, settings: dict[str, Any]) -> Run:
+    """A campaign record of `result`: the pick_place runs, and the structure's offset by truth. Blocks that
+    sank into each other count as artefacts here."""
+    artefacts = result.artefacts + result.dips
+    if result.outcome != BUILT:
+        last = result.step_outcomes[-1] if result.step_outcomes else ""
+        reason = f"{result.outcome or 'no outcome'}" + (f" after {last}" if last else "")
+    elif not result.tower:
+        reason = "built, but not standing by truth"
+    else:
+        reason = "artefact" if artefacts else ""
+    good = result.tower and result.success and not artefacts
+    why = "" if good else "; ".join(x for x in (result.why, result.reason) if x)
+    details = {"settings": settings, "why": why,
+               "outcome": result.outcome, "steps": result.steps, "replans": result.replans,
+               "retries": result.retries, "knocked": result.knocked, "step_outcomes": result.step_outcomes,
+               "records": result.records, "steps_run": result.steps_run, "timeline": result.timeline}
+    return Run(f"build: {scenario}", result.seed, good, result.picks, result.offset_m, reason, artefacts,
+               result.sim_s, result.wall_s, details, result.corrections)
+
+
+@pytest.mark.campaign
+@pytest.mark.skipif(not CAMPAIGN, reason="set SOARM_CAMPAIGN_RUNS or SOARM_CAMPAIGN_DIR for the campaign")
+@pytest.mark.parametrize("scenario", [
+    pytest.param(name, marks=pytest.mark.render) if settings.get("wrist_camera") else name
+    for name, settings in SCENARIOS.items()])
 def test_seeded_campaign(twin_robots, scenario, capsys):
+    settings = dict(SCENARIOS[scenario])
+    error = settings.pop("camera_error_m", 0.0)
     results = []
-    for seed in range(100, 100 + CAMPAIGN):
+    for seed in range(100, 100 + runs_per_scenario(RUNS)):
+        a = np.random.default_rng(10_000 + seed).uniform(0.0, 2 * math.pi)
+        offset = (error * math.cos(a), error * math.sin(a))
         with fresh_twin() as twin:
-            results.append(build_tower(twin, seed, **SCENARIOS[scenario]))
+            if settings.get("bridge"):
+                result = build_bridge(twin, seed)
+            else:
+                result = build_tower(twin, seed, offset=offset, **settings)
+        record(as_run(scenario, result, {**settings, "camera_offset_m": offset}))
+        results.append(result)
     good = [r for r in results if r.tower and r.success and not r.artefacts]
     with capsys.disabled():
-        print(f"\n{scenario}: {len(good)}/{len(results)} towers by truth, built and clean")
+        print(f"\n{scenario}: {len(good)}/{len(results)} built by truth and clean")
         for r in results:
             mark = "ok " if r in good else "BAD"
-            print(f"  {mark} seed {r.seed}: tower={r.tower} outcome={r.outcome} steps={r.steps} "
-                  f"replans={r.replans} retries={r.retries} sim={r.sim_s:.0f}s wall={r.wall_s:.0f}s "
-                  f"knocked={r.knocked} steps={r.step_outcomes} {r.why} {'; '.join(r.artefacts)}"
+            print(f"  {mark} seed {r.seed}: built={r.tower} outcome={r.outcome} steps={r.steps} "
+                  f"picks={r.picks} replans={r.replans} retries={r.retries} sim={r.sim_s:.0f}s "
+                  f"wall={r.wall_s:.0f}s knocked={r.knocked} steps={r.step_outcomes} {r.why} "
+                  f"{'; '.join(r.artefacts + r.dips)}"
                   f"{'' if r in good else ' | ' + r.reason}")
-    assert len(good) >= math.ceil(BARS[scenario] * len(results))
+    assert len(good) >= math.ceil(BARS[scenario] * len(results) - 1e-9)
