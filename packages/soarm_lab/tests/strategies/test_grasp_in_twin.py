@@ -234,7 +234,9 @@ def test_its_settings_become_the_panel_form():
     assert fields["recover_m"].default == 0.15
     floats = [name for name in fields if name not in ("label", "block", "probe", "close_jaw", "need_contact",
                                                       "max_attempts", "release", "grasp_source",
-                                                      "library_dir")]
+                                                      "library_dir", "jaw_file")]
+    assert fields["jaw_file"].kind is str and fields["jaw_file"].default == ""
+    assert fields["jaw_gap_offset_m"].default == 0.0
     assert all(fields[name].kind is float for name in floats)
     assert not any(field.required for field in fields.values())
 
