@@ -45,7 +45,8 @@ GRASP_FIELDS = TOUCH_FIELDS + ["block", "probe", "open_margin_m", "squeeze_m", "
 GRASP_WRIST_FIELDS = GRASP_FIELDS + ["wrist_camera", "max_frame_age_s", "frame_wait_s", "hue_deg",
                                      "hue_window_deg", "min_saturation", "min_value", "focal_px",
                                      "tip_pixel_x", "tip_pixel_y", "rotate_180", "centre_tol_m",
-                                     "max_shift_m", "rounds", "min_fit_iou", "look_before_straddle"]
+                                     "max_shift_m", "rounds", "min_fit_iou", "look_before_straddle",
+                                     "close_rounds", "close_tol_m", "correction_gain", "residual_file"]
 #: The simulated clock's step, and the twin loop's period [s].
 CLOCK_STEP = 0.01
 TWIN_PERIOD = 0.02
@@ -198,7 +199,10 @@ def test_its_settings_become_the_panel_form():
     assert fields["look_before_straddle"].kind is bool and fields["look_before_straddle"].default is True
     assert fields["hue_deg"].default == -1.0 and fields["centre_tol_m"].default == 0.003
     floats = GRASP_WRIST_FIELDS[GRASP_WRIST_FIELDS.index("max_frame_age_s"):]
-    floats = [name for name in floats if name not in ("rounds", "rotate_180", "look_before_straddle")]
+    floats = [name for name in floats if name not in ("rounds", "rotate_180", "look_before_straddle",
+                                                      "close_rounds", "residual_file")]
+    assert fields["close_rounds"].kind is int and fields["close_rounds"].default == 3
+    assert fields["residual_file"].kind is str and fields["residual_file"].default == ""
     assert all(fields[name].kind is float for name in floats)
     assert not any(field.required for field in fields.values())
 

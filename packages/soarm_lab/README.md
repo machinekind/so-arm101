@@ -76,8 +76,8 @@ With this package installed alongside the twin, its Strategies tab offers:
   [Jev in the touch loop](#jev-in-the-touch-loop).
 - `grasp`: grips and lifts a block from above, monitors the hold and recovers after a drop;
   see [Grasp a block](#grasp-a-block).
-- `grasp_wrist`: refines the grasp aim and yaw from the wrist camera at the hover;
-  see [Wrist camera](#wrist-camera).
+- `grasp_wrist`: refines the grasp aim and yaw from the wrist camera at the hover, then centres the
+  open jaw on the block before it closes and retries a bad close; see [Wrist camera](#wrist-camera).
 - `grasp_jev`: judges the close and lift, then applies the chosen grasp step;
   see [Jev in the grasp loop](#jev-in-the-grasp-loop).
 - `pick_place`: picks a block and places it on another block or a table spot, then checks the
@@ -128,6 +128,10 @@ grasp_wrist:
   hue_deg: -1.0
   centre_tol_m: 0.003
   look_before_straddle: true
+  close_rounds: 3            # 0: close without the look between the jaw tips
+  close_tol_m: 0.0025
+  correction_gain: 1.0
+  residual_file: ""          # e.g. a file in the stand folder
 pick_place:
   label: red cube
   block: cube
@@ -385,6 +389,40 @@ then continues from the settled aim. Looks consume no grasp attempts. A grasp wi
 looks too, and is stricter: when the measured block does not fit a tilted grasp, or the look gives
 no yaw for a block whose pose has none, the run ends before the jaw goes down. Focal length, mount
 alignment and colour thresholds still need calibration on the stand.
+
+#### Between the jaw tips
+
+At the bottom of the straddle, with the open jaw around the block, the camera looks again before the
+jaw closes. It fits the block in the frame and measures how far the block lies from the jaw tips'
+midpoint, along the closing line and across it. The block and the tips come from the same frame and
+the same measured joints, so most of an error in where the arm thinks it is cancels out. A wrong
+`focal_px` only changes how far each correction goes. The tip pixel still matters: it sets where the
+tips are in the frame.
+
+When the block lies more than `close_tol_m` off, the jaw first slides along the closing line to centre
+on the block, so neither tip drags it. The arm then rises with the jaw open, moves the aim by
+`correction_gain` times the offset, straddles again without the hover look and looks again. This
+repeats up to `close_rounds` times per attempt. A block still off after the last round counts as a
+failed attempt; the last attempt closes anyway. `close_rounds: 0` closes without this look.
+
+With a camera, a failed close is retried instead of ending the run: an empty close, or a jaw that
+stops more than 6 mm from the block's width (an edge grip; the jaw opens first). The arm rises with
+the jaw open and comes back to the hover, where the hover look finds the block again. This repeats up
+to `max_attempts`, and the last attempt lifts what it holds. Plain `grasp` keeps its old behaviour.
+
+`residual_file` keeps, per stand, a running mean over the last 10 runs of how far the camera moved the
+aim from the detector's first pose, written after each lift. The next run adds it to the first aim.
+A missing file starts empty; an unreadable one is ignored and rewritten.
+
+The status lists every look between the tips in `wrist.close_looks` (attempt, round, offsets, verdict)
+and the last one in `wrist.final_offset_m`. Panel notes show each look ("kamera w szczekach: ..."), and
+the success note ends with the attempts and the final offset.
+
+Limits: the camera looks at the block from the side, so a height error between the jaw and the block,
+for example from joint backlash, reads as an offset across the jaw, about half as large. In the twin
+with 6 mm of hidden backlash at the hand, the jaws end about 2 mm from the block's centre.
+A `correction_gain` above 1 overshot there. More rounds or a slightly larger `close_tol_m` avoid
+retries the backlash cannot fix.
 
 See [wrist settings](soarm_lab/strategies/wrist.py) for the full interface.
 

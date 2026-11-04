@@ -27,9 +27,12 @@ The verified block stays at lift height for `carry_s`. Success keeps the squeeze
 `release` is enabled. `release()` ends monitoring and opens the jaw without moving the arm.
 
 Subclasses can refine the aim through `before_straddle`. With the probe on, `before_descent`
-also refines the aim, and `after_touch` and `after_miss` judge the probe.
-`after_grasp_failed` handles grasp failures. Subclasses can extend `carrying` and return
-`release()` for a handover.
+also refines the aim, and `after_touch` and `after_miss` judge the probe. `before_close` runs at the
+bottom of the straddle with the open jaw around the block, before the jaw closes.
+`after_grasp_failed` handles grasp failures. A subclass that can look again (`_looks_again`) also treats
+a jaw closed far from the block's width as a failed close (`EDGE_GRIP_M`), and retries an empty or
+edge close from the hover within `max_attempts`, with the jaw open on the way up.
+Subclasses can extend `carrying` and return `release()` for a handover.
 `candidates` supplies geometry or library grasps. `grasp_verdict` supplies the verdict for logs
 and judges.
 
@@ -136,6 +139,8 @@ MAX_HAND_TILT_DEG = 45.0
 TILT_RESTARTS = 2
 #: Why no tilted grasp was tried: the block's yaw is unknown.
 NEEDS_YAW = "dlon pochylona potrzebuje obrotu bloku"
+#: A held jaw whose gap differs from the chosen grasp width by more than this grips an edge [m].
+EDGE_GRIP_M = 0.006
 
 #: Phases of a run after touch's (`TouchStatus.phase`).
 RISE = "rise"
@@ -152,6 +157,10 @@ RECOVER = "recover"
 #: Open the jaw after ending hold monitoring.
 RELEASE = "release"
 RETARGET = "retarget"
+#: Open the jaw on an edge grip before rising for another attempt.
+REOPEN = "reopen"
+#: A rise target: straddle again at a corrected aim with the jaw kept open (`_start_rise`).
+RESTRADDLE = "restraddle"
 
 #: Consecutive empty readings required to declare a drop. Ignore an isolated bad reading.
 EMPTY_TICKS = 2
@@ -177,6 +186,8 @@ VERDICTS = {
     "recovering": "ponowna proba po upadku",
     "taken": "blok zabrany - czekam na czlowieka",
     "released": "blok oddany",
+    "edge": "szczeka chwycila blok za krawedz",
+    "off": "kamera widzi blok poza srodkiem szczek",
 }
 
 
@@ -269,6 +280,8 @@ class GraspStatus:
     hold_ticks: int = 0
     straddle_stalls: int = 0
     empty_closes: int = 0
+    #: Closes that held the block with a gap far from its width (`EDGE_GRIP_M`).
+    edge_closes: int = 0
     #: How far the measured TCP rose above the grasp point [m].
     lifted_m: float = float("nan")
     #: Grasp verdict key in `VERDICTS`, or '' before a verdict.
@@ -444,6 +457,8 @@ class GraspStrategy(TouchStrategy):
         self._rise_then = OPEN
         self._rise_z0 = float("nan")
         self._rise_point = np.zeros(3)
+        #: A sideways move at the current height before the rise [m, base frame], or None.
+        self._rise_ease: np.ndarray | None = None
         # Straddle and lift TCP targets [m, base frame].
         self._straddle_xy = np.full(2, np.nan)
         self._grasp_z = float("nan")
@@ -461,6 +476,7 @@ class GraspStrategy(TouchStrategy):
         # Hover hooks remain pending until they return None.
         self._before_descent_pending = False
         self._before_straddle_pending = False
+        self._before_close_pending = False
         self._descent_waited = False
         # Last monitored step, empty streak, drop time [s, obs.t], drop position [m, base frame]
         # and recovery opening [rad].
@@ -472,7 +488,7 @@ class GraspStrategy(TouchStrategy):
         self._phases.update({RISE: self._rise, OPEN: self._open, STRADDLE: self._straddle,
                              STRADDLED: self._straddled, CLOSE: self._close, LIFT_OFF: self._lift_off,
                              CHECK: self._check, CARRY: self._carry, RECOVER: self._recover,
-                             RELEASE: self._release})
+                             RELEASE: self._release, REOPEN: self._reopen})
 
     def _probe_z(self) -> float:
         """Return the probe's bottom TCP height [m above the table, base frame].
@@ -568,6 +584,7 @@ class GraspStrategy(TouchStrategy):
         self._lift_m = cfg.lift_m
         self._turn_t0 = float("nan")
         self._before_descent_pending = self._before_straddle_pending = self._descent_waited = False
+        self._before_close_pending = False
 
     def _q(self, gripper: float) -> float:
         """A gripper command [app units] as the gripper joint's angle [rad]."""
@@ -978,6 +995,8 @@ class GraspStrategy(TouchStrategy):
             self._before_descent_pending, self._descent_waited = True, False
         if phase == OPEN:
             self._before_straddle_pending = True
+        if phase == STRADDLE:
+            self._before_close_pending = True
 
     # ------------------------------------------------------------------ the hover and the probe
     def _approach(self, obs: Observation) -> Action | None:
@@ -1072,23 +1091,40 @@ class GraspStrategy(TouchStrategy):
         return self._halt(reason, self.kin.from_q(self.q_cmd))
 
     # ------------------------------------------------------------------ the grasp
-    def _start_rise(self, then: str) -> None:
+    def _start_rise(self, then: str, *, jaw_open: bool = False, ease: np.ndarray | None = None) -> None:
         """Rise vertically to at least the hover, then enter `then`.
 
-        RECOVER opens to `_recover_open_q`. OPEN and RETARGET close the jaw after clearing the block.
+        RECOVER opens to `_recover_open_q`. OPEN and RETARGET close the jaw after clearing the block, unless
+        `jaw_open` keeps it at the grasp opening, as for a rise from the open jaw around the block.
+        RESTRADDLE then goes to OPEN at the current aim. `ease` [m, base frame x and y] first moves the hand
+        sideways at its height, so a jaw beside the block leaves its face before going up.
         """
         self._rise_then = then
         self._rise_z0 = float(self._tcp_measured[2])
         hover_z = self.config.touch_z + self.config.hover_m
-        self._rise_point = np.array([self.tcp_cmd[0], self.tcp_cmd[1], max(hover_z, float(self.tcp_cmd[2]))])
+        start = self.tcp_cmd.copy()
+        self._rise_ease = None
+        if ease is not None and float(np.linalg.norm(ease)) > self.ik_tol:
+            start[:2] += np.asarray(ease, float)
+            self._rise_ease = start.copy()
+        self._rise_point = np.array([start[0], start[1], max(hover_z, float(start[2]))])
         self._empty_ticks = 0
-        self._jaw_goal_q = self._recover_open_q if then == RECOVER else float(self._lo[self._g])
+        if then == RECOVER:
+            self._jaw_goal_q = self._recover_open_q
+        elif jaw_open:
+            self._set_jaw_goal(self.cmd_open)
+        else:
+            self._jaw_goal_q = float(self._lo[self._g])
         self._enter(RISE)
 
     def _rise(self, obs: Observation) -> Action | None:
         # Let the supervisor reach the held pose before rising.
         if not self._command_on_target and self._t - self._phase_t0 < HOLD_WAIT_S:
             return self.hold()
+        if self._rise_ease is not None:
+            if not self._arrived(self._rise_ease):
+                return self._drive(self._rise_ease, self.descend_step_m)
+            self._rise_ease = None
         arrived = self._arrived(self._rise_point)
         # Clear the block before closing so the moving tip cannot sweep across its top.
         # Recovery opens the jaw immediately.
@@ -1096,7 +1132,7 @@ class GraspStrategy(TouchStrategy):
         if self._rise_then == RECOVER or arrived or clear:
             self._ramp_jaw()
         if arrived and self._jaw_ready():
-            if self._rise_then == OPEN:
+            if self._rise_then in (OPEN, RESTRADDLE):
                 self._enter(OPEN)
                 return None
             if self._rise_then == RECOVER:
@@ -1161,11 +1197,24 @@ class GraspStrategy(TouchStrategy):
         if self._settled(self.grasp_target):
             if st.rise_m > self.config.contact_gap_m / 2:
                 return self._straddle_stall()
+            if self._before_close_pending:
+                action = self.before_close(obs)
+                if action is not None:
+                    return action
+                self._before_close_pending = False
             self._enter(CLOSE)
             self._q_open_entry = self.reading.q
             self._jaw_moved, self._still_ticks = False, 0
             return None
         return self._drive(self.grasp_target, self.descend_step_m)
+
+    def before_close(self, obs: Observation) -> Action | None:
+        """Run at the bottom of the straddle, settled with the open jaw around the block, until it returns
+        None.
+
+        Overrides may hold, or end the straddle through `_start_rise` and return its action. Return None to
+        close the jaw. The default returns None immediately."""
+        return None
 
     def _straddle_stall(self) -> Action:
         """Hold the measured pose when a jaw tip stalls on the block."""
@@ -1195,6 +1244,10 @@ class GraspStrategy(TouchStrategy):
         self._jaw_moved |= reading.q <= self._q_open_entry - jaw.margin
         self._still_ticks = self._still_ticks + 1 if self._jaw_moved and reading.still else 0
         if self._jaw_ready() and self._still_ticks >= self.settle_ticks:
+            if reading.holding and self._edge_grip():
+                self.grasp.edge_closes += 1
+                self.grasp.verdict = "edge"
+                return self.after_grasp_failed("edge", obs)
             if reading.holding:
                 assert self._jaw is not None
                 self._jaw.mark()
@@ -1221,6 +1274,20 @@ class GraspStrategy(TouchStrategy):
             # The tips meet the block together, so it does not slide across the block under it.
             return self._drive(self._close_point(), self.approach_step_m)
         return self.hold()
+
+    def _edge_grip(self) -> bool:
+        """Whether the held jaw's gap lies more than `EDGE_GRIP_M` from the chosen grasp width.
+
+        Checked only where a failed close is retried after another look (`_looks_again`) and attempts
+        remain: the last attempt lifts what it holds."""
+        if not self._looks_again or self.status.attempt >= self.grasp_settings.max_attempts:
+            return False
+        return abs(self.grasp.jaw_gap_m - self._width_m) > EDGE_GRIP_M
+
+    @property
+    def _looks_again(self) -> bool:
+        """Whether a retry from the hover looks at the block again. Plain grasp has no camera."""
+        return False
 
     def _follow_step_q(self) -> float:
         """The jaw step [rad] that moves the fingertips' midpoint `descend_step_m` in one tick."""
@@ -1288,9 +1355,13 @@ class GraspStrategy(TouchStrategy):
             if cfg.release:
                 return self.release()
             return self._halt(f"blok w szczekach, podniesiony o {grasp.lifted_m * 1000:.0f} mm, niesiony "
-                              f"{grasp.carried_s:.1f} s (szczeka {grasp.jaw_gap_m * 1000:.0f} mm)",
-                              self.kin.from_q(self.q_cmd), success=True)
+                              f"{grasp.carried_s:.1f} s (szczeka {grasp.jaw_gap_m * 1000:.0f} mm)"
+                              + self._close_summary(), self.kin.from_q(self.q_cmd), success=True)
         return self.hold()
+
+    def _close_summary(self) -> str:
+        """Text added to the success note about how the close was aimed. Plain grasp adds none."""
+        return ""
 
     def carrying(self, obs: Observation, reading: JawReading) -> Action | None:
         """Monitor the hold once per tick during LIFT_OFF, CHECK and CARRY.
@@ -1474,12 +1545,16 @@ class GraspStrategy(TouchStrategy):
         return np.mean(self.kin.fingertips(joints), axis=0)
 
     def after_grasp_failed(self, why: str, obs: Observation) -> Action:
-        """Handle "tip" or "empty" while holding the arm's pose.
+        """Handle "tip", "empty", "edge" or "off" while holding the arm's pose.
 
-        A tip stall retries half the chosen grasp width away while attempts remain. Without the probe,
-        an empty close after a sideways retry tries the other side within the same attempt budget.
-        Any other empty close ends the run. Overrides that await a judge must enter their own phase."""
+        Where a retry looks again (`_looks_again`), an empty or edge close or an aim the camera saw off the
+        block retries from the hover at the current aim while attempts remain (`retry`). Otherwise a tip
+        stall retries half the chosen grasp width away while attempts remain, and, without the probe, an
+        empty close after a sideways retry tries the other side within the same attempt budget. Any other
+        empty close ends the run. Overrides that await a judge must enter their own phase."""
         attempt = self.status.attempt
+        if why in ("edge", "off") or (why == "empty" and self._looks_again):
+            return self.retry(why)
         if why == "empty":
             if not self.grasp_settings.probe and self._shift_k >= 1:
                 if attempt < self.grasp_settings.max_attempts and self._next_shift() is not None:
@@ -1493,6 +1568,40 @@ class GraspStrategy(TouchStrategy):
                               self.kin.from_q(self.q_cmd))
         self._start_rise(RETARGET)
         return self.hold("szczeka na bloku - w gore i obok")
+
+    def retry(self, why: str, ease: np.ndarray | None = None) -> Action:
+        """Start another attempt at the current aim after a failed close `why`, or end the run.
+
+        An edge grip opens the jaw first (REOPEN). The arm rises with the jaw open, after the sideways `ease`
+        [m] if given (`_start_rise`), re-aims at the current block point and approaches the hover again, so a
+        look before the straddle sees the block anew. With `probe` the jaw closes once clear of the block, so
+        the next probe descends with the closed jaw."""
+        attempt, cfg = self.status.attempt, self.grasp_settings
+        text = VERDICTS.get(why, why)
+        if attempt >= cfg.max_attempts or self.grasp.block_xy is None:
+            return self._halt(f"wyczerpane proby chwytu ({attempt}): {text}", self.kin.from_q(self.q_cmd))
+        self._retarget_xy = np.array(self.grasp.block_xy, float)
+        # Sideways retries after a tip stall start again from what the next look sees.
+        self._block_xy0, self._shift_k = None, 0
+        logger.info("Chwyt nieudany (%s) - proba %d z %d", text, attempt + 1, cfg.max_attempts)
+        if why == "edge":
+            self._set_jaw_goal(self.cmd_open)
+            self._enter(REOPEN)
+            return self.hold(f"{text} - otwieram szczeke, proba {attempt + 1}")
+        self._start_rise(RETARGET, jaw_open=not cfg.probe, ease=ease)
+        return self.hold(f"{text} - w gore, proba {attempt + 1}")
+
+    def _reopen(self, obs: Observation) -> Action:
+        """Open the jaw on an edge grip without moving the arm, then rise for another attempt."""
+        self._ramp_jaw()
+        if self._jaw_ready() and abs(self.reading.q - float(self.q_cmd[self._g])) <= self.kin.spec.jaw.margin:
+            self._start_rise(RETARGET, jaw_open=not self.grasp_settings.probe)
+            return self.hold(f"{VERDICTS['edge']} - w gore, proba {self.status.attempt + 1}")
+        if self._t - self._phase_t0 >= JAW_WAIT_S:
+            gaps = f"{self.grasp.jaw_gap_m * 1000:.0f} mm zamiast {self.gap_open_m * 1000:.0f} mm"
+            return self._halt(f"szczeka nie otworzyla sie w {JAW_WAIT_S:.0f} s ({gaps})",
+                              self.kin.from_q(self.q_cmd))
+        return self.hold()
 
     def _next_shift(self) -> np.ndarray | None:
         """Store and return the next retry centre, or None when shifts are exhausted.
@@ -1539,8 +1648,11 @@ class GraspStrategy(TouchStrategy):
         st, grasp = self.status, self.grasp
         mm = st.distance * 1000
         if st.phase == RISE:
-            rise = {OPEN: "w gore po dotyku", RECOVER: "blok wypadl ze szczeki - w gore"}
+            rise = {OPEN: "w gore po dotyku", RECOVER: "blok wypadl ze szczeki - w gore",
+                    RESTRADDLE: "w gore, poprawiam chwyt"}
             text = rise.get(self._rise_then, "w gore znad bloku") + f": {mm:.0f} mm"
+        elif st.phase == REOPEN:
+            text = "chwyt za krawedz - otwieram szczeke"
         elif st.phase == APPROACH:
             text = ("nad obiekt: zamykam szczeke" if not self._jaw_ready() else f"nad obiekt: {mm:.0f} mm")
             text += self._source_note() + self._tilt_note()

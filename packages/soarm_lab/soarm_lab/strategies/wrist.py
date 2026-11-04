@@ -31,15 +31,34 @@ A grasp with the hand tilted looks too: the camera pose comes from the measured 
 closes square to the arm, so it needs the block's yaw. The run ends before the straddle when the
 measured block does not fit a tilted grasp, or when the look gives no yaw for a block whose pose has
 none.
+
+At the bottom of the straddle, with the open jaw around the block, a look between the jaw tips
+(`before_close`) fits the block in the frame and measures its offset from the tips' midpoint along the
+closing line and across it. The block and the tips come from the same frame and the same measured
+joints, so most of an error in the arm's pose or calibration cancels, and a wrong focal length only
+scales a correction. A height error between the jaw and the block still reads partly as an offset
+across the jaw, since the camera sees the block from the side. An offset above `close_tol_m` moves the
+aim by `correction_gain` times the offset: the jaw first slides along the closing line to centre on the
+block, the arm rises with the jaw open, straddles again at the new aim without the hover look, and
+looks again, up to `close_rounds` times per attempt. A block still off after the last round is a failed
+attempt; the last attempt closes anyway. An empty or edge close also retries from the hover with a new
+look, within `max_attempts`. Skipped looks close as before.
+
+With `residual_file` set, a successful lift adds the camera-corrected aim at the close minus the
+detector's first aim to a running mean over the last `RESIDUAL_RUNS` runs, and the next run's first aim
+adds that mean. A missing file starts empty; an unreadable one is ignored and rewritten.
 """
 
 from __future__ import annotations
 
 import importlib
+import json
 import logging
 import math
+import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -48,7 +67,7 @@ from machinekind_twin_api.strategy import Action, Observation, RunInfo
 from ..blocks import BlockSpec
 from ..kinematics import RobotKinematics
 from ..robot import RobotCamera
-from .grasp import NEEDS_YAW, GraspSettings, GraspStrategy, wrap
+from .grasp import CARRY, CLOSE, NEEDS_YAW, RESTRADDLE, GraspSettings, GraspStrategy, wrap
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +113,12 @@ LOOK_STALL_S = 3.0
 TARGET_MOVED_DEG = 0.05
 #: Sub-pixel precision of the drawn silhouettes: fixed-point bits of `cv2.fillConvexPoly`.
 _SHIFT = 4
+#: The residual's running mean weighs at most this many past runs [count].
+RESIDUAL_RUNS = 10
+#: A larger correction of the detector's aim is not added to the residual [m].
+RESIDUAL_MAX_M = 0.05
+#: The largest `correction_gain`.
+MAX_CORRECTION_GAIN = 2.0
 
 #: The phases of a look.
 MEASURE = "measure"
@@ -478,6 +503,15 @@ class WristGraspSettings(GraspSettings):
     #: With `probe`, look again before the straddle to correct movement caused by the probe.
     #: Without the probe, the open-jaw hover look always runs when a camera is configured.
     look_before_straddle: bool = True
+    #: Corrections per attempt from the look between the open jaw tips at the bottom of the straddle.
+    #: Zero closes without that look [count].
+    close_rounds: int = 3
+    #: The jaw closes once the block lies this close to the jaw tips' midpoint [m].
+    close_tol_m: float = 0.0025
+    #: Each correction moves the aim by this share of the measured offset; above 1 makes up for backlash.
+    correction_gain: float = 1.0
+    #: JSON file with this stand's mean correction of the detector's aim. Empty keeps none [path].
+    residual_file: str = ""
 
 
 @dataclass(frozen=True)
@@ -525,6 +559,33 @@ class Look:
     text: str = ""
 
 
+@dataclass(frozen=True)
+class CloseLook:
+    """One look between the open jaw tips at the bottom of the straddle."""
+
+    #: The attempt and the corrections made in it before this look.
+    attempt: int
+    round: int
+    #: The block's offset from where the grasp puts it between the tips [m], along the closing line
+    #: (toward the moving jaw) and across it; NaN when not measured.
+    along_m: float
+    across_m: float
+    #: 'centred', 'moved', 'off' or 'skipped', and why for the last two.
+    verdict: str
+    why: str = ""
+
+
+@dataclass
+class _CloseState:
+    """Progress of one look between the jaw tips until `before_close` returns None."""
+
+    t0: float
+    still_ticks: int = 0
+    q_prev: np.ndarray | None = None
+    t_wait0: float = float("nan")
+    done: bool = False
+
+
 @dataclass
 class WristStatus:
     """Wrist measurements and look verdicts alongside `GraspStatus` for logs and tests."""
@@ -551,6 +612,13 @@ class WristStatus:
     skipped: str = ""
     #: The verdict of every finished look, in order.
     verdicts: list[str] = field(default_factory=list)
+    #: Every look between the open jaw tips, in order.
+    close_looks: list[CloseLook] = field(default_factory=list)
+    #: The offset the last look between the tips measured before the close [m], along and across.
+    final_offset_m: tuple[float, float] = (float("nan"), float("nan"))
+    #: The correction from `residual_file` added to the first aim [m, base frame] and the runs it averages.
+    residual_m: tuple[float, float] = (0.0, 0.0)
+    residual_runs: int = 0
 
 
 class WristGraspStrategy(GraspStrategy):
@@ -589,6 +657,13 @@ class WristGraspStrategy(GraspStrategy):
             raise ValueError(f"grasp_wrist: rounds must be at least 1, is {config.rounds}")
         if not 0 < config.min_fit_iou < 1:
             raise ValueError(f"grasp_wrist: min_fit_iou must lie within (0, 1), is {config.min_fit_iou}")
+        if not config.close_rounds >= 0:
+            raise ValueError(f"grasp_wrist: close_rounds must be zero or more, is {config.close_rounds}")
+        if not config.close_tol_m > 0:
+            raise ValueError(f"grasp_wrist: close_tol_m must be positive, is {config.close_tol_m}")
+        if not 0 < config.correction_gain <= MAX_CORRECTION_GAIN:
+            raise ValueError(f"grasp_wrist: correction_gain must lie within (0, {MAX_CORRECTION_GAIN:g}], "
+                             f"is {config.correction_gain}")
         super().__init__(config)
         self.wrist_settings = config
         self.wrist = WristStatus()
@@ -600,6 +675,23 @@ class WristGraspStrategy(GraspStrategy):
         self._tip_tcp = np.zeros(3)
         #: The current look measured the block's yaw and the aim follows it.
         self._yaw_seen = False
+        self._reset_close()
+        #: The detector's aim correction for the first aim [m, base frame].
+        self._residual = np.zeros(2)
+
+    def _reset_close(self) -> None:
+        #: The look between the jaw tips in progress, the attempt its rounds count for and those rounds.
+        self._jaw_look: _CloseState | None = None
+        self._close_attempt = -1
+        self._close_round = 0
+        #: The next look before the straddle is skipped: the arm comes back from a correction.
+        self._skip_hover_look = False
+        #: The detector's first aim, and the aim when the jaw last started closing [m, base frame].
+        self._detector_xy: np.ndarray | None = None
+        self._closed_aim: np.ndarray | None = None
+        #: The aim at that close came from a look that centred the jaws.
+        self._closed_seen = False
+        self._residual_saved = False
 
     def start(self, run: RunInfo, obs: Observation) -> None:
         """Initialize grasp and validate the named camera and OpenCV before motion.
@@ -611,7 +703,13 @@ class WristGraspStrategy(GraspStrategy):
         self.wrist = WristStatus()
         self._look = None
         self._yaw_seen = False
+        self._reset_close()
         self._cv2, self._window, self._camera = None, None, None
+        self._residual = np.zeros(2)
+        if cfg.residual_file:
+            self._residual, runs = load_residual(cfg.residual_file)
+            self.wrist.residual_m = (float(self._residual[0]), float(self._residual[1]))
+            self.wrist.residual_runs = runs
         if not cfg.wrist_camera:
             return
         cv2 = _optional("cv2")
@@ -630,10 +728,12 @@ class WristGraspStrategy(GraspStrategy):
         self._tip_tcp = self.kin.jaw_centre(0.0)
 
     # ------------------------------------------------------------------ measuring
-    def measure(self, rgb: np.ndarray, joints: Mapping[str, float]) -> Measurement:
+    def measure(self, rgb: np.ndarray, joints: Mapping[str, float],
+                ref_xy: np.ndarray | None = None) -> Measurement:
         """Fit the block to RGB frame `rgb` using measured capture-pose `joints`.
 
-        Return centre and yaw or a measurement with `problem` set.
+        Search near `ref_xy` [m, base frame], by default the aim, and keep it along a side the image cannot
+        place. Return centre and yaw or a measurement with `problem` set.
         """
         cv2, camera = self._cv2, self._camera
         if cv2 is None or camera is None:
@@ -669,8 +769,10 @@ class WristGraspStrategy(GraspStrategy):
         # sees the block on a stack.
         T = T.copy()
         T[2, 3] -= self.base_z
-        assert self.grasp.block_xy is not None
-        aim = np.asarray(self.grasp.block_xy, float)
+        if ref_xy is None:
+            assert self.grasp.block_xy is not None
+            ref_xy = np.asarray(self.grasp.block_xy, float)
+        aim = np.asarray(ref_xy, float)
         window = self._window or self._sample_hue(small, Kw, T, visible, aim)
         if window is None:
             return _unusable(f"brak jednego koloru w miejscu bloku ({self.wrist.hue_share:.0%})")
@@ -757,6 +859,10 @@ class WristGraspStrategy(GraspStrategy):
         cfg = self.wrist_settings
         if not cfg.wrist_camera or (cfg.probe and not cfg.look_before_straddle):
             return None
+        if self._skip_hover_look and self._look is None:
+            # Back from a correction between the jaw tips: the hover look would undo it.
+            self._skip_hover_look = False
+            return None
         if self._look is None:
             self._look = self._new_look("straddle")
         action = self._look_step(obs, lambda: self.straddle_hover, settled)
@@ -768,6 +874,174 @@ class WristGraspStrategy(GraspStrategy):
     @property
     def _looking(self) -> bool:
         return self._look is not None
+
+    @property
+    def _looks_again(self) -> bool:
+        return self._camera is not None
+
+    # ------------------------------------------------------------------ the look between the jaw tips
+    def before_close(self, obs: Observation) -> Action | None:
+        """Look between the open jaw tips before the jaw closes. Return None to close.
+
+        Without a camera, or with `close_rounds` at zero, close at once."""
+        cfg = self.wrist_settings
+        if self._camera is None or cfg.close_rounds <= 0:
+            return None
+        look = self._jaw_look
+        if look is None:
+            if self._close_attempt != self.status.attempt:
+                self._close_attempt, self._close_round = self.status.attempt, 0
+            look = self._jaw_look = _CloseState(self._t)
+        if look.done:
+            self._jaw_look = None
+            return None
+        kin = self.kin
+        q = kin.to_q(self._measured)
+        moved = math.inf if look.q_prev is None else float(np.degrees(np.abs(q - look.q_prev)[kin.arm]).max())
+        look.still_ticks = look.still_ticks + 1 if moved <= JOINT_STILL_DEG else 0
+        look.q_prev = q
+        if look.still_ticks < self.settle_ticks:
+            if self._t - look.t0 >= LOOK_STALL_S:
+                return self._end_close_look("skipped", "ramie nie stoi w dole")
+            return self.hold("kamera w szczekach: czekam az ramie stanie")
+        frame = obs.frames.get(cfg.wrist_camera)
+        age = float(frame.age_s) if frame is not None else math.nan
+        if frame is None or not age <= cfg.max_frame_age_s:
+            if math.isnan(look.t_wait0):
+                look.t_wait0 = self._t
+            if self._t - look.t_wait0 >= cfg.frame_wait_s - 1e-9:
+                why = (f"brak klatki z kamery {cfg.wrist_camera}" if frame is None
+                       else f"klatka z kamery {cfg.wrist_camera} za stara ({age:.1f} s)")
+                return self._end_close_look("skipped", why)
+            return self.hold("kamera w szczekach: czekam na klatke")
+
+        mid = np.mean(kin.fingertips(self._measured), axis=0)[:2]
+        m = self.measure(frame.image, self._measured, ref_xy=mid)
+        self.wrist.measurements += 1
+        if m.problem:
+            return self._end_close_look("skipped", m.problem)
+        # Where the grasp puts the block between the tips: the jaw midpoint minus the grasp's offset.
+        error = m.xy - mid + np.asarray(self._offset_xy, float)
+        u = np.array([math.cos(self._psi), math.sin(self._psi)])
+        along, across = float(error @ u), float(error @ np.array([-u[1], u[0]]))
+        dist = float(np.linalg.norm(error))
+        where = f"{dist * 1000:.0f} mm (wzdluz {along * 1000:+.0f}, w poprzek {across * 1000:+.0f} mm)"
+        if dist > cfg.max_shift_m:
+            return self._end_close_look("skipped", f"blok {dist * 1000:.0f} mm od srodka szczek - nie ufam",
+                                        along, across)
+        self.wrist.final_offset_m = (along, across)
+        if dist <= cfg.close_tol_m:
+            return self._end_close_look("centred", f"kamera w szczekach: blok na srodku, {where}", along,
+                                        across)
+        if self._close_round < cfg.close_rounds:
+            return self._correct(error, along, across, f"kamera w szczekach: blok {where} od srodka")
+        why = f"blok {where} od srodka po {self._close_round} poprawkach"
+        if self.status.attempt < self.grasp_settings.max_attempts:
+            self._note_close("off", why, along, across)
+            self._jaw_look = None
+            return self.retry("off", ease=self._ease(along))
+        return self._end_close_look("off", f"kamera w szczekach: {why} - zamykam w ostatniej probie",
+                                    along, across)
+
+    def _correct(self, error: np.ndarray, along: float, across: float, text: str) -> Action:
+        """Move the aim by `correction_gain` times `error`, then rise with the jaw open and straddle again.
+
+        An aim the arm cannot take keeps the old one and closes."""
+        assert self.grasp.block_xy is not None
+        aim = np.asarray(self.grasp.block_xy, float) + self.wrist_settings.correction_gain * error
+        try:
+            self._aim(aim, strict=bool(self._tilt))
+        except RuntimeError as exc:
+            return self._end_close_look("skipped", f"poprawka poza zasiegiem: {exc}", along, across)
+        self._block_xy0 = aim.copy()
+        self._note_close("moved", "", along, across)
+        self._close_round += 1
+        self._jaw_look = None
+        self._skip_hover_look = True
+        self._start_rise(RESTRADDLE, jaw_open=True, ease=self._ease(along))
+        note = f"{text} - poprawka {self._close_round} z {self.wrist_settings.close_rounds}"
+        logger.info("Kamera w szczekach: %s", note)
+        return self.hold(note)
+
+    def _ease(self, along: float) -> np.ndarray:
+        """The move along the closing line that centres the open jaw on the block before it rises [m].
+
+        It takes the nearer jaw away from the block's face, so the jaw does not drag the block up."""
+        cfg = self.grasp_settings
+        u = np.array([math.cos(self._psi), math.sin(self._psi)])
+        return float(np.clip(along, -cfg.open_margin_m, cfg.open_margin_m)) * u
+
+    def _note_close(self, verdict: str, why: str, along: float = math.nan, across: float = math.nan) -> None:
+        look = CloseLook(self.status.attempt, self._close_round, along, across, verdict, why)
+        self.wrist.close_looks.append(look)
+
+    def _end_close_look(self, verdict: str, text: str, along: float = math.nan,
+                        across: float = math.nan) -> Action:
+        """Hold and show the verdict for one tick, then close."""
+        look = self._jaw_look
+        assert look is not None
+        self._note_close(verdict, "" if verdict == "centred" else text, along, across)
+        look.done = True
+        if verdict == "skipped":
+            text = f"kamera w szczekach pominieta: {text}"
+            logger.warning("%s", text)
+        else:
+            logger.info("%s", text)
+        return self.hold(text)
+
+    # ------------------------------------------------------------------ the residual
+    def _aim(self, xy: np.ndarray, *, strict: bool = False) -> None:
+        """Add the stand's residual to the run's first aim, from the detector; the plain aim if it does not
+        reach."""
+        first = self.grasp.block_xy is None
+        xy = np.asarray(xy, float)
+        if first and np.any(self._residual):
+            try:
+                super()._aim(xy + self._residual, strict=strict)
+            except RuntimeError:
+                super()._aim(xy, strict=strict)
+        else:
+            super()._aim(xy, strict=strict)
+        if first:
+            self._detector_xy = xy.copy()
+
+    def _enter(self, phase: str) -> None:
+        if phase == CLOSE and self.grasp.block_xy is not None:
+            self._closed_aim = np.asarray(self.grasp.block_xy, float).copy()
+            looks = [c for c in self.wrist.close_looks if c.attempt == self.status.attempt]
+            self._closed_seen = (looks[-1].verdict == "centred" if looks
+                                 else bool(self.wrist.verdicts) and self.wrist.verdicts[-1] == "centred")
+        super()._enter(phase)
+        if phase == CARRY and self.grasp.verdict == "lifted":
+            self._save_residual()
+
+    def _save_residual(self) -> None:
+        """Add this run's correction of the detector's aim to `residual_file` once, after a lift from a
+        camera-centred close."""
+        cfg = self.wrist_settings
+        if (not cfg.residual_file or self._residual_saved or self.grasp.recoveries or not self._closed_seen
+                or self._detector_xy is None or self._closed_aim is None):
+            return
+        self._residual_saved = True
+        sample = self._closed_aim - self._detector_xy
+        if not float(np.linalg.norm(sample)) <= RESIDUAL_MAX_M:
+            logger.warning("Poprawka celu %.0f mm za duza na zapis", float(np.linalg.norm(sample)) * 1000)
+            return
+        mean, runs = load_residual(cfg.residual_file)
+        runs = min(runs + 1, RESIDUAL_RUNS)
+        mean = mean + (sample - mean) / runs
+        try:
+            save_residual(cfg.residual_file, mean, runs)
+        except OSError as exc:
+            logger.warning("Nie zapisano poprawki celu do %s: %s", cfg.residual_file, exc)
+            return
+        logger.info("Poprawka celu: %.1f, %.1f mm (srednia z %d)", mean[0] * 1000, mean[1] * 1000, runs)
+
+    def _close_summary(self) -> str:
+        final = self.wrist.final_offset_m
+        if not self.wrist.close_looks or not all(math.isfinite(v) for v in final):
+            return ""
+        return f"; proby {self.status.attempt}, kamera w szczekach {math.hypot(*final) * 1000:.0f} mm"
 
     @property
     def _measures_yaw(self) -> bool:
@@ -940,6 +1214,34 @@ class WristGraspStrategy(GraspStrategy):
             return look.text
         what = "cofam centrowanie" if look.phase == RETURN else "centruje po kamerze"
         return f"{what}: {self.status.distance * 1000:.0f} mm do zawisu"
+
+
+def load_residual(path: str) -> tuple[np.ndarray, int]:
+    """Read a residual file: the mean correction [m, base frame] and the runs it averages.
+
+    A missing file gives none; an unreadable one gives none with a warning."""
+    file = Path(path).expanduser()
+    try:
+        data = json.loads(file.read_text())
+        mean = np.asarray(data["mean_m"], float)
+        runs = int(data["runs"])
+        if mean.shape != (2,) or not np.all(np.isfinite(mean)) or runs < 1:
+            raise ValueError("mean_m or runs out of range")
+    except FileNotFoundError:
+        return np.zeros(2), 0
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        logger.warning("Plik poprawki celu %s nieczytelny (%s) - bez poprawki", file, exc)
+        return np.zeros(2), 0
+    return mean, min(runs, RESIDUAL_RUNS)
+
+
+def save_residual(path: str, mean: np.ndarray, runs: int) -> None:
+    """Write a residual file atomically."""
+    file = Path(path).expanduser()
+    file.parent.mkdir(parents=True, exist_ok=True)
+    tmp = file.with_name(file.name + ".tmp")
+    tmp.write_text(json.dumps({"mean_m": [float(mean[0]), float(mean[1])], "runs": int(runs)}) + "\n")
+    os.replace(tmp, file)
 
 
 def _identity(rotation: np.ndarray) -> bool:

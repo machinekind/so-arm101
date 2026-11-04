@@ -7,7 +7,9 @@ MuJoCo images. `test_wrist_in_twin.py` covers the twin's runner and wrist camera
 
 from __future__ import annotations
 
+import json
 import math
+import re
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 
@@ -24,7 +26,13 @@ from soarm_lab.blocks.classic_world import BLOCKS  # noqa: E402
 from soarm_lab.kinematics import IKSolution, RobotKinematics  # noqa: E402
 from soarm_lab.robot import load_robot  # noqa: E402
 from soarm_lab.strategies import wrist  # noqa: E402
-from soarm_lab.strategies.grasp import GraspSettings, GraspStrategy, heading, top_down  # noqa: E402
+from soarm_lab.strategies.grasp import (  # noqa: E402
+    CLEAR_BEFORE_CLOSE_M,
+    GraspSettings,
+    GraspStrategy,
+    heading,
+    top_down,
+)
 from soarm_lab.strategies.wrist import (  # noqa: E402
     HsvWindow,
     WristGraspSettings,
@@ -848,8 +856,10 @@ def test_the_look_waits_for_the_wrist_roll_before_it_measures():
     answers, phases, *_ = follow(s, dict(SPEC.home), seen((truth[0] + 0.002, truth[1]), "cuboid"), 400,
                                  block=block, frames=frames, measured=measured,
                                  until=lambda: s.status.phase == "touched")
-    reads = [k for k, lazy in enumerate(frames_now) if lazy.reads]
+    # The hover look's reads; the look between the jaw tips reads one more frame at the bottom.
+    reads = [k for k, lazy in enumerate(frames_now) if lazy.reads and phases[k] == "open"]
     assert len(reads) == 2 and s.wrist.verdicts == ["centred"]
+    assert [c.verdict for c in s.wrist.close_looks] == ["centred"]
     first, second = reads
     assert answers[first].note.startswith("centruje po kamerze: przesuwam o 2 mm, obrot")
     roll = SPEC.joints.index("wrist_roll")
@@ -871,7 +881,8 @@ def test_the_look_waits_for_the_wrist_roll_before_it_measures():
 def test_the_look_at_the_straddle_hover_corrects_a_push(look: bool):
     cv2_or_skip()
     block = block_at(XY, "cube")
-    s = started(seen(XY), probe=True, look_before_straddle=look)
+    # Without the look between the jaw tips, which would catch the push at the bottom.
+    s = started(seen(XY), probe=True, look_before_straddle=look, close_rounds=0)
     pushed: list[np.ndarray] = []
     straddle: list[tuple[np.ndarray, np.ndarray]] = []
 
@@ -1122,6 +1133,256 @@ def test_a_look_whose_arm_never_stands_still_is_skipped():
     assert len(looking) / s.hz == pytest.approx(wrist.LOOK_STALL_S, abs=0.3)
 
 
+# ------------------------------------------------------------ the look between the jaw tips
+def closing_u(s: WristGraspStrategy) -> np.ndarray:
+    psi = math.radians(s.grasp.heading_deg)
+    return np.array([math.cos(psi), math.sin(psi)])
+
+
+def push_after_hover_look(s: WristGraspStrategy, block: Block, along_m: float, across_m: float
+                          ) -> Callable[[float], None]:
+    """Move the block once the hover look is done and the straddle starts down."""
+    pushed: list[bool] = []
+
+    def on_tick(t: float) -> None:
+        if s.status.phase == "straddle" and s.wrist.verdicts and not pushed:
+            u = closing_u(s)
+            block.xy = block.xy + along_m * u + across_m * np.array([-u[1], u[0]])
+            pushed.append(True)
+    return on_tick
+
+
+def off_centre_at_close(phases: list[str], measured: list[dict[str, float]], where: list[np.ndarray]
+                        ) -> float:
+    """How far the open tips' midpoint lay from the block when the jaw last started closing [m]."""
+    k = max(i for i, p in enumerate(phases) if p == "close" and phases[i - 1] != "close")
+    return float(np.linalg.norm(np.mean(KIN.fingertips(measured[k]), axis=0)[:2] - where[k]))
+
+
+def test_the_look_between_the_jaw_tips_catches_a_push_after_the_hover_look():
+    cv2_or_skip()
+    block = block_at(XY, "cube")
+    s = started(seen(XY))
+    measured: list[dict[str, float]] = []
+    where: list[np.ndarray] = []
+    push = push_after_hover_look(s, block, -0.004, 0.003)
+
+    def on_tick(t: float) -> None:
+        where.append(block.xy.copy())
+        push(t)
+
+    answers, phases, *_ = follow(s, dict(SPEC.home), seen(XY), 2500, block=block, frames=camera_of(block),
+                                 measured=measured, on_tick=on_tick)
+
+    assert answers[-1].success, answers[-1].note
+    looks = s.wrist.close_looks
+    assert [(c.attempt, c.round, c.verdict) for c in looks] == [(1, 0, "moved"), (1, 1, "centred")]
+    assert looks[0].along_m == pytest.approx(-0.004, abs=1e-3)
+    assert looks[0].across_m == pytest.approx(0.003, abs=1e-3)
+    # One hover look: the arm came back from the correction without another.
+    assert s.wrist.looks == 1 and s.status.attempt == 1
+    assert runs(phases)[2:7] == ["straddle", "rise", "open", "straddle", "close"]
+    rising = [answers[k] for k, p in enumerate(phases) if p == "rise"]
+    assert all(a.target["gripper"] == pytest.approx(s.cmd_open) for a in rising)
+    assert any(a.note.startswith("kamera w szczekach: blok 5 mm (wzdluz -4, w poprzek +3 mm) od srodka - "
+                                 "poprawka 1 z 3") for a in answers)
+    assert off_centre_at_close(phases, measured, where) < 0.001
+    assert s.wrist.final_offset_m == pytest.approx((0.0, 0.0), abs=1e-3)
+    assert re.search(r"; proby 1, kamera w szczekach [01] mm$", answers[-1].note)
+
+
+def test_without_close_rounds_the_jaw_closes_where_the_hover_look_aimed():
+    cv2_or_skip()
+    block = block_at(XY, "cube")
+    s = started(seen(XY), close_rounds=0)
+    answers, phases, *_ = follow(s, dict(SPEC.home), seen(XY), 2500, block=block, frames=camera_of(block),
+                                 on_tick=push_after_hover_look(s, block, -0.004, 0.0))
+
+    assert s.wrist.close_looks == [] and "rise" not in phases
+    assert s.grasp.block_xy == pytest.approx(XY, abs=1e-3)
+
+
+def biased_measure(s: WristGraspStrategy, offset: np.ndarray) -> None:
+    """The look between the tips always sees the block `offset` [m] from the jaws' midpoint."""
+    plain = s.measure
+
+    def measure(rgb, joints, ref_xy=None):
+        if ref_xy is None:
+            return plain(rgb, joints)
+        m = plain(rgb, joints, ref_xy)
+        xy = np.asarray(ref_xy, float) + offset
+        return wrist.Measurement(xy, m.yaw, m.iou, m.area_px, m.ratio, m.pixel)
+
+    s.measure = measure  # type: ignore[method-assign]
+
+
+def test_a_block_still_off_after_the_last_round_is_another_attempt_and_the_last_attempt_closes():
+    cv2_or_skip()
+    block = block_at(XY, "cube")
+    s = started(seen(XY), close_rounds=1, max_attempts=2)
+    biased_measure(s, np.array([0.004, 0.0]))
+    answers, phases, *_ = follow(s, dict(SPEC.home), seen(XY), 4000, block=block, frames=camera_of(block))
+
+    assert answers[-1].success, answers[-1].note
+    assert [(c.attempt, c.round, c.verdict) for c in s.wrist.close_looks] == [
+        (1, 0, "moved"), (1, 1, "off"), (2, 0, "moved"), (2, 1, "off")]
+    assert s.status.attempt == 2 and s.wrist.looks == 2
+    notes = [a.note for a in answers]
+    assert any(n.startswith("kamera widzi blok poza srodkiem szczek - w gore, proba 2") for n in notes)
+    assert any(n.startswith("kamera w szczekach: blok 4 mm (wzdluz +4, w poprzek +0 mm) od srodka po 1 "
+                            "poprawkach - zamykam w ostatniej probie") for n in notes)
+
+
+def test_an_empty_close_looks_again_and_lifts_on_the_next_attempt():
+    cv2_or_skip()
+    block = block_at(XY, "cube")
+    s = started(seen(XY))
+    moved: list[bool] = []
+
+    def on_tick(t: float) -> None:
+        if s.status.phase == "close" and not moved:
+            # Taken from between the jaws as they close.
+            block.xy = block.xy + 0.025 * closing_u(s)[::-1] * np.array([-1.0, 1.0])
+            moved.append(True)
+
+    answers, phases, *_ = follow(s, dict(SPEC.home), seen(XY), 4000, block=block, frames=camera_of(block),
+                                 on_tick=on_tick)
+
+    assert answers[-1].success, answers[-1].note
+    assert s.grasp.empty_closes == 1 and s.status.attempt == 2 and s.wrist.looks == 2
+    assert any(a.note.startswith("chwyt pusty - w gore, proba 2") for a in answers)
+    # The hover look of the second attempt found the block where it was taken to.
+    assert [c.verdict for c in s.wrist.close_looks] == ["centred", "centred"]
+
+
+@pytest.mark.parametrize("why", ["empty", "edge"])
+def test_with_the_probe_a_retry_closes_the_jaw_before_it_probes_again(why: str):
+    cv2_or_skip()
+    if why == "edge":
+        # The jaw stops 8 mm wider than the cube it was sized for.
+        block = Block(np.array(XY, float), (CUBE[0] + 0.004, CUBE[1] + 0.004, CUBE[2]), 0.0, "cube")
+    else:
+        block = block_at(XY, "cube")
+    s = started(seen(XY), probe=True, max_attempts=2)
+    moved: list[bool] = []
+
+    def on_tick(t: float) -> None:
+        if why == "empty" and s.status.phase == "close" and not moved:
+            # Taken from between the jaws as they close.
+            block.xy = block.xy + 0.025 * closing_u(s)[::-1] * np.array([-1.0, 1.0])
+            moved.append(True)
+
+    measured: list[dict[str, float]] = []
+    answers, phases, *_ = follow(s, dict(SPEC.home), seen(XY), 6000, block=block, frames=camera_of(block),
+                                 measured=measured, on_tick=on_tick)
+
+    assert answers[-1].success, answers[-1].note
+    assert s.status.attempt == 2
+    assert (s.grasp.empty_closes if why == "empty" else s.grasp.edge_closes) == 1
+    starts = [k for k, p in enumerate(phases) if p == "descend" and phases[k - 1] != "descend"]
+    assert len(starts) == 2
+    for k in starts:
+        assert answers[k].target["gripper"] == pytest.approx(s.cmd_probe)
+    # The retry's rise keeps the jaw as it was until the tips are clear of the block.
+    rise = [k for k, p in enumerate(phases) if p == "rise" and phases.index("close") < k < starts[1]]
+    z0 = tcp(measured[rise[0]])[2]
+    low = [k for k in rise if tcp(measured[k])[2] < z0 + CLEAR_BEFORE_CLOSE_M - 1e-4]
+    assert low and all(answers[k].target["gripper"] == answers[rise[0]].target["gripper"] for k in low)
+    assert answers[rise[-1]].target["gripper"] == pytest.approx(s.cmd_probe)
+
+
+def test_an_empty_close_on_the_last_attempt_ends_the_run():
+    cv2_or_skip()
+    block = block_at(XY, "cube")
+    s = started(seen(XY), max_attempts=1)
+
+    def on_tick(t: float) -> None:
+        if s.status.phase == "close":
+            block.xy = np.array([0.3, 0.2])
+
+    answers, *_ = follow(s, dict(SPEC.home), seen(XY), 4000, block=block, frames=camera_of(block),
+                         on_tick=on_tick)
+
+    assert answers[-1].done and not answers[-1].success
+    assert answers[-1].note == "wyczerpane proby chwytu (1): chwyt pusty"
+
+
+def test_an_edge_grip_opens_the_jaw_and_tries_again_and_the_last_attempt_lifts():
+    cv2_or_skip()
+    # The jaw stops 8 mm wider than the cube it was sized for.
+    block = Block(np.array(XY, float), (CUBE[0] + 0.004, CUBE[1] + 0.004, CUBE[2]), 0.0, "cube")
+    s = started(seen(XY), max_attempts=2)
+    answers, phases, *_ = follow(s, dict(SPEC.home), seen(XY), 4000, block=block, frames=camera_of(block))
+
+    assert answers[-1].success, answers[-1].note
+    assert s.grasp.edge_closes == 1 and s.status.attempt == 2
+    assert "reopen" in phases and phases.index("reopen") < phases.index("lift_off")
+    notes = [a.note for a in answers]
+    assert any(n.startswith("szczeka chwycila blok za krawedz - otwieram szczeke, proba 2") for n in notes)
+    reopen = [answers[k] for k, p in enumerate(phases) if p == "reopen"]
+    assert reopen[-1].target["gripper"] == pytest.approx(s.cmd_open)
+
+
+def test_plain_grasp_still_ends_the_run_on_an_empty_close():
+    block = block_at(XY, "cube")
+    s = started(seen(XY), strategy=GraspStrategy)
+
+    def on_tick(t: float) -> None:
+        if s.status.phase == "close":
+            block.xy = np.array([0.3, 0.2])
+
+    answers, *_ = follow(s, dict(SPEC.home), seen(XY), 4000, block=block, on_tick=on_tick)
+    assert answers[-1].note == "chwyt pusty - blok przesuniety albo obok szczek"
+
+
+# ------------------------------------------------------------ the residual
+def test_the_residual_is_kept_after_a_lift_and_moves_the_next_runs_first_aim(tmp_path):
+    cv2_or_skip()
+    file = tmp_path / "stand" / "residual.json"
+    coarse = (XY[0] + 0.012, XY[1] - 0.006)
+    first_aims: list[tuple[float, float]] = []
+
+    def one_run() -> WristGraspStrategy:
+        block = block_at(XY, "cube")
+        s = started(seen(coarse), residual_file=str(file))
+
+        def on_tick(t: float) -> None:
+            if s.grasp.block_xy is not None and len(first_aims) < runs_done[0] + 1:
+                first_aims.append(s.grasp.block_xy)
+
+        answers, *_ = follow(s, dict(SPEC.home), seen(coarse), 2500, block=block, frames=camera_of(block),
+                             on_tick=on_tick)
+        assert answers[-1].success, answers[-1].note
+        runs_done[0] += 1
+        return s
+
+    runs_done = [0]
+    first = one_run()
+    assert first.wrist.residual_m == (0.0, 0.0) and first.wrist.residual_runs == 0
+    kept = json.loads(file.read_text())
+    assert kept["runs"] == 1 and kept["mean_m"] == pytest.approx([-0.012, 0.006], abs=1e-3)
+    assert first_aims[0] == pytest.approx(coarse, abs=1e-9)
+    second = one_run()
+    assert second.wrist.residual_m == pytest.approx((-0.012, 0.006), abs=1e-3)
+    assert first_aims[1] == pytest.approx(XY, abs=1e-3)
+    assert json.loads(file.read_text())["runs"] == 2
+
+
+def test_an_unreadable_residual_is_ignored_and_a_failed_run_keeps_none(tmp_path):
+    cv2_or_skip()
+    file = tmp_path / "residual.json"
+    file.write_text("{not json")
+    s = started(seen(XY), residual_file=str(file))
+    assert s.wrist.residual_m == (0.0, 0.0)
+    # No lift, nothing written.
+    follow(s, dict(SPEC.home), seen(XY), 50)
+    assert file.read_text() == "{not json"
+    assert wrist.load_residual(str(tmp_path / "missing.json"))[1] == 0
+    wrist.save_residual(str(file), np.array([0.001, -0.002]), 3)
+    mean, n = wrist.load_residual(str(file))
+    assert n == 3 and mean == pytest.approx([0.001, -0.002])
+
+
 # ------------------------------------------------------------ settings and the protocol
 @pytest.mark.parametrize("settings, match", [
     ({"max_frame_age_s": 0.0}, "grasp_wrist: max_frame_age_s must be positive"),
@@ -1135,6 +1396,10 @@ def test_a_look_whose_arm_never_stands_still_is_skipped():
     ({"rounds": 0}, "grasp_wrist: rounds must be at least 1"),
     ({"min_fit_iou": 1.0}, r"grasp_wrist: min_fit_iou must lie within \(0, 1\)"),
     ({"frame_wait_s": -1.0}, "grasp_wrist: frame_wait_s must be zero or more"),
+    ({"close_rounds": -1}, "grasp_wrist: close_rounds must be zero or more"),
+    ({"close_tol_m": 0.0}, "grasp_wrist: close_tol_m must be positive"),
+    ({"correction_gain": 0.0}, r"grasp_wrist: correction_gain must lie within \(0, 2\]"),
+    ({"correction_gain": 2.5}, r"grasp_wrist: correction_gain must lie within \(0, 2\]"),
 ])
 def test_settings_are_validated(settings: dict, match: str):
     with pytest.raises(ValueError, match=match):

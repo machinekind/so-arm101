@@ -430,8 +430,8 @@ def tilted(xy: tuple[float, float], under: int, yaw: float, *, red_yaw: float | 
     frames = None
     if looked:
         frames = {"wrist": Frame(np.zeros((48, 64, 3), np.uint8), 0.0)}
-        s.measure = lambda rgb, joints: Measurement(red.xy.copy(), red.yaw, 0.9, 1000, 1.0,  # type: ignore[method-assign]
-                                                    np.zeros(2))
+        s.measure = lambda rgb, joints, ref_xy=None: Measurement(  # type: ignore[method-assign]
+            red.xy.copy(), red.yaw, 0.9, 1000, 1.0, np.zeros(2))
     tilts: list[tuple[float, float]] = []
     grip: list[np.ndarray] = []
     _, phases = run(s, world, watch=lambda world, s: held_tilt(world, tilts, grip), frames=frames)

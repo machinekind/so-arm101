@@ -709,3 +709,33 @@ def test_the_wrist_look_and_jev_pick_a_cube_and_place_it_on_another(twin):
     assert np.linalg.norm(red[:2] - blue[:2]) < 0.004 and tilt_deg(red_rot) < 2.0
     assert red[2] == pytest.approx(blue[2] + 2 * block("cube").half_size[2], abs=0.001)
     assert abs(((yaw_deg(red_rot) - yaw_deg(blue_rot) + 45) % 90) - 45) < 4.0
+
+
+@pytest.mark.render
+def test_a_cube_pushed_after_the_wrist_look_is_centred_between_the_jaw_tips_and_still_placed(twin):
+    add_blocks(twin, Placed("red", "cube", (0.205, -0.05), 25.0, RED),
+               Placed("blue", "cube", TARGET_XY, 10.0, BLUE))
+    clock = Clock()
+    strategy = built(label="red", place_on="blue", wrist_camera="wrist")
+    cameras = Cameras(twin, clock, ("red", "blue"))
+    runner = StrategyRunner(twin, strategy, objects=cameras, cameras=("wrist",))
+    pushed: list[np.ndarray] = []
+
+    def watch() -> None:
+        if strategy.status.phase == "straddle" and strategy.wrist.verdicts and not pushed:
+            # Toward the fixed jaw, after the hover look and before the jaw goes down.
+            psi = math.radians(strategy.grasp.heading_deg)
+            push = -0.005 * np.array([math.cos(psi), math.sin(psi)])
+            move(twin, "red", tuple(truth(twin, "red")[0][:2] + push), truth(twin, "red")[0][2])
+            pushed.append(push)
+
+    runner.start(threaded=False)
+    drive(twin, runner, 120.0, clock, watch=watch)
+
+    assert runner.status.stopped_because == "zadanie wykonane", (strategy.place, strategy.wrist)
+    looks = [(c.verdict, round(c.along_m * 1000)) for c in strategy.wrist.close_looks]
+    assert looks[0] == ("moved", -5) and looks[-1][0] == "centred" and strategy.status.attempt == 1
+    settle(twin)
+    red, red_rot = truth(twin, "red")
+    blue, _ = truth(twin, "blue")
+    assert np.linalg.norm(red[:2] - blue[:2]) < 0.004 and tilt_deg(red_rot) < 2.0
