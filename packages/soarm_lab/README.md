@@ -614,6 +614,35 @@ unreachable twice in a row. At most `max_replans` new plans, `max_steps` steps p
 Known gaps: plans count reach with the hand straight down, so they refuse some places a tilted hand
 would reach. Moves do not go around other blocks.
 
+## Simulation campaign
+
+`jobs/overnight.sh` runs seeded scenarios in the twin's simulation, keeps one JSON file per run and
+writes `report.md`: per scenario the runs, the successes, how many attempts and wrist-camera corrections
+they took, the final offset's median and 90th percentile, why runs failed and any simulation artefacts.
+No arm moves and no model is asked.
+
+- grasp: `grasp_wrist` with the detector 1.5 cm off; the same with 6 mm of hidden joint backlash; the
+  same with the cube nudged 5 mm after the hover look.
+- pick_place: a cube on a cube, with and without the wrist camera, and with every camera 5, 10 and
+  15 mm off; a cuboid across two cubes; a cube next to a cube.
+- build: a tower of three cubes from a fixed plan and from a scripted planner; from the fixed plan with
+  the wrist camera, also with every camera 5 mm off; both plans again with the middle cube knocked off
+  mid-build; a bridge.
+
+The pick_place and build scenarios step the physics every 1 ms, not the twin's own 5 ms, so a block let
+go a few millimetres above another lands without sinking into it. They check at every physics step that
+no block sinks more than 0.7 mm into another block or the table; a run where one does counts as failed.
+
+```bash
+RUNS=50 OUT=workspace/campaign/tonight bash jobs/overnight.sh
+uv run soarm-lab campaign report workspace/campaign/tonight
+```
+
+The scenarios are the tests marked `campaign`. `SOARM_CAMPAIGN_RUNS` sets the seeds per scenario and
+`SOARM_CAMPAIGN_DIR` the folder for the runs. Without them the test suite runs the grasp and the
+pick_place scenarios at their default size, and skips the build campaign and the runs with a camera
+error.
+
 ## Dream Labs
 
 The `dream` strategy runs [Dream-1](https://dreamlabs.ai/research/dream-1/), Dream Labs' robot

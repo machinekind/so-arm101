@@ -12,6 +12,7 @@
     soarm-lab grasps meshes --out workspace/grasps/meshes
     soarm-lab grasps convert cube workspace/grasps/raw/cube.yml
     soarm-lab grasps show cube
+    soarm-lab campaign report workspace/campaign/<run> --out report.md
 
 `station` for training and `--station` for evaluation select an exported station folder
 or a bundled station name. The default is `sim`.
@@ -20,6 +21,7 @@ or a bundled station name. The default is `sim`.
 Evaluation and policy listing use NumPy.
 `grasps` writes block meshes and converts or lists libraries. GraspGenX runs separately.
 See tools/graspgenx/README.md.
+`campaign report` summarises the JSON files of a seeded simulation campaign (jobs/overnight.sh).
 """
 
 from __future__ import annotations
@@ -260,6 +262,35 @@ def _grasps_parser(sub) -> None:
     q.set_defaults(fn=_grasps_show)
 
 
+def _campaign_report(a: argparse.Namespace) -> int:
+    from .campaign import load, report
+
+    folder = Path(a.folder)
+    runs = load(folder)
+    if not runs:
+        raise FileNotFoundError(f"no campaign runs under {folder}")
+    text = report(runs, folder, title=a.title)
+    if a.out:
+        Path(a.out).write_text(text, encoding="utf-8")
+        print(f"{len(runs)} runs -> {a.out}")
+    else:
+        print(text, end="")
+    return 0
+
+
+def _campaign_parser(sub) -> None:
+    """Build the `campaign report` command parser."""
+    p = sub.add_parser("campaign", help="seeded simulation campaigns: the report over their runs",
+                       description="Reads the JSON files a seeded simulation campaign wrote (jobs/overnight.sh) "
+                                   "and summarises each scenario as Markdown.")
+    campaign_sub = p.add_subparsers(dest="campaign_cmd", required=True)
+    q = campaign_sub.add_parser("report", help="runs, successes, attempts, offsets and failures per scenario")
+    q.add_argument("folder", help="the campaign folder (SOARM_CAMPAIGN_DIR of the run)")
+    q.add_argument("--out", default=None, help="write the report here instead of printing it")
+    q.add_argument("--title", default="Simulation campaign", help="the report's heading")
+    q.set_defaults(fn=_campaign_report)
+
+
 def main(argv: list[str] | None = None) -> int:
     import sys
 
@@ -300,6 +331,7 @@ def parser() -> argparse.ArgumentParser:
 
     _dream_parser(sub)
     _grasps_parser(sub)
+    _campaign_parser(sub)
     return ap
 
 
