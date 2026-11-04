@@ -41,8 +41,7 @@ All run in the twin's process. so-arm101 imports only `machinekind-twin-api`.
 | Fine-tune lift with biased, delayed and latched poses | soarm-lab `rl` | Needs three changes |
 | Supervise safety, judge runs (#176) and log episodes (#151) | twin | Supervisor exists; judge and log are planned |
 
-No API change is needed. Decision records reach the twin's log through `Action.decisions`
-once the dependency advances to API 0.1.3.
+No API change is needed. Decision records reach the twin's log through `Action.decisions`.
 
 ## Recovery
 

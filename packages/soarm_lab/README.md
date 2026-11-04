@@ -204,9 +204,9 @@ never read as an answer.
 
 Every call gives one record per question (`judges.Decision`): the answer as received or the error, the
 exact state sent, the confidence and the response time. The strategy keeps them in `judging.decisions`,
-writes one log line per call, and puts a summary in the panel's note and stop reason. The twin API this
-workspace pins (0.1.2) has no place for them in an `Action`. Once the pin moves to 0.1.3 they go to
-`Action.decisions`, and the twin's episode log keeps them.
+writes one log line per call, and puts a summary in the panel's note and stop reason. Each tick's
+`Action.decisions` carries the records that came back since the previous tick, so a recorded episode
+(`twin episode`) keeps them.
 
 Caveats:
 
@@ -258,8 +258,9 @@ or omitted when too small, missing or stale. The state records frame references,
 and omission reasons. `GraspJevStrategy(..., blob=fn)` accepts a colour-occupancy callback
 for the region between the jaws. Until one is supplied, that sighting remains unknown.
 
-`judging.decisions` keeps records for replies, failures and cancellations. `drain_decisions`
-returns outgoing records once each. Stop-time cancellations remain in the run's records.
+`judging.decisions` keeps records for replies, failures and cancellations. Each tick's
+`Action.decisions` carries the new ones once, for the episode recording. Stop-time cancellations
+stay only in `judging.decisions`, because the run's log is closed by then.
 Each record includes the decision point and question version.
 
 See [grasp_jev settings](soarm_lab/strategies/grasp_jev.py) for the full interface.
@@ -293,10 +294,9 @@ With the probe on, each retry probes again. Without the probe, an empty close af
 retry tries the other side while attempts remain. Any other empty close or motion timeout
 ends the run. Touch's lag guard, `time_limit_s` and the panel's Stop also apply.
 
-With the probe on the twin's simulated blocks, set `need_contact: false` until `scene.Box`
-supports contact settings. Default contact can let the probe sink without stalling.
-Reaching the probe bottom then uses the nominal top. Keep `need_contact` on when probing
-on the real arm. Real jaw opening and pad reach still need calibration.
+The twin's simulated blocks have stiff contacts, so the probe stalls on their top as on the real
+arm and `need_contact` can stay on. With `need_contact: false`, reaching the probe bottom uses the
+nominal top. Real jaw opening and pad reach still need calibration.
 
 ### Recovery
 

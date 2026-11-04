@@ -388,6 +388,11 @@ def answer_of(decision: Any) -> dict[str, Any]:
     return json.loads(decision.answer)
 
 
+def carried(actions: list[Action]) -> list[Any]:
+    """The decision records the actions handed to the twin, in order."""
+    return [d for a in actions for d in a.decisions]
+
+
 def points(s: GraspJevStrategy) -> list[str]:
     return [d.state["point"] for d in s.judging.decisions]
 
@@ -501,7 +506,7 @@ def test_confident_answers_lift_the_cube_with_one_consultation_per_point(probe: 
     assert s.judging.disagreements == 0 and not s.judging.needs_review and s.judging.asks == 2 + probe
     after_close = phases.index("lift_off") + 1
     assert answers[after_close].note.endswith(" | jev #1 po zamknieciu: blok trzymany 0.90, podniesc 0.90")
-    assert s.drain_decisions() == tuple(s.judging.decisions) and s.drain_decisions() == ()
+    assert carried(answers) == s.judging.decisions and s.drain_decisions() == ()
 
 
 def test_the_probe_correction_moves_the_block_aim_not_the_tcp():
@@ -904,7 +909,7 @@ def test_a_slip_while_the_close_answer_is_pending_cancels_it_and_the_recovery_ta
     assert s.grasp.drops == 1 and not rest[-1].success
     close = [answer_of(d).get("error") for d in s.judging.decisions if d.state["point"] == "close"]
     assert close == ["cancelled", "cancelled"]
-    drained = s.drain_decisions()
+    drained = carried(answers + rest)
     assert [answer_of(d).get("error") for d in drained if d.state["point"] == "close"] == close
     assert any(a.note == "blok wypadl ze szczeki - w gore" for a in rest)
 

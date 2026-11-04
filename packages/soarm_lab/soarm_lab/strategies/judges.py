@@ -11,9 +11,8 @@ checks every judge's answer goes through, so a failed or malformed call is never
 values, the questions and copies of the frames; it never touches the strategy's kinematics, whose MuJoCo
 data is shared. A cancelled or superseded question's late answer is dropped.
 
-`Decision` records one answer for the run's log. It has exactly the fields of
-`machinekind_twin_api.strategy.Decision` (api 0.1.3). The pinned api (0.1.2) has no such class, so this one
-stands in for it until the pin moves.
+`Decision` records one answer for the run's log: the twin api's own class, re-exported here. A strategy
+returns the records in `Action.decisions` and the twin's episode recording keeps them.
 
 `Consultation` manages one pending request per strategy. It counts waits on the strategy clock,
 retries transient failures once and records every call's questions, including failures and cancellations.
@@ -35,6 +34,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 import numpy as np
+from machinekind_twin_api.strategy import Decision
 
 logger = logging.getLogger(__name__)
 
@@ -177,26 +177,6 @@ def finite_number(value: Any) -> float | None:
 
 def unusable(judge: str, detail: str) -> JudgeError:
     return JudgeError(f"{judge}: odpowiedz nie do uzycia ({detail})", kind="unusable", detail=detail)
-
-
-@dataclass(frozen=True, eq=False)
-class Decision:
-    """One question a strategy put to a model, with its answer, for the run's log. It never reaches the arm.
-
-    A stand-in for `machinekind_twin_api.strategy.Decision` (api 0.1.3), with its fields in its order; it
-    compares by identity, as that class does.
-    """
-
-    #: What the strategy asked: the prompt, or its name when the prompt is long.
-    question: str
-    #: The model's answer as received: text, or JSON as text.
-    answer: str
-    #: What was sent with the question besides the frames, as JSON values.
-    state: Mapping[str, Any] = field(default_factory=dict)
-    #: The model's confidence, 0..1, when it gives one.
-    confidence: float | None = None
-    #: Seconds from asking to the answer.
-    response_s: float | None = None
 
 
 @dataclass(frozen=True)

@@ -293,11 +293,9 @@ def test_grasp_lifts_the_cube_and_the_twin_says_w_dloni(twin):
 
 
 @pytest.mark.parametrize("need_contact", [True, False], ids=["need_contact", "need_contact off"])
-def test_at_the_twins_default_contact_the_probe_misses_and_need_contact_off_lifts_the_cube(twin,
-                                                                                          need_contact: bool):
-    """Default contact lets the probe sink without stalling.
-
-    With `need_contact` off, reaching the bottom uses the nominal top and allows a lift."""
+def test_at_the_twins_default_contact_the_probe_stops_on_the_cube_and_the_grasp_lifts_it(twin,
+                                                                                        need_contact: bool):
+    """The twin's own block contacts are stiff: the probe stalls on the top, the cube stays on the table."""
     add_block(twin, "cube", stiff=False)
     clock = Clock()
     strategy = load_strategy(NAME).create({"need_contact": need_contact, "probe": True})
@@ -312,17 +310,12 @@ def test_at_the_twins_default_contact_the_probe_misses_and_need_contact_off_lift
     runner.start(threaded=False)
     drive(twin, runner, 60.0, clock, until=phases_of(strategy, phases), watch=watch)
 
-    # The probe presses the cube below its resting height.
-    assert lowest[0] < block("cube").half_size[2] - 0.006
-    if need_contact:
-        assert runner.status.stopped_because == "strategia skonczyla" and not runner.status.success
-        assert strategy.status.stopped_because == "brak kontaktu w punkcie dotyku - obiektu tam nie ma"
-        assert "rise" not in phases
-    else:
-        assert runner.status.stopped_because == "zadanie wykonane", (strategy.status, strategy.grasp)
-        assert strategy.grasp.top_m == pytest.approx(2 * block("cube").half_size[2], abs=1e-9)
-        assert truth(twin, "cube")[0][2] > 0.04
-        assert all(c > 0.5 for c in contact(twin, "cube"))
+    half = block("cube").half_size[2]
+    assert lowest[0] > half - 0.001, lowest[0]                        # pressed into the table by under 1 mm
+    assert runner.status.stopped_because == "zadanie wykonane", (strategy.status, strategy.grasp, phases)
+    assert strategy.grasp.top_m == pytest.approx(2 * half, abs=0.002)
+    assert truth(twin, "cube")[0][2] > 0.04
+    assert all(c > 0.5 for c in contact(twin, "cube"))
 
 
 def test_at_the_twins_default_contact_the_default_grasp_lifts_the_cube(twin):

@@ -247,6 +247,11 @@ def answer_of(decision: Any) -> dict[str, Any]:
     return json.loads(decision.answer)
 
 
+def carried(actions: list[Action]) -> list[Any]:
+    """The decision records the actions handed to the twin, in order."""
+    return [d for a in actions for d in a.decisions]
+
+
 # ------------------------------------------------------------ the contract
 def test_it_follows_the_strategy_protocol_with_a_fake_judge():
     """test_entry_points.py's protocol check, which skips touch_jev for want of a key."""
@@ -332,7 +337,9 @@ def test_a_confident_touch_on_the_cube_is_a_success_recorded_with_both_answers()
     asked_at = (len(answers) - 2) / s.hz                     # the pose, taken at t = 0, was then 8 s old
     assert sent["aim"] == {"chosen_by": "first_sighting",
                            "sighting": {"source": "last_seen", "seen_s_ago": round(asked_at + 8)}}
-    assert s.drain_decisions() == tuple(decisions) and s.drain_decisions() == ()
+    # Both records go to the twin once, with the tick the answer came back on.
+    assert last.decisions == tuple(decisions) and carried(answers[:-1]) == []
+    assert s.drain_decisions() == ()
 
 
 def test_after_a_miss_it_aims_at_the_new_sighting_rises_first_and_touches_the_cube():
@@ -561,7 +568,7 @@ def test_a_judge_that_never_answers_is_asked_once_more_then_the_run_stops_for_re
     decisions = s.judging.decisions
     assert len(decisions) == 4 and all(d.response_s is None and d.confidence is None for d in decisions)
     assert {answer_of(d)["error"] for d in decisions} == {"timeout"}
-    assert s.judging.decisions == decisions and len(s.drain_decisions()) == 4      # late answers add nothing
+    assert carried(answers) == decisions and s.drain_decisions() == ()          # late answers add nothing
 
 
 def test_the_lag_guard_still_ends_the_run_while_the_answer_is_pending():
