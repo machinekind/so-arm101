@@ -158,6 +158,8 @@ pick_place:
   approach_file: ""          # the stand's approach table, e.g. ~/stands/desk/approach.json
   approach_direction: ""     # out, in, ccw or cw; empty: the table's preferred side
   pick_shift: always         # auto: only with a table set; off: never
+  table_check_m: 0.006       # the pick's own correction may differ from the table this much...
+  table_check_runs: 2        # ...before this many picks in a row stop the table's use
 build:
   task: "a tower of the three cubes, blue at the bottom"
   plan_json: ""              # a fixed plan: no model is asked
@@ -619,7 +621,9 @@ measures how far, per spot, height and side, into an approach table (see
   that is the hover the jaw opens over; after a wrist look or a correction moves the aim, the hand goes
   back and runs the leg again before it goes down. At the place it is the hover over the target;
 - the place's hover and release move by the table's correction at that spot, height and side. The pick's
-  first aim moves by it too;
+  first aim moves by it too. The look between the jaw tips may then move the aim again, but it measures
+  through the arm's own play, so the place counts the held block across the jaws where the table's aim
+  put it (`place.hand_shift_m` says how far that is from the look's aim);
 - what the run compares stays in camera poses: the latch on the target, the jaw clearances and the
   check after the release. `place.target_xy` is still where the cameras see the target.
 
@@ -628,9 +632,13 @@ tilted, or when the leg's start is out of reach), the place takes the pick's own
 aim the wrist camera centred the jaws on, minus where the cameras saw the block. With the wrist camera
 and no table, `pick_shift: always` (the default) does the same everywhere; `auto` does it only with a
 table set, `off` never. The pick's correction cannot tell a camera error from a block pushed after the
-wrist look: it carries such a push to the place too. When the table's correction at the pick and the
-pick's own differ by more than `table_check_m` (4 mm), the run stops trusting the table, as after a fixed
-camera was moved; a push of that size during the pick does the same. A put-back takes no correction. `place.correction_m`, `place.correction_from` (`table`, `pick` or empty) and
+wrist look: it carries such a push to the place too. The pick's own correction also carries the look's
+error, so it differs from a good table by a few millimetres. When the two differ by more than
+`table_check_m` (6 mm), the panel says "chwyt rozni sie od tablicy o 7 mm (1 raz z rzedu) - zostaje
+tablica" and the run keeps the table: one push of the block does that too. When `table_check_runs` (2)
+picks in a row with the same table differ by more, as after a fixed camera was moved, the run stops
+trusting the table and says "tablica nie zgadza sie z chwytem 2 razy z rzedu". The count lasts while the
+twin runs and starts again with a rewritten table. A put-back takes no correction. `place.correction_m`, `place.correction_from` (`table`, `pick` or empty) and
 `place.table_miss` say what the run did; the panel adds "poprawka z tablicy 7 mm (ccw)" or "poprawka z
 chwytu 10 mm - cel poza tablica" to the carry note. A table file that cannot be used leaves
 `place.table_problem` and the run goes on without it.
@@ -773,8 +781,10 @@ height and side. It holds the fixed camera's error, sag and gear play together.
    `uv run soarm-lab approach-table ~/stands/desk/approach.json` shows the details, and a suggested
    `focal_px` and tip pixel for `grasp_wrist`.
 8. Optional: move the board to another area and run again. The samples add up in the same file.
-9. Run it again after moving or recalibrating a fixed camera, after re-zeroing the servos, or when the
-   panel says "tablica nie zgadza sie z chwytem".
+9. Run it again after moving or recalibrating a fixed camera, or after re-zeroing the servos. When runs
+   keep saying "tablica nie zgadza sie z chwytem 2 razy z rzedu", check first that no fixed camera moved
+   and that the blocks are not pushed during the pick; then run it again. A single "chwyt rozni sie od
+   tablicy" needs nothing.
 
 ### The table
 
@@ -785,8 +795,10 @@ which `pick_place` does not use. `max_table_age_days` makes `pick_place` ignore 
 
 Known gaps: the board covers about 4.5 x 13.5 cm; places further than 3 cm outside its corners take the
 pick's correction. Corners are seen at table height, blocks a few centimetres higher, which leaves up to
-about 1 mm of a camera tilt error. The table is measured with the hand across the arm, while a place
-turns the hand to the target's yaw. The table's height correction is stored but not used: a release can
+about 1 mm of a camera tilt error. Each corner is measured at the heading the wrist camera sees it best
+from, while a place turns the hand to the target's yaw; in the simulation the landing error after the leg
+changed little with the heading or with the way the hand came, and the table holds no heading. The
+table's height correction is stored but not used: a release can
 still start a few millimetres higher or lower than planned. In the simulation the radial sides (`out`,
 `in`) repeat worse than the tangential ones, as the leg moves only some of the joints; the preferred
 side came out `ccw` or `cw` on every simulated stand.
@@ -800,13 +812,18 @@ No arm moves and no model is asked.
 
 - approach: simulated stands with a ChArUco board, 6 mm of gear play and the fixed camera's pose tilted
   so it sees 10 mm off; each runs the whole calibration, then the table's correction is checked against
-  the simulation's truth at points it did not measure.
+  the simulation's truth at points it did not measure, approached as `pick_place` approaches a place:
+  after a stop at a pick spot, by a straight carry that turns the hand to a heading drawn over the whole
+  turn. The report splits the error by direction, level and heading.
 - grasp: `grasp_wrist` with the detector 1.5 cm off; the same with 6 mm of hidden joint backlash; the
   same with the cube nudged 5 mm after the hover look.
 - pick_place: a cube on a cube, with and without the wrist camera, and with every camera 5, 10 and
   15 mm off (5 mm also with `pick_shift: auto`); on simulated stands with 6 mm of play and the camera
   10 mm off, with the stand's approach table (camera tilted, and shifted), with the pick's correction
-  only and with none; a cuboid across two cubes; a cube next to a cube.
+  only and with none; a cuboid across two cubes; a cube next to a cube. Each run onto a block keeps the
+  simulation's truth on the corrections in use under `in_use`: at the pick, how far the table's and the
+  pick's own correction lay from the one needed; at the release, how far the TCP and the block in the
+  hand were from where the plan needed them.
 - build: a tower of three cubes from a fixed plan and from a scripted planner; from the fixed plan with
   the wrist camera, also with every camera 5 mm off, and on the simulated stands with and without the
   approach table; both plans again with the middle cube knocked off mid-build; a bridge.

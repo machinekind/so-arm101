@@ -25,7 +25,7 @@ import soarm
 
 pytest.importorskip("mujoco")
 
-from soarm_lab.approach_table import ApproachTable  # noqa: E402
+from soarm_lab.approach_table import ApproachTable, Hit  # noqa: E402
 from soarm_lab.blocks import block  # noqa: E402
 from soarm_lab.kinematics import RobotKinematics  # noqa: E402
 from soarm_lab.planner.world import overlap, rectangle  # noqa: E402
@@ -289,20 +289,21 @@ def test_its_settings_are_the_grasp_familys_and_the_places():
     jev = [f.name for f in dataclasses.fields(GraspJevSettings)]
 
     assert names[:len(wrist)] == wrist and set(jev) <= set(names)
-    assert names[-28:] == ["judge", "place_on", "place_on_block", "place_x_m", "place_y_m", "place_z_m",
+    assert names[-29:] == ["judge", "place_on", "place_on_block", "place_x_m", "place_y_m", "place_z_m",
                            "place_yaw_deg", "supports", "align_yaw", "carry_clearance_m", "place_gap_m",
                            "place_speed_mps", "release_margin_m", "release_ease_m", "retreat_m",
                            "retreat_speed_mps", "retreat_clear_m", "fresh_pose_s", "target_wait_s",
                            "verify_wait_s", "place_tol_m", "place_retries", "approach_file",
                            "approach_direction", "approach_lead_m", "pick_shift", "table_check_m",
-                           "max_table_age_days"]
+                           "table_check_runs", "max_table_age_days"]
     defaults = PickPlaceSettings()
     assert defaults.judge == "jev" and defaults.wrist_camera == "wrist" and defaults.time_limit_s == 240.0
     assert defaults.max_tilt_deg == 30.0 and defaults.place_retries == 2
     retreat = (defaults.release_ease_m, defaults.retreat_speed_mps, defaults.retreat_clear_m)
     assert retreat == (0.002, 0.02, 0.02)
     assert (defaults.approach_file, defaults.approach_direction, defaults.pick_shift) == ("", "", "always")
-    assert defaults.approach_lead_m == 0.03 and defaults.table_check_m == 0.004
+    assert defaults.approach_lead_m == 0.03 and defaults.table_check_m == 0.006
+    assert defaults.table_check_runs == 2
     assert OUTCOMES == ("placed", "not_found", "target_not_seen", "pick_failed", "dropped", "fell_off",
                         "target_moved", "unreachable", "stopped")
 
@@ -332,6 +333,7 @@ def test_its_settings_are_the_grasp_familys_and_the_places():
     ({"pick_shift": "sometimes"}, "pick_shift must be one of auto, always, off"),
     ({"approach_lead_m": 0.0}, "approach_lead_m must be positive"),
     ({"table_check_m": math.nan}, "table_check_m must be positive"),
+    ({"table_check_runs": 0}, "table_check_runs must be at least 1"),
     ({"max_table_age_days": -1.0}, "max_table_age_days must be zero or more"),
 ])
 def test_bad_settings_are_refused(settings: dict[str, Any], message: str):
@@ -1498,23 +1500,116 @@ def test_the_fallback_goes_pick_then_table_without_its_leg_then_none(tmp_path):
     assert back is not None and back.source == "" and np.all(back.delta == 0.0) and back.leg is None
 
 
-def test_a_table_the_pick_disagrees_with_is_not_trusted_for_the_run(tmp_path):
-    s, world = stack(approach_file=approach_file(tmp_path))
+def test_a_rise_the_arm_reaches_in_height_but_not_across_still_leaves_the_placed_block():
+    """After the release the open hand rises; where the arm gets to the height but stays 3 mm off across,
+    the run leaves from there instead of waiting for the time limit."""
+    s, world = stack()
+    drive = s._drive
+
+    def off_across(goal: np.ndarray, step_m: float, *, rotation: np.ndarray | None = None) -> Action:
+        if s.status.phase == "let_go" and s._eased:
+            action = drive(np.array([goal[0] + 0.003, goal[1], goal[2]]), step_m, rotation=rotation)
+            s.status.out_of_reach = True
+            return action
+        return drive(goal, step_m, rotation=rotation)
+
+    s._drive = off_across  # type: ignore[method-assign]
+    actions, phases = run(s, world, seconds=40.0)
+
+    assert actions[-1].success and s.place.outcome == "placed", s.status.stopped_because
+    assert phases[phases.index("let_go"):][:2] == ["let_go", "park"]
+    assert np.linalg.norm(world.body("red").xy - world.body("blue").xy) < 0.002
+
+
+def checked(path: str, off: tuple[float, float], **settings: Any) -> PickPlaceStrategy:
+    """A run with the table at `path` whose pick's own correction lies `off` from the table's [m]."""
+    s, world = stack(approach_file=path, **settings)
     s.start(run_info(), Observation(t=0.0, step=0, joints=dict(world.joints), command=dict(world.command),
                                     objects=world.objects()))
     s._pick_hit, s._first_shifted = np.array([-0.006, 0.004]), np.array([-0.006, 0.004])
     s._closed_seen, s._detector_xy = True, np.array(PICK_XY)
-    s._closed_aim = np.array(PICK_XY) + np.array([-0.006, 0.004]) + np.array([0.003, 0.0])
+    s._closed_aim = np.array(PICK_XY) + np.array([-0.006, 0.004]) + np.array(off)
     s._check_table()
-    assert s._table_trusted and s.place.table_check_m == pytest.approx(0.003)
+    return s
 
-    s._closed_aim = np.array(PICK_XY) + np.array([-0.006, 0.004]) + np.array([0.0, 0.005])
-    s._check_table()
+
+def test_a_table_two_picks_in_a_row_disagree_with_is_not_trusted_for_the_run(tmp_path):
+    """One pick over `table_check_m` keeps the table and says so; the next one in a row with the same table
+    sends the run to the pick's own correction. A pick that agrees starts the count again."""
+    path = approach_file(tmp_path)
+    u, here = np.array([1.0, 0.0]), np.array(PICK_XY)
+    s = checked(path, (0.003, 0.0))
+    assert s._table_trusted and s.place.table_check_m == pytest.approx(0.003) and s.place.table_note == ""
+    assert s._hand_from_table(here, u, here, 0.0) is not None
+
+    s = checked(path, (0.0, 0.007))
+    assert s._table_trusted and s.place.table_trusted and s.place.table_check_m == pytest.approx(0.007)
+    assert s.place.table_note == "chwyt rozni sie od tablicy o 7 mm (1 raz z rzedu) - zostaje tablica"
+    assert isinstance(s._lookup(np.array(TARGET_XY), 0.0511), Hit)
+    # The table's correction stays; its account of the block in the hand does not.
+    assert s._hand_from_table(here, u, here, 0.0) is None
+
+    s = checked(path, (0.0, 0.008))
     assert not s._table_trusted and not s.place.table_trusted
-    assert s.place.table_note == "tablica nie zgadza sie z chwytem o 5 mm - poprawka z chwytu"
+    assert s.place.table_note == ("tablica nie zgadza sie z chwytem 2 razy z rzedu (teraz o 8 mm) - poprawka "
+                                  "z chwytu")
     assert s._lookup(np.array(TARGET_XY), 0.0511) == "check"
     fallback = s._corrections("", np.array(TARGET_XY), 0.0511)
     assert fallback is not None and fallback.source == FROM_PICK and fallback.miss == "check"
+
+    assert checked(path, (0.002, 0.0))._table_trusted
+    assert checked(path, (0.0, 0.007))._table_trusted
+
+
+def test_a_rewritten_table_starts_the_count_again_and_one_run_may_be_enough(tmp_path):
+    path = approach_file(tmp_path)
+    assert checked(path, (0.0, 0.007))._table_trusted
+    data = json.loads(Path(path).read_text())
+    data["updated"] = "2030-01-01T00:00:00"
+    Path(path).write_text(json.dumps(data))
+    assert checked(path, (0.0, 0.007))._table_trusted
+    assert not checked(path, (0.0, 0.007), table_check_runs=1)._table_trusted
+
+
+def test_a_look_that_moved_the_aim_across_the_jaws_does_not_move_the_place(tmp_path):
+    """The table's first aim is right and the wrist look then moves the aim 2.5 mm across the jaws: the
+    closed jaws leave the cube where it was across them. The place puts the cube where the table's aim says
+    it sits in the hand, so it lands on the target."""
+    pytest.importorskip("cv2")
+    s, world = table_stack(tmp_path, wrist_camera="wrist")
+    red = world.body("red")
+
+    def measure(rgb, joints, ref_xy=None):
+        psi = heading(KIN, joints)
+        across = 0.0025 * np.array([-math.sin(psi), math.cos(psi)])
+        return Measurement(red.xy + across, red.yaw, 0.9, 1000, 1.0, np.zeros(2))
+
+    s.measure = measure  # type: ignore[method-assign]
+    actions, _ = run(s, world, frames={"wrist": Frame(np.zeros((48, 64, 3), np.uint8), 0.0)})
+    place = s.place
+
+    assert actions[-1].success and place.outcome == "placed", s.status.stopped_because
+    assert place.correction_from == FROM_TABLE and place.table_trusted
+    assert place.table_check_m == pytest.approx(0.0025, abs=2e-4)
+    assert place.hand_shift_m == pytest.approx(0.0025, abs=2e-4)
+    assert np.linalg.norm(red.xy - world.body("blue").xy) < 0.0005
+
+
+def test_the_pick_correction_keeps_the_look_s_aim_in_the_hand(tmp_path):
+    """Where the place takes the pick's own correction, which holds the look's move, the cube stays in the
+    hand where the look put it."""
+    pytest.importorskip("cv2")
+    near_pick = [(x, y) for x in (0.17, 0.2, 0.23) for y in (-0.07, -0.04, -0.01)]
+    s, world = stack(approach_file=approach_file(tmp_path, xy=near_pick), wrist_camera="wrist")
+    world.offset = SEEN_OFF
+    red = world.body("red")
+    s.measure = lambda rgb, joints, ref_xy=None: Measurement(  # type: ignore[method-assign]
+        red.xy.copy(), red.yaw, 0.9, 1000, 1.0, np.zeros(2))
+    actions, _ = run(s, world, frames={"wrist": Frame(np.zeros((48, 64, 3), np.uint8), 0.0)})
+
+    assert actions[-1].success and s.place.correction_from == FROM_PICK
+    assert s._table_hand is not None and s.place.hand_shift_m == pytest.approx(0.0, abs=1e-4)
+    assert np.linalg.norm(red.xy - world.body("blue").xy) < 0.002
 
 
 def test_without_the_pick_correction_a_disagreeing_table_stays(tmp_path):

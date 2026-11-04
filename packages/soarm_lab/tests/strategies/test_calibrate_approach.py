@@ -33,7 +33,9 @@ from soarm_lab.strategies.calibrate_approach import (
     SAMPLES,
     CalibrateApproachSettings,
     CalibrateApproachStrategy,
+    ProbeSpec,
 )
+from soarm_lab.strategies.grasp import wrap
 from soarm_lab.strategies.pick_place import GRIP_SLIP_M, MIN_CARRY_CLEAR_M, TABLE_TOP_M
 
 SPEC = load_robot()
@@ -141,6 +143,48 @@ def test_an_explicit_schedule_only_probes():
     with pytest.raises(ValueError, match="schedule"):
         CalibrateApproachStrategy(cfg, schedule=[((0.2, 0.0), 0, "ccw")])
     CalibrateApproachStrategy(CalibrateApproachSettings(), schedule=[((0.2, 0.0), 0, "ccw")], measure=False)
+
+
+def test_a_probe_takes_its_heading_and_stops_at_its_pick_before_a_straight_carry():
+    """A probe with a heading and a pick stop: down at the pick with the pick's heading, up, straight across
+    to the leg's start with the hand turning on the way, the leg and down, then still at the heading asked."""
+    xy = np.array([0.2, 0.03])
+    psi = wrap(math.atan2(xy[1] - PAN_XY[1], xy[0] - PAN_XY[0]) - math.radians(30.0))
+    pick = np.array([0.19, -0.06, 0.017])
+    stills: list[tuple[float, np.ndarray]] = []
+    path: list[np.ndarray] = []
+
+    def on_still(strategy: CalibrateApproachStrategy, obs: Observation, planned) -> None:
+        stills.append((planned.psi, KIN.tcp(dict(obs.joints))[:3, 3]))
+
+    strategy = CalibrateApproachStrategy(
+        CalibrateApproachSettings(levels_m="0.029"), measure=False, on_still=on_still,
+        schedule=[ProbeSpec(xy, 0, "cw", psi, pick, 0.3), (xy, 0, "ccw")])
+    feed = Feed(strategy, lambda t: {})
+    step = strategy.act
+
+    def act(obs: Observation):
+        action = step(obs)
+        path.append(KIN.tcp(dict(action.target))[:3, 3].copy())
+        return action
+
+    strategy.act = act  # type: ignore[method-assign]
+    feed.run(120.0)
+    assert feed.done is not None and feed.done.success, feed.notes
+    assert len(stills) == 2 and stills[0][0] == pytest.approx(psi)
+    release = strategy.level_heights()[0][1]
+    assert stills[0][1] == pytest.approx([*xy, release], abs=1e-3)
+    at_pick = [k for k, p in enumerate(path) if np.linalg.norm(p - pick) < 1e-3]
+    assert at_pick, "the hand never stood at the pick"
+    lead = lead_point(xy, direction_vector("cw", xy, PAN_XY), 0.03)
+    at_lead = next(k for k, p in enumerate(path) if k > at_pick[-1] and np.linalg.norm(p[:2] - lead) < 1e-3)
+    # From over the pick to the leg's start the TCP runs on the straight line between them.
+    carry = [p for p in path[at_pick[-1]:at_lead] if p[2] > pick[2] + 0.02]
+    start = carry[0]
+    line = (lead - start[:2]) / np.linalg.norm(lead - start[:2])
+    across = np.array([-line[1], line[0]])
+    off_line = [abs(float((p[:2] - start[:2]) @ across)) for p in carry]
+    assert max(off_line) < 2e-3
 
 
 def test_a_level_too_low_for_the_jaw_is_refused(tmp_path):

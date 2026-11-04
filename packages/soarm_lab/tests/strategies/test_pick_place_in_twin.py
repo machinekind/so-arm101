@@ -38,7 +38,7 @@ from machinekind_twin.runtime import Twin  # noqa: E402
 from machinekind_twin.strategies import load_strategy, strategies  # noqa: E402
 from machinekind_twin.strategy import ObjectPose, StrategyRunner  # noqa: E402
 from machinekind_twin.workspace import Workspace  # noqa: E402
-from twin_stand import Stand  # noqa: E402
+from twin_stand import Stand, truth_tcp  # noqa: E402
 
 from soarm_lab.blocks import block  # noqa: E402
 from soarm_lab.campaign import Run, campaign_dir, jsonable, record, runs_per_scenario  # noqa: E402
@@ -47,6 +47,7 @@ from soarm_lab.planner import Place, Step, TargetPose, holds, resolve, world_sta
 from soarm_lab.planner.schema import SIDE_VECTORS  # noqa: E402
 from soarm_lab.robot import load_robot  # noqa: E402
 from soarm_lab.stand_errors import Backlash  # noqa: E402
+from soarm_lab.strategies.grasp import wrap  # noqa: E402
 from soarm_lab.strategies.grasp_jev import HELD_OPTIONS, NEXT_OPTIONS  # noqa: E402
 from soarm_lab.strategies.jev import KEY_ENV  # noqa: E402
 from soarm_lab.strategies.judges import Reply, checked_reply  # noqa: E402
@@ -964,6 +965,8 @@ class PoseRun:
     #: blocks or a block and the table [m].
     corrections: int = 0
     sank_m: float = 0.0
+    #: What the simulation's truth says of the corrections in use (`in_use`).
+    in_use: dict[str, Any] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -1050,8 +1053,12 @@ def place_at_pose(twin: Twin, scene: PoseScene, on_carry: Callable[[Twin], None]
     fastest = {b.name: 0.0 for b in scene.blocks}
     last = {name: truth(twin, name)[0] for name in fastest}
     timeline: list[tuple[float, int, str]] = []
+    target = names[supports[0]] if relation == "on" else ""
+    used: dict[str, Any] = {}
 
     def watch() -> None:
+        if strategy.started:
+            in_use(twin, strategy, held, target, used)
         if on_carry is not None and not carried and strategy.started and strategy.status.phase == "carry_up":
             carried.append(True)
             on_carry(twin)
@@ -1088,8 +1095,41 @@ def place_at_pose(twin: Twin, scene: PoseScene, on_carry: Callable[[Twin], None]
                   pose, strategy.status.attempt, artefacts, strategy.status.stopped_because, clock.t,
                   time.monotonic() - started, timeline, status,
                   sum(look.verdict in ("moved", "off") for look in strategy.wrist.close_looks),
-                  sinking.deepest())
+                  sinking.deepest(), used)
     return run, strategy
+
+
+def rot2(a: float) -> np.ndarray:
+    c, s = math.cos(a), math.sin(a)
+    return np.array([[c, -s], [s, c]])
+
+
+def in_use(twin: Twin, strategy: PickPlaceStrategy, held: str, target: str, out: dict[str, Any]) -> None:
+    """The corrections as the run uses them, against the simulation's truth [m, base frame x and y].
+
+    At the pick's first close, `pick`: the correction the detector's aim needed for the TCP as it really
+    stands, the table's (`table`) and the pick's own (`own`). At the release onto a target block, `place`:
+    how far the TCP really stands from where the block's place in the hand needs it (`tcp`), how far the
+    block really sits in the hand from the plan's account (`hand`), the block's offset from the target with
+    the jaw still closed (`jaws`) and the heading against the target's bearing [deg]."""
+    phase = strategy.status.phase
+    if phase == "close" and "pick" not in out and strategy._detector_xy is not None:
+        e = truth_tcp(twin)[:2] - strategy.tcp_cmd[:2]
+        need = truth(twin, held)[0][:2] - strategy._detector_xy - e
+        hit, own = strategy._pick_hit, strategy.pick_shift()
+        out["pick"] = {"need": need, "table": None if hit is None else np.asarray(hit) - need,
+                       "own": None if own is None else own - need}
+    plan = strategy._place_plan
+    if phase == "let_go" and "place" not in out and target and plan is not None:
+        tcp = truth_tcp(twin)[:2]
+        block_xy, goal = truth(twin, held)[0][:2], truth(twin, target)[0][:2]
+        hand = rot2(-plan.psi) @ (plan.target_xy - plan.tcp_xy)
+        pan = strategy._pan_xy
+        bearing = math.atan2(float(goal[1] - pan[1]), float(goal[0] - pan[0]))
+        out["place"] = {"source": plan.source, "tcp": tcp - (goal - rot2(plan.psi) @ hand),
+                        "hand": block_xy - tcp - rot2(plan.psi) @ hand,
+                        "jaws": block_xy - goal,
+                        "heading_deg": math.degrees(wrap(plan.psi - bearing))}
 
 
 def test_a_cuboid_goes_across_two_cubes_as_a_bridge(twin):
@@ -1222,7 +1262,7 @@ def as_run(scenario: str, seed: int, run: PoseRun, errors: Mapping[str, Any],
     details = {"settings": dict(settings), **errors, "why": "" if done else run.why,
                "outcome": run.outcome, "tilt_deg": run.tilt_deg, "others_shift_m": run.others_shift_m,
                "holds": run.holds, "pose": run.pose, "timeline": run.timeline, "status": run.status,
-               "sank_m": run.sank_m}
+               "sank_m": run.sank_m, "in_use": run.in_use}
     return Run(f"pick_place: {scenario}", seed, done and not run.artefacts, run.attempts, run.error_m, reason,
                run.artefacts, run.sim_s, run.wall_s, details, run.corrections)
 

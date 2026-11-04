@@ -4,10 +4,13 @@ camera, and a seeded campaign that checks the table's corrections at held-out po
 Each stand (`twin_stand.Stand`) lays a ChArUco board on the table and puts the fixed camera `kamera1` where
 its calibration says it is not. The calibration then runs as on the desk, its strategy wrapped in `Backlash`
 for hidden play in the arm. Afterwards the same arm, without measuring, approaches held-out points inside
-the board's corners: each point where the stand's perception would see a block there, at each level and from
-each direction. The truth at each point is the true point minus where the TCP really is, plus what the TCP
-lacked of its command; the table's prediction is its lookup at the perceived point. The campaign's bar is on
-the distance between the two, pooled over the stands.
+the board's corners as `pick_place` approaches a place: each point where the stand's perception would see a
+block there, at each level and from each direction, with a heading drawn over the whole turn, after a stop
+at a pick spot and a straight carry that turns the hand. The truth at each point is the true point minus
+where the TCP really is, plus what the TCP lacked of its command; the table's prediction is its lookup at
+the perceived point. The campaign's bar is on the distance between the two for the direction `pick_place`
+takes, pooled over the stands, on each level and in each heading bin; the report gives the other
+directions too.
 
 `SOARM_CAMPAIGN_RUNS` sets the stands (default `RUNS`); `SOARM_CAMPAIGN_DIR` keeps one JSON file per stand and
 each stand's table under `tables/`.
@@ -23,22 +26,30 @@ from typing import Any
 import numpy as np
 import pytest
 
+import soarm
+
 pytestmark = pytest.mark.twin
 pytest.importorskip("mujoco")
 pytest.importorskip("machinekind_twin")
 cv2 = pytest.importorskip("cv2")
 
 from machinekind_twin.strategy import StrategyRunner  # noqa: E402
+from machinekind_twin_api.strategy import Observation, RunInfo  # noqa: E402
 from twin_stand import THICKNESS_M, Clock, Stand, calibrate, drive, truth_tcp  # noqa: E402
 
 from soarm_lab.approach_table import ApproachTable, Hit  # noqa: E402
 from soarm_lab.campaign import Run, campaign_dir, record, runs_per_scenario  # noqa: E402
+from soarm_lab.kinematics import RobotKinematics  # noqa: E402
+from soarm_lab.robot import load_robot  # noqa: E402
 from soarm_lab.stand_errors import Backlash  # noqa: E402
+from soarm_lab.strategies.approach import bearing  # noqa: E402
 from soarm_lab.strategies.calibrate_approach import (  # noqa: E402
     CalibrateApproachSettings,
     CalibrateApproachStrategy,
     Planned,
+    ProbeSpec,
 )
+from soarm_lab.strategies.grasp import wrap  # noqa: E402
 
 #: The campaign's errors: play at the hand [m], the fixed camera's error at (0.2, 0) [m] and the wrist
 #: camera's offset from its model [m].
@@ -49,6 +60,14 @@ MOUNT_M = (0.002, 0.003)
 PROBES = 10
 BAR_MEDIAN_M = 0.0015
 BAR_P90_M = 0.0025
+#: Heading bins against the point's bearing [deg], and the fewest probes a bin needs for its bar.
+HEADING_BIN_DEG = 45
+MIN_BIN = 20
+#: Where a probe's pick stop may lie: from the base's turning axis [m] and its bearing [deg]; the TCP's
+#: height there [m], a cube's grasp off the table.
+PICK_RADIUS_M = (0.13, 0.25)
+PICK_BEARING_DEG = 50.0
+PICK_Z_M = 0.017
 #: Stands per campaign without `SOARM_CAMPAIGN_RUNS`.
 RUNS = 20
 SCENARIO = "approach: table, play 6 mm, camera tilted 10 mm, mount 2-3 mm"
@@ -65,16 +84,23 @@ def settings(table: Path | None, **extra: Any) -> CalibrateApproachSettings:
 # --------------------------------------------------------------------------- held-out points
 @dataclass
 class Probe:
-    """One approach to a held-out point: where it really lies and is seen, the truth and the table's word."""
+    """One approach to a held-out point: where it really lies and is seen, the hand's heading against the
+    point's bearing [deg], the truth and the table's word."""
 
     point: int
     level: int
     direction: str
     true_xy: tuple[float, float]
     seen_xy: tuple[float, float]
+    heading_deg: float = math.nan
     truth_m: tuple[float, float] = (math.nan, math.nan)
     predicted_m: tuple[float, float] = (math.nan, math.nan)
     miss: str = ""
+
+    @property
+    def heading_bin(self) -> int:
+        """The heading bin's lower edge [deg]."""
+        return int(math.floor(self.heading_deg / HEADING_BIN_DEG) * HEADING_BIN_DEG)
 
     @property
     def error_m(self) -> float:
@@ -90,25 +116,60 @@ def held_out(stand: Stand, rng: np.random.Generator, n: int) -> np.ndarray:
     return stand.board_point(xy)[:, :2]
 
 
+SPEC = load_robot()
+PAN_XY = RobotKinematics(SPEC).joint_anchor(SPEC.arm_joints[0], SPEC.home)[:2]
+
+
+def planner(levels: list[float]) -> CalibrateApproachStrategy:
+    """A probe run started off the twin, to plan probes with."""
+    cfg = settings(None, levels_m=",".join(str(z) for z in levels))
+    strategy = CalibrateApproachStrategy(cfg, schedule=[], measure=False)
+    run = RunInfo(robot=SPEC.name, joints=tuple(SPEC.joints), gripper=SPEC.gripper, limits={},
+                  max_vel=dict(SPEC.max_vel), folder=soarm.ROBOT_DIR, simulated=True)
+    strategy.start(run, Observation(t=0.0, step=0, joints=dict(SPEC.home), command={}))
+    return strategy
+
+
+def drawn(rng: np.random.Generator, plan: CalibrateApproachStrategy, xy: np.ndarray, level: int,
+          direction: str, tries: int = 40) -> ProbeSpec:
+    """A probe of `xy` that the run can plan: a heading drawn over the whole turn, and a pick stop. As
+    `pick_place`, the pick's heading lies within half a quarter turn of the line to the base, either way
+    round."""
+    spec = ProbeSpec(xy, level, direction)
+    for _ in range(tries):
+        psi = wrap(bearing(xy, PAN_XY) + rng.uniform(-math.pi, math.pi))
+        r, a = rng.uniform(*PICK_RADIUS_M), math.radians(rng.uniform(-PICK_BEARING_DEG, PICK_BEARING_DEG))
+        pick = np.array([PAN_XY[0] + r * math.cos(a), PAN_XY[1] + r * math.sin(a), PICK_Z_M])
+        pick_psi = wrap(a + rng.uniform(-math.pi / 4, math.pi / 4) + math.pi * int(rng.integers(0, 2)))
+        spec = ProbeSpec(xy, level, direction, psi, pick, pick_psi)
+        if isinstance(plan._probe_plan(spec), Planned):
+            break
+    return spec
+
+
 def probe(stand: Stand, twin, clock: Clock, table: ApproachTable, points: np.ndarray,
-          levels: list[float], directions: tuple[str, ...]) -> list[Probe]:
-    """Approach each point at each level from each direction without measuring, and compare the table's
-    correction with the truth."""
+          levels: list[float], directions: tuple[str, ...], rng: np.random.Generator) -> list[Probe]:
+    """Approach each point at each level from each direction without measuring, as `pick_place` approaches
+    a place, and compare the table's correction with the truth."""
     probes, schedule = [], []
+    plan = planner(levels)
     for k, xy in enumerate(points):
         for level, surface in enumerate(levels):
             # The cameras see a block's top: the target's error is the field at that height.
             seen = stand.seen(np.array([[*xy, surface]]))[0, :2]
             for d in directions:
+                spec = drawn(rng, plan, seen, level, d)
+                rel = math.degrees(wrap((spec.psi or 0.0) - bearing(seen, PAN_XY)))
                 probes.append(Probe(k, level, d, (float(xy[0]), float(xy[1])),
-                                    (float(seen[0]), float(seen[1]))))
-                schedule.append((seen, level, d))
+                                    (float(seen[0]), float(seen[1])), rel))
+                schedule.append(spec)
     by_order = iter(probes)
 
     def on_still(strategy: CalibrateApproachStrategy, obs, planned: Planned) -> None:
         p = next(by_order)
-        while (p.level, p.direction) != (planned.level, planned.direction) or not np.allclose(p.seen_xy,
-                                                                                              planned.xy):
+        while (p.level, p.direction) != (planned.level, planned.direction) or not np.allclose(
+                p.seen_xy, planned.xy) or abs(wrap(math.radians(p.heading_deg) + bearing(planned.xy, PAN_XY)
+                                                    - planned.psi)) > 1e-6:
             p = next(by_order)
         actual = truth_tcp(twin)[:2]
         truth = np.array(p.true_xy) - actual + (strategy.tcp_cmd[:2] - planned.xy)
@@ -150,9 +211,11 @@ class StandRun:
     artefacts: list[str]
     probe_sim_s: float = 0.0
 
-    def errors(self, direction: str | None = None, level: int | None = None) -> list[float]:
+    def errors(self, direction: str | None = None, level: int | None = None, heading: int | None = None
+               ) -> list[float]:
         return [p.error_m for p in self.probes if math.isfinite(p.error_m)
-                and (direction is None or p.direction == direction) and (level is None or p.level == level)]
+                and (direction is None or p.direction == direction) and (level is None or p.level == level)
+                and (heading is None or p.heading_bin == heading)]
 
 
 def stand_run(seed: int, *, tables: Path | None = None) -> StandRun:
@@ -175,7 +238,7 @@ def stand_run(seed: int, *, tables: Path | None = None) -> StandRun:
             assert table is not None
             levels = [float(level["surface_m"]) for level in table.levels]
             probes = probe(stand, twin, clock, table, held_out(stand, rng, PROBES), levels,
-                           tuple(strategy.directions))
+                           tuple(strategy.directions), rng)
         return StandRun(seed, cal.reason, complete, st.samples, planned, st.skipped, cal.sim_s, cal.wall_s,
                         focal, cal.sample_errors(), list(st.verify_m), st.preferred, dict(st.spread_m),
                         probes, cal.artefacts, clock.t - t0)
@@ -196,6 +259,42 @@ def as_run(r: StandRun) -> Run:
     return Run(SCENARIO, r.seed, ok, 1, median, reason, r.artefacts, r.sim_s, r.wall_s, details)
 
 
+HEADING_BINS = range(-180, 180, HEADING_BIN_DEG)
+
+
+def subsets(runs: list[StandRun]) -> dict[str, list[float]]:
+    """The probes' errors [m] pooled over the stands, whole and by direction, level and heading bin, and
+    the same for the preferred direction of each stand, which `pick_place` takes."""
+    out = {"pooled": [e for r in runs for e in r.errors()]}
+    for d in ("out", "in", "ccw", "cw"):
+        out[f"  {d}"] = [e for r in runs for e in r.errors(direction=d)]
+    for level in range(3):
+        out[f"  level {level + 1}"] = [e for r in runs for e in r.errors(level=level)]
+    for b in HEADING_BINS:
+        out[f"  heading [{b}, {b + HEADING_BIN_DEG})"] = [e for r in runs for e in r.errors(heading=b)]
+    out["preferred direction"] = [e for r in runs for e in r.errors(direction=r.preferred)]
+    for level in range(3):
+        out[f"  preferred, level {level + 1}"] = [e for r in runs for e in r.errors(r.preferred, level)]
+    for b in HEADING_BINS:
+        out[f"  preferred, heading [{b}, {b + HEADING_BIN_DEG})"] = [
+            e for r in runs for e in r.errors(r.preferred, heading=b)]
+    return out
+
+
+def missed(runs: list[StandRun]) -> list[str]:
+    """The subsets the bars hold for that miss them: the preferred direction, which `pick_place` takes,
+    pooled, on each level and in each heading bin of at least `MIN_BIN` probes."""
+    out = []
+    for label, errors in subsets(runs).items():
+        if label == "preferred direction" and not errors:
+            out.append("preferred direction (no probes)")
+        held = label == "preferred direction" or (label.strip().startswith("preferred")
+                                                  and len(errors) >= MIN_BIN)
+        if held and errors and (np.median(errors) > BAR_MEDIAN_M or np.percentile(errors, 90) > BAR_P90_M):
+            out.append(label.strip())
+    return out
+
+
 def pooled(runs: list[StandRun]) -> str:
     def line(label: str, errors: list[float]) -> str:
         if not errors:
@@ -208,14 +307,10 @@ def pooled(runs: list[StandRun]) -> str:
             f"sim {r.sim_s / 60:.1f} min, probe median "
             f"{np.median(r.errors()) * 1000 if r.errors() else math.nan:.2f} mm, preferred {r.preferred} "
             f"({r.reason})" for r in runs]
-    every = [e for r in runs for e in r.errors()]
-    rows.append(line("pooled", every))
-    for d in ("out", "in", "ccw", "cw"):
-        rows.append(line(f"  {d}", [e for r in runs for e in r.errors(direction=d)]))
-    for level in range(3):
-        rows.append(line(f"  level {level + 1}", [e for r in runs for e in r.errors(level=level)]))
-    rows.append(line("  preferred direction", [e for r in runs for e in r.errors(direction=r.preferred)]))
+    rows += [line(label, errors) for label, errors in subsets(runs).items()]
     rows.append(line("samples against truth", [e for r in runs for e in r.sample_error_m]))
+    misses = missed(runs)
+    rows.append(f"bars missed: {', '.join(misses)}" if misses else "bars held")
     return "\n".join(rows)
 
 
@@ -310,8 +405,11 @@ def test_a_wrist_camera_mounted_off_its_model_is_measured_out(twin_robots, tmp_p
 @pytest.mark.campaign
 def test_seeded_campaign_the_table_predicts_held_out_corrections(twin_robots):
     """A1: on stands with 6 mm of play, the fixed camera tilted 10 mm off and the wrist camera 2-3 mm off its
-    model, the table's correction at held-out points lies within 1.5 mm of the truth (median) and 2.5 mm
-    (90th percentile), pooled over the stands, at every level and from every direction.
+    model, the table's correction at held-out points, approached as `pick_place` approaches a place, lies
+    within 1.5 mm of the truth (median) and 2.5 mm (90th percentile) for the preferred direction, which
+    `pick_place` takes: pooled over the stands, on every level and in every heading bin with enough probes.
+    The radial directions leave some joints' play to the way the hand came, so they do worse; the report
+    gives them, and every direction pooled, apart.
 
     A stand takes minutes, so the campaign runs only for a campaign folder (`SOARM_CAMPAIGN_DIR`), as
     jobs/overnight.sh sets it."""
@@ -323,7 +421,6 @@ def test_seeded_campaign_the_table_predicts_held_out_corrections(twin_robots):
         record(as_run(runs[-1]))
     report = pooled(runs)
     print(report)
-    errors = [e for r in runs for e in r.errors()]
     assert all(r.complete for r in runs), report
     assert not any(r.artefacts for r in runs), report
-    assert np.median(errors) <= BAR_MEDIAN_M and np.percentile(errors, 90) <= BAR_P90_M, report
+    assert not missed(runs), report

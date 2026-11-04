@@ -26,11 +26,12 @@ After the release the open hand must leave without touching the placed block. Th
 hand stands, and the hand eases at most `release_ease_m` toward the fixed jaw, so the fixed pad leaves
 the block's face. It then rises straight up at `retreat_speed_mps` until the open jaw's lowest point,
 from the measured joints, stands `retreat_clear_m` above the block's top; an arm that settles short
-rises further, by `sag_m` at most. Only then does the hand move toward the start position, never
-lower, at `retreat_speed_mps` and with its orientation held while the jaw is near the block. Where the
-arm cannot rise that high, a jaw `JAW_CLEAR_M` clear still leaves; below that the jaw opens fully, so
-that its moving side clears the block, and the way to the start position must lead away from the
-fixed jaw. Headings with the first exit win.
+rises further, by `sag_m` at most, and a rise it reaches in height but not quite across counts once it
+stands so. Only then does the hand move toward the start position, never lower, at `retreat_speed_mps`
+and with its orientation held while the jaw is near the block. Where the arm cannot rise that high, a
+jaw `JAW_CLEAR_M` clear still leaves; below that the jaw opens fully, so that its moving side clears the
+block, and the way to the start position must lead away from the fixed jaw. Headings with the first
+exit win.
 
 Over a block target the run latches the newest fresh camera pose of the target seen since the carry
 began, if it was captured at most `fresh_pose_s` before the hand started over the target. The hand
@@ -55,10 +56,13 @@ hand is sent: the TCP goes to the place the cameras see plus the table's correct
 from the direction of the approach, so the held block lands where the target really is. The final leg into
 the open-jaw hover at the pick and into the carry hover at the place then always runs `approach_lead_m`
 along one direction (`approach_direction`, else the table's preferred one), as the table was measured. The
-pick's first aim takes the table's correction too. Where the table gives none (outside its corners, at
-another height, with the hand tilted or the leg out of reach), the place takes the pick's own correction
-instead: the aim the wrist camera centred the jaws on minus the detector's (`pick_shift`). A table that
-disagrees with that by more than `table_check_m` is not trusted for the run. A put-back takes neither.
+pick's first aim takes the table's correction too, and a place that takes the table's correction counts
+the held block across the jaws where that aim put it: a later look between the jaw tips measures through
+the arm's own error. Where the table gives none (outside its corners, at another height, with the hand
+tilted or the leg out of reach), the place takes the pick's own correction instead: the aim the wrist
+camera centred the jaws on minus the detector's (`pick_shift`). Once `table_check_runs` picks in a row
+with the same table differ from it by more than `table_check_m`, the table is not trusted for the run. A
+put-back takes neither.
 The corrections move only what the arm is sent to; the latch, the jaw clearances and the check after the
 release still compare camera poses with camera poses.
 
@@ -93,6 +97,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -176,6 +181,16 @@ FROM_PICK = "pick"
 MAX_REPLANS = 2
 #: The least clearance of the held block's bottom above the target while carrying [m].
 MIN_CARRY_CLEAR_M = 0.01
+#: Picks in a row whose own correction differed from the table by more than `table_check_m`, per table file
+#: and the time it was written, in this process.
+_DISAGREEING: dict[tuple[str, str], int] = {}
+
+
+def forget_table_checks() -> None:
+    """Forget the picks that disagreed with a table, as after a restart."""
+    _DISAGREEING.clear()
+
+
 #: The top of the catalog's tallest block lying on the table [m].
 TABLE_TOP_M = max(2 * b.half_size[2] for b in BLOCKS.values())
 #: A block the picked one rests on has its centre at most this far from the picked one's across [m].
@@ -274,9 +289,12 @@ class PickPlaceSettings(GraspJevSettings, WristGraspSettings):
     #: the jaws on minus the detector's [auto|always|off]. `auto` only with a table set, `always` without
     #: one too.
     pick_shift: str = field(default=ALWAYS, metadata={"choices": PICK_SHIFTS})
-    #: The table's correction at the pick may differ this much from the pick's own before the run stops
-    #: trusting the table [m].
-    table_check_m: float = 0.004
+    #: The table's correction at the pick may differ this much from the pick's own [m]. The pick's own
+    #: carries the wrist look's error, so it differs by a few millimetres from a good table.
+    table_check_m: float = 0.006
+    #: Picks in a row with the same table, in this process, that differ by more before a run stops trusting
+    #: the table; 1 stops at the first.
+    table_check_runs: int = 2
     #: A table older than this many days is not used. Zero takes any age.
     max_table_age_days: float = 0.0
 
@@ -346,9 +364,12 @@ class PlaceStatus:
     correction_from: str = ""
     table_miss: str = ""
     #: How far the table's correction at the pick lay from the pick's own [m]; NaN when not compared. Over
-    #: `table_check_m` the table is not used for the rest of the run.
+    #: `table_check_m` on `table_check_runs` picks in a row, the table is not used for the rest of the run.
     table_check_m: float = float("nan")
     table_trusted: bool = True
+    #: How far the table's aim at the pick moved the held block across the jaws from the last look's aim
+    #: [m]; NaN when the table did not place it in the hand.
+    hand_shift_m: float = float("nan")
     #: The place's final leg into the carry hover [m]; 0 for the direct way.
     lead_m: float = 0.0
 
@@ -515,6 +536,8 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
             value = getattr(config, name)
             if not value > 0 or not math.isfinite(value):
                 raise ValueError(f"pick_place: {name} must be positive, is {value}")
+        if not config.table_check_runs >= 1:
+            raise ValueError(f"pick_place: table_check_runs must be at least 1, is {config.table_check_runs}")
         if not config.max_table_age_days >= 0:
             raise ValueError(f"pick_place: max_table_age_days must be zero or more, is "
                              f"{config.max_table_age_days}")
@@ -543,6 +566,7 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         self._obs: Observation | None = None
         #: The approach table in use, or None, and the final leg's direction ('' for the direct way).
         self._table: ApproachTable | None = None
+        self._table_key = ("", "")
         self._direction = ""
         self._phases.update({CARRY: self._lifted, TARGET: self._target, CARRY_UP: self._carry_up,
                              CARRY_OVER: self._carry_over, LATCH: self._latch, PLACE: self._place,
@@ -564,6 +588,9 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         #: Held block centre in the hand frame [m], TCP height above its bottom [m] and its yaw against
         #: the closing heading [rad].
         self._hand_xy = np.zeros(2)
+        #: The held block's centre in the hand frame as the table's aim at the pick puts it across the jaws
+        #: [m], for places that take the table's correction; None when the table did not aim the pick.
+        self._table_hand: np.ndarray | None = None
         self._hang = float("nan")
         self._held_rel = -math.pi / 2
         #: Where the held block was picked: its centre in the hand and before the close [m, base frame].
@@ -581,8 +608,10 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         self._over_top = 0.0
         #: The descent settled above the target and goes on slowly.
         self._slow = False
-        #: The TCP height where the jaw opened [m above the table].
+        #: The TCP height where the jaw opened [m above the table], and ticks the open hand's rise has stood
+        #: at its height without reaching across.
         self._release_tcp_z = float("nan")
+        self._rise_stuck = 0
         #: The jaw is open enough to leave the placed block.
         self._opened = True
         #: How much higher than planned the open hand rose, for an arm that settled short [m].
@@ -650,6 +679,8 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
                     problem = f"tablica podejscia nieuzyta: {why}"
                 else:
                     self._table = table
+                    self._table_key = (str(Path(path).expanduser().resolve()),
+                                       str(table.data.get("updated") or ""))
         self._direction = cfg.approach_direction or (self._table.preferred_direction if self._table else "")
         if self._table is not None and not self._direction:
             self._table, problem = None, "tablica podejscia bez kierunku podejscia"
@@ -899,19 +930,31 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         return self.pick_shift()
 
     def _check_table(self) -> None:
-        """Compare the table's correction at the pick with the pick's own. Over `table_check_m` the table is
-        not used for the rest of the run, when the pick's correction can stand in for it."""
+        """Compare the table's correction at the pick with the pick's own.
+
+        The pick's own carries the wrist look's error and any push of the block after the look, so one pick
+        over `table_check_m` keeps the table. Once `table_check_runs` picks in a row with this table differ
+        by more, as after a fixed camera moved, the table is not used for the rest of the run, when the
+        pick's correction can stand in for it."""
         if not self._table_aimed or self._pick_hit is None:
             return
         shift = self.pick_shift()
         if shift is None:
             return
-        place = self.place
+        cfg, place = self.place_settings, self.place
         off = place.table_check_m = float(np.linalg.norm(shift - self._pick_hit))
-        if off <= self.place_settings.table_check_m or self._pick_correction() is None:
+        if off <= cfg.table_check_m:
+            _DISAGREEING.pop(self._table_key, None)
+            return
+        runs = _DISAGREEING[self._table_key] = _DISAGREEING.get(self._table_key, 0) + 1
+        if runs < cfg.table_check_runs or self._pick_correction() is None:
+            place.table_note = (f"chwyt rozni sie od tablicy o {off * 1000:.0f} mm ({runs} raz z rzedu) - "
+                                "zostaje tablica")
+            logger.info("%s", place.table_note)
             return
         self._table_trusted = place.table_trusted = False
-        place.table_note = f"tablica nie zgadza sie z chwytem o {off * 1000:.0f} mm - poprawka z chwytu"
+        place.table_note = (f"tablica nie zgadza sie z chwytem {runs} razy z rzedu (teraz o "
+                            f"{off * 1000:.0f} mm) - poprawka z chwytu")
         logger.warning("%s", place.table_note)
 
     def _corrections(self, kind: str, tcp_xy: np.ndarray, release_z: float) -> Correction | None:
@@ -1037,6 +1080,7 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         """
         cfg = self.place_settings
         hang = self._hang if hang is None else hang
+        table_hand = self._table_hand if hand_xy is None else None
         hand_xy = self._hand_xy if hand_xy is None else hand_xy
         from_xy = self.tcp_cmd[:2].copy() if from_xy is None else np.asarray(from_xy, float).copy()
         release_z, want, low = place_heights(top, hang, cfg.place_gap_m, GRIP_SLIP_M, TABLE_TOP_M,
@@ -1065,6 +1109,13 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
                 corr = self._corrections(kind, tcp_xy, release_z)
                 if corr is None:
                     continue
+                if corr.source == FROM_TABLE and table_hand is not None:
+                    # The table's correction moves the TCP; the block sits in the hand where the table's aim
+                    # at the pick put it.
+                    there = np.asarray(xy, float) - rot2(psi) @ table_hand
+                    again = self._corrections(kind, there, release_z)
+                    if again is not None and again.source == FROM_TABLE:
+                        tcp_xy, corr = there, again
                 plan = self._plan_turn(xy, top, yaw, turn, tcp_xy, corr, heights, from_xy, fallback is None)
                 if isinstance(plan, str):
                     problem = problem or plan
@@ -1241,7 +1292,28 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         self._target_seen, self._rest_seen = None, {}
         self._leg_given_up = False
         self._check_table()
+        self._table_hand = self._hand_from_table(centre, u, T[:2, 3], heading(kin, measured))
         self._enter(TARGET)
+
+    def _hand_from_table(self, centre: np.ndarray, u: np.ndarray, tcp_xy: np.ndarray, psi: float
+                         ) -> np.ndarray | None:
+        """The held block's centre in the hand frame with the table's first aim across the jaws, when the
+        table aimed the pick, a look centred the close and the two agreed within `table_check_m`; None
+        otherwise.
+
+        The table's aim puts the TCP over the block as it really lies, so the block sits across the jaws
+        where that aim was. A later look between the jaw tips measures through the arm's own error and may
+        move the aim off it; along the closing axis the jaws centre the block either way."""
+        place = self.place
+        place.hand_shift_m = float("nan")
+        if not (self._table_aimed and self._table_trusted) or self._pick_hit is None or \
+                self._detector_xy is None or self.pick_shift() is None or \
+                not place.table_check_m <= self.place_settings.table_check_m:
+            return None
+        v = np.array([-u[1], u[0]])
+        across = float((self._detector_xy + self._pick_hit - centre) @ v)
+        place.hand_shift_m = abs(across)
+        return rot2(-psi) @ (centre + across * v - tcp_xy)
 
     def _target(self, obs: Observation) -> Action | None:
         """Plan the place from the target's pose, or the pick spot when putting the block back."""
@@ -1513,6 +1585,20 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
     def rise_step_m(self) -> float:
         """While placing, the open hand rises at `retreat_speed_mps`."""
         return self.place_settings.retreat_speed_mps / self.hz if self._placing else super().rise_step_m
+
+    def _let_go(self, obs: Observation) -> Action | None:
+        """As `grasp_jev`, but while placing, a rise the arm reaches in height and not across counts as done
+        once it stays so for `settle_ticks`: the open jaw clears the placed block by its height alone."""
+        if self._placing and self._released and self._eased:
+            stuck = self.status.out_of_reach and float(self.tcp_cmd[2]) >= float(self._release_point[2]) - \
+                self.ik_tol and self._command_on_target
+            self._rise_stuck = self._rise_stuck + 1 if stuck else 0
+            if self._rise_stuck >= self.settle_ticks:
+                logger.info("Reka nie dochodzi w bok na wysokosci odjazdu - odjezdza stad")
+                return self._after_let_go()
+        else:
+            self._rise_stuck = 0
+        return super()._let_go(obs)
 
     def _let_go_rise_z(self) -> float:
         """While placing, rise to the retreat, higher by as much as a stall left the block higher if the arm

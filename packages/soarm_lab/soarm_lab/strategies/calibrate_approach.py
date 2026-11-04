@@ -242,6 +242,38 @@ class Planned:
     #: Joints [rad, the description's order] that put the hand at the start of the final leg, or at a look
     #: over the board: the transit's goal.
     start_q: np.ndarray | None = None
+    #: A probe's stop before its carry: the TCP down at `pick` [m, base frame] with heading `pick_psi`
+    #: [rad], reached by a joint move to `pick_q` over it. The carry from there runs straight and turns the
+    #: hand, as `pick_place` carries a block.
+    pick: np.ndarray | None = None
+    pick_psi: float = 0.0
+    pick_q: np.ndarray | None = None
+
+
+@dataclass(frozen=True)
+class ProbeSpec:
+    """One approach of a probe run (`CalibrateApproachStrategy(schedule=...)`): the point, its level and
+    final-leg direction, the closing heading [rad] (None: the first reachable one the calibration would
+    try) and an optional pick-like stop before it, the TCP at `pick` [m] with heading `pick_psi` [rad]."""
+
+    xy: np.ndarray
+    level: int
+    direction: str
+    psi: float | None = None
+    pick: np.ndarray | None = None
+    pick_psi: float = 0.0
+
+
+def probe_spec(item: Any) -> ProbeSpec:
+    """A schedule item as a `ProbeSpec`: one already, or a tuple (xy, level, direction[, psi])."""
+    if isinstance(item, ProbeSpec):
+        spec = item
+    else:
+        xy, level, direction, *rest = item
+        spec = ProbeSpec(xy, level, direction, None if not rest or rest[0] is None else float(rest[0]))
+    pick = None if spec.pick is None else np.asarray(spec.pick, float)[:3].copy()
+    return replace(spec, xy=np.asarray(spec.xy, float)[:2].copy(), level=int(spec.level),
+                   direction=str(spec.direction), pick=pick)
 
 
 @dataclass(frozen=True)
@@ -325,8 +357,8 @@ class CalibrateApproachStrategy(TouchStrategy):
     settings = CalibrateApproachSettings  # pyright: ignore[reportIncompatibleVariableOverride]
 
     def __init__(self, settings: CalibrateApproachSettings | None = None, *,
-                 schedule: Sequence[tuple[Any, int, str]] | None = None, on_still: OnStill | None = None,
-                 measure: bool | Measure = True):
+                 schedule: Sequence[ProbeSpec | tuple[Any, ...]] | None = None,
+                 on_still: OnStill | None = None, measure: bool | Measure = True):
         cfg = settings if settings is not None else CalibrateApproachSettings()
         self.board = charuco.BoardSpec(cfg.squares_x, cfg.squares_y, cfg.square_m, cfg.marker_m,
                                        cfg.dictionary, cfg.thickness_m)
@@ -378,8 +410,7 @@ class CalibrateApproachStrategy(TouchStrategy):
         self.calib = cfg
         self.prefix = " ".join(cfg.label_prefix.split()).lower()
         self.calibration = CalibrationStatus()
-        self._schedule_in = None if schedule is None else [
-            (np.asarray(xy, float)[:2].copy(), int(level), str(d)) for xy, level, d in schedule]
+        self._schedule_in = None if schedule is None else [probe_spec(item) for item in schedule]
         self._on_still = on_still
         self._measure: bool | Measure = measure
         self._phases.update({CORNERS: self._wait_corners, INTRINSICS: self._run_phase, MOUNT: self._run_phase,
@@ -845,19 +876,38 @@ class CalibrateApproachStrategy(TouchStrategy):
     def _plan_probes(self) -> None:
         assert self._schedule_in is not None
         queue = []
-        for xy, level, d in self._schedule_in:
+        for item in self._schedule_in:
+            xy, level, d = item.xy, item.level, item.direction
             if not 0 <= level < len(self._levels):
                 raise ValueError(f"calibrate_approach: schedule level {level} outside "
                                  f"0..{len(self._levels) - 1}")
-            chosen = self._heading_for(xy, self._levels[level][1])
-            plan = (self._approach_plan(PROBE, xy, level, d, chosen[0], chosen[1]) if chosen is not None
-                    else "punkt poza zasiegiem z chwytakiem w dol")
+            plan = self._probe_plan(item)
             if isinstance(plan, str):
                 self._skipped.append({"corner": -1, "level": level, "direction": d, "repeat": 0,
-                                      "kind": PROBE, "why": plan})
+                                      "kind": PROBE, "why": plan, "xy": xy, "psi": item.psi})
                 continue
             queue.append(plan)
         self._queue = queue
+
+    def _probe_plan(self, item: ProbeSpec) -> Planned | str:
+        """The approach of one probe, or why it cannot be made."""
+        _, release, _, _ = self._levels[item.level]
+        if item.psi is None:
+            chosen = self._heading_for(item.xy, release)
+        else:
+            joints = self._reaches(np.array([*item.xy, release]), wrap(item.psi), self._seed())
+            chosen = None if joints is None else (wrap(item.psi), joints)
+        if chosen is None:
+            return "punkt poza zasiegiem z chwytakiem w dol"
+        plan = self._approach_plan(PROBE, item.xy, item.level, item.direction, chosen[0], chosen[1])
+        if isinstance(plan, str) or item.pick is None:
+            return plan
+        at = self._reaches(item.pick, wrap(item.pick_psi), self._seed())
+        over = None if at is None else self._reaches(np.array([*item.pick[:2], plan.carry_z]),
+                                                       wrap(item.pick_psi), at)
+        if over is None:
+            return "punkt chwytu poza zasiegiem"
+        return replace(plan, pick=item.pick.copy(), pick_psi=wrap(item.pick_psi), pick_q=self.kin.to_q(over))
 
     def _order(self, ids: list[int]) -> list[int]:
         """Corners in nearest-neighbour order from the one nearest the hand."""
@@ -1001,10 +1051,22 @@ class CalibrateApproachStrategy(TouchStrategy):
                 self._joint_goal = self.kin.to_q(flipped)
         else:
             assert planned.start_q is not None
-            route = self._joint_route(q_from, planned.start_q)
+            route = self._joint_route(q_from, planned.start_q if planned.pick_q is None else planned.pick_q)
             if route is None:
                 return SELF_CONTACT + " w drodze do punktu"
-            if planned.kind == VIEW:
+            if planned.pick is not None:
+                # As `pick_place`: down to the pick and up again, then straight across to the leg's start,
+                # the hand turning on the way, the leg, then down.
+                d = direction_vector(planned.direction, planned.xy, self._pan_xy)
+                lead = lead_point(planned.xy, d, cfg.lead_m)
+                z, pick, turn = planned.carry_z, planned.pick, planned.pick_psi
+                path.append(Waypoint(np.array([*here[:2], max(here[2], z)]), fast, None, rotation=up))
+                path.extend(Waypoint(np.array([*pick[:2], z]), fast, turn, joints=q) for q in route)
+                path.append(Waypoint(pick.copy(), fast, turn, settle=True))
+                path.append(Waypoint(np.array([*pick[:2], z]), fast, turn))
+                path.append(Waypoint(np.array([*lead, z]), fast, planned.psi))
+                path.extend(self._leg_and_descent(planned))
+            elif planned.kind == VIEW:
                 # Up first, then the joints to the look.
                 path.append(Waypoint(np.array([*here[:2], max(here[2], planned.carry_z)]), fast, None,
                                      rotation=up))
@@ -1016,12 +1078,7 @@ class CalibrateApproachStrategy(TouchStrategy):
                 z = planned.carry_z
                 path.append(Waypoint(np.array([*here[:2], max(here[2], z)]), fast, None, rotation=up))
                 path.extend(Waypoint(np.array([*lead, z]), fast, planned.psi, joints=q) for q in route)
-                path.append(Waypoint(np.array([*planned.xy, z]), fast, planned.psi, settle=True))
-                above = min(planned.release_z + SLOW_ABOVE_M, z)
-                if above > planned.release_z + 1e-6:
-                    path.append(Waypoint(np.array([*planned.xy, above]), fast, planned.psi, settle=True))
-                bottom = np.array([*planned.xy, planned.release_z])
-                path.append(Waypoint(bottom, self.descend_step_m, planned.psi))
+                path.extend(self._leg_and_descent(planned))
         self._path, self._wp, self._wp_t0 = path, 0, self._t
         self._step, self._step_t0 = ("roll" if planned.kind == MOUNT_B else "move"), self._t
         if planned.kind != MOUNT_B:
@@ -1033,6 +1090,16 @@ class CalibrateApproachStrategy(TouchStrategy):
         self._relooks, self._rolls_tried = 0, []
         self._note_approach(planned)
         return ""
+
+    def _leg_and_descent(self, planned: Planned) -> list[Waypoint]:
+        """From the leg's start at the carry height: the leg, then down fast and the rest slowly."""
+        fast, z = self.approach_step_m, planned.carry_z
+        path = [Waypoint(np.array([*planned.xy, z]), fast, planned.psi, settle=True)]
+        above = min(planned.release_z + SLOW_ABOVE_M, z)
+        if above > planned.release_z + 1e-6:
+            path.append(Waypoint(np.array([*planned.xy, above]), fast, planned.psi, settle=True))
+        path.append(Waypoint(np.array([*planned.xy, planned.release_z]), self.descend_step_m, planned.psi))
+        return path
 
     def _transit(self, obs: Observation, wp: Waypoint) -> Action | None:
         """A joint move to `wp.joints`, then on to the next waypoint. Its path is no straight line, but it
