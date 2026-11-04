@@ -32,7 +32,7 @@ from machinekind_twin.strategy import StrategyRunner  # noqa: E402
 from twin_stand import THICKNESS_M, Clock, Stand, calibrate, drive, truth_tcp  # noqa: E402
 
 from soarm_lab.approach_table import ApproachTable, Hit  # noqa: E402
-from soarm_lab.campaign import Run, record, runs_per_scenario  # noqa: E402
+from soarm_lab.campaign import Run, campaign_dir, record, runs_per_scenario  # noqa: E402
 from soarm_lab.stand_errors import Backlash  # noqa: E402
 from soarm_lab.strategies.calibrate_approach import (  # noqa: E402
     CalibrateApproachSettings,
@@ -311,7 +311,12 @@ def test_a_wrist_camera_mounted_off_its_model_is_measured_out(twin_robots, tmp_p
 def test_seeded_campaign_the_table_predicts_held_out_corrections(twin_robots):
     """A1: on stands with 6 mm of play, the fixed camera tilted 10 mm off and the wrist camera 2-3 mm off its
     model, the table's correction at held-out points lies within 1.5 mm of the truth (median) and 2.5 mm
-    (90th percentile), pooled over the stands, at every level and from every direction."""
+    (90th percentile), pooled over the stands, at every level and from every direction.
+
+    A stand takes minutes, so the campaign runs only for a campaign folder (`SOARM_CAMPAIGN_DIR`), as
+    jobs/overnight.sh sets it."""
+    if campaign_dir() is None:
+        pytest.skip("whole calibrations; set SOARM_CAMPAIGN_DIR to run them")
     runs = []
     for seed in range(runs_per_scenario(RUNS)):
         runs.append(stand_run(seed))
