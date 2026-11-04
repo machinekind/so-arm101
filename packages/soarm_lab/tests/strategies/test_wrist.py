@@ -201,27 +201,27 @@ def follow(s: GraspStrategy, joints: dict[str, float], objects: Mapping[str, Obj
            t0: float = 0.0, block: Block | None = None, cap_deg_s: float | None = None,
            frames: Frames | None = None, measured: list[dict[str, float]] | None = None,
            on_tick: Callable[[float], None] | None = None, until: Callable[[], bool] | None = None,
-           held_wider_m: float = 0.0,
+           gripper_offset_m: float = 0.0,
            ) -> tuple[list[Action], list[str], dict[str, float], float]:
     """Run up to `ticks` ticks, stopping on `done`.
 
     The arm follows the supervisor command at once, stalling at `block`. The jaw closes to
     block width when the tips straddle it, then the block follows the fingertips. `frames`
     supplies wrist frames from measured joints. `on_tick` runs after each tick, and `until`
-    can end the loop. A jaw squeezing the block reads `held_wider_m` wider than it is, as a
-    gripper's calibration may. Return actions, phases, final joints and final time.
+    can end the loop. With `gripper_offset_m`, the gripper's readings and commands put the jaw that much
+    wider than it really is, as a stand's calibration may. Return actions, phases, final joints and final
+    time.
     """
     answers, phases = [], []
     command = dict(joints)
     t = t0
     g = SPEC.gripper
     assert g is not None
-    shown: float | None = None
     for _ in range(ticks):
         if measured is not None:
             measured.append(joints)
         seen_now = frames(joints) if frames is not None else None
-        read = joints if shown is None else dict(joints, **{g: shown})
+        read = dict(joints, **{g: regrip(joints[g], gripper_offset_m)}) if gripper_offset_m else joints
         answers.append(a := s.act(obs(read, t=t, objects=objects, command=command, frames=seen_now)))
         phases.append(s.status.phase)
         if on_tick is not None:
@@ -230,28 +230,33 @@ def follow(s: GraspStrategy, joints: dict[str, float], objects: Mapping[str, Obj
         command = supervised(command, a.target, None if cap_deg_s is None else cap_deg_s / s.hz)
         arm = dict(command)
         arm[g] = joints[g]
+        # Where the jaw really goes for the gripper's command.
+        sent = regrip(command[g], -gripper_offset_m) if gripper_offset_m else command[g]
         between = block is not None and block.between(arm)
-        grip = max(command[g], block.units(arm)) if block is not None and between else command[g]
+        grip = max(sent, block.units(arm)) if block is not None and between else sent
         arm[g] = grip
         if block is not None:
             units = block.units(arm) if between else NAN
-            if block.gripped and command[g] > units + 0.5:
+            if block.gripped and sent > units + 0.5:
                 block.gripped = False
-                arm[g] = command[g]
-            elif between and not block.gripped and abs(grip - units) < 0.5 and command[g] < units - 0.5:
+                arm[g] = sent
+            elif between and not block.gripped and abs(grip - units) < 0.5 and sent < units - 0.5:
                 block.gripped = True
             if block.stalls(arm):
                 arm = dict(joints, **{g: arm[g]})
             if block.gripped:
                 block.xy = np.mean(KIN.fingertips(arm), axis=0)[:2]
             block.path.append(block.xy.copy())
-            squeezing = between and command[g] < units - 0.5
-            wider = KIN.jaw_gap(units) + held_wider_m
-            shown = KIN.gripper_for_gap(wider) if held_wider_m and squeezing else None
         joints = arm
         if a.done or (until is not None and until()):
             break
     return answers, phases, joints, t
+
+
+def regrip(gripper: float, wider_m: float) -> float:
+    """The gripper value whose jaw gap is `wider_m` [m] wider than at `gripper` [app units]."""
+    lo, hi = KIN.jaw_gap(0.0), KIN.jaw_gap(100.0)
+    return KIN.gripper_for_gap(min(max(KIN.jaw_gap(gripper) + wider_m, lo), hi))
 
 
 # ------------------------------------------------------------ the synthetic wrist camera
@@ -1448,29 +1453,55 @@ def test_an_edge_grip_opens_the_jaw_and_tries_again_and_the_last_attempt_lifts()
     assert reopen[-1].target["gripper"] == pytest.approx(s.cmd_open)
 
 
-def test_a_jaw_that_reads_wider_than_the_block_it_holds_is_a_full_grip():
-    """A gripper whose reading puts the held jaw 10 mm wider than the block: no edge grip."""
+def test_a_gripper_that_reads_10_mm_wide_without_its_calibration_still_grips_and_lifts():
+    """Uncalibrated, the held jaw reads 10 mm wider than the cube: a full grip, not an edge. The wider
+    opening leaves the narrower real jaw room around the cube."""
     cv2_or_skip()
     block = block_at(XY, "cube")
-    s = started(seen(XY), max_attempts=2)
+    s = started(seen(XY), max_attempts=2, open_margin_m=0.014)
     answers, phases, *_ = follow(s, dict(SPEC.home), seen(XY), 4000, block=block, frames=camera_of(block),
-                                 held_wider_m=0.010)
+                                 gripper_offset_m=0.010)
 
     assert answers[-1].success, answers[-1].note
     assert s.grasp.edge_closes == 0 and s.status.attempt == 1 and "reopen" not in phases
     assert s.grasp.jaw_gap_m == pytest.approx(2 * CUBE[1] + 0.010, abs=0.001)
 
 
-def test_with_the_stands_held_gap_offset_a_narrow_grip_is_still_an_edge():
-    """The same gripper with `held_gap_offset_m` set: a jaw 8 mm narrower than the cube is an edge grip."""
+@pytest.mark.parametrize("narrow", [False, True], ids=["full grip", "edge grip"])
+def test_with_the_jaw_calibrated_the_held_gap_is_the_blocks_and_a_narrow_grip_is_an_edge(narrow: bool):
+    """`jaw_gap_offset_m` matches the gripper: the held jaw reads the cube's width, the open jaw clears it
+    by `open_margin_m`, the release opens past it, and a jaw 8 mm narrower than the cube is an edge grip."""
     cv2_or_skip()
-    block = Block(np.array(XY, float), (CUBE[0] - 0.004, CUBE[1] - 0.004, CUBE[2]), 0.0, "cube")
-    s = started(seen(XY), max_attempts=2, held_gap_offset_m=0.010, squeeze_m=0.012)
+    half = (CUBE[0] - 0.004, CUBE[1] - 0.004, CUBE[2]) if narrow else CUBE
+    block = Block(np.array(XY, float), half, 0.0, "cube")
+    s = started(seen(XY), max_attempts=2, jaw_gap_offset_m=0.010, squeeze_m=0.012, release=True)
+    measured: list[dict[str, float]] = []
     answers, phases, *_ = follow(s, dict(SPEC.home), seen(XY), 4000, block=block, frames=camera_of(block),
-                                 held_wider_m=0.010)
+                                 gripper_offset_m=0.010, measured=measured)
 
-    assert answers[-1].success, answers[-1].note
-    assert s.grasp.edge_closes == 1 and s.status.attempt == 2
+    assert answers[-1].success and answers[-1].note.startswith("blok oddany"), answers[-1].note
+    assert s.grasp.edge_closes == (1 if narrow else 0) and s.status.attempt == (2 if narrow else 1)
+    assert s.grasp.jaw_offset_m == 0.010
+    # The open jaw really clears the cube by `open_margin_m` on each side.
+    k = phases.index("straddle")
+    assert KIN.jaw_gap(measured[k]["gripper"]) == pytest.approx(2 * CUBE[1] + 2 * 0.008, abs=0.001)
+    assert not block.gripped
+
+
+def test_a_jaw_file_learns_the_calibration_from_a_lift_and_the_next_run_uses_it(tmp_path):
+    path = tmp_path / "jaw.json"
+    path.write_text("not json")
+    for run in (1, 2):
+        block = block_at(XY, "cube")
+        s = started(seen(XY), strategy=GraspStrategy, jaw_file=str(path), open_margin_m=0.014)
+        answers, *_ = follow(s, dict(SPEC.home), seen(XY), 4000, block=block, gripper_offset_m=0.010)
+
+        assert answers[-1].success, answers[-1].note
+        data = json.loads(path.read_text())
+        assert data["runs"] == run and data["jaw_gap_offset_m"] == pytest.approx(0.010, abs=0.001)
+    # The second run read the first run's calibration: the held jaw reads the cube's width.
+    assert s.grasp.jaw_runs == 1 and s.grasp.jaw_offset_m == pytest.approx(0.010, abs=0.001)
+    assert s.grasp.jaw_gap_m == pytest.approx(2 * CUBE[1], abs=0.001)
 
 
 def test_plain_grasp_still_ends_the_run_on_an_empty_close():

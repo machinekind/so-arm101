@@ -1108,9 +1108,11 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
     # ------------------------------------------------------------------ the release
     @property
     def _place_open_cmd(self) -> float:
-        """The jaw command that opens `release_margin_m` past the held block on each side [app units]."""
-        gap = min(self._width_m + 2 * self.place_settings.release_margin_m, self.kin.jaw_gap(FULL_OPEN))
-        return self.kin.gripper_for_gap(gap)
+        """The jaw command that opens `release_margin_m` past the held block on each side, and past the held
+        jaw once a release began [app units]."""
+        held = self._held_gap_m if math.isfinite(self._held_gap_m) else self._width_m
+        gap = max(self._width_m, held) + 2 * self.place_settings.release_margin_m
+        return self.kin.gripper_for_gap(min(gap, self.kin.jaw_gap(FULL_OPEN)))
 
     @property
     def release_cmd(self) -> float:

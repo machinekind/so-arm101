@@ -43,7 +43,7 @@ GRASP_FIELDS = TOUCH_FIELDS + ["block", "probe", "open_margin_m", "squeeze_m", "
                                "straddle_push_m", "close_on_stall_m", "lift_m",
                                "hold_s", "max_attempts", "carry_s", "release", "wait_s", "recover_m",
                                "grasp_source", "library_dir", "min_score", "max_tilt_deg",
-                               "held_gap_offset_m"]
+                               "jaw_gap_offset_m", "jaw_file"]
 GRASP_WRIST_FIELDS = GRASP_FIELDS + ["wrist_camera", "max_frame_age_s", "frame_wait_s", "hue_deg",
                                      "label_hues", "hue_window_deg", "min_saturation", "min_value",
                                      "focal_px", "tip_pixel_x", "tip_pixel_y", "rotate_180", "centre_tol_m",

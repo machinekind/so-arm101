@@ -53,7 +53,7 @@ GRASP_FIELDS = TOUCH_FIELDS + ["block", "probe", "open_margin_m", "squeeze_m", "
                                "straddle_push_m", "close_on_stall_m", "lift_m",
                                "hold_s", "max_attempts", "carry_s", "release", "wait_s", "recover_m",
                                "grasp_source", "library_dir", "min_score", "max_tilt_deg",
-                               "held_gap_offset_m"]
+                               "jaw_gap_offset_m", "jaw_file"]
 NEW_FIELDS = ["model", "min_confidence", "min_correction_confidence", "correction_m", "answer_timeout_s",
               "send_frames", "wrist_camera"]
 #: The simulated clock's step, and the twin loop's period [s].

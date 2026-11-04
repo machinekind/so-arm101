@@ -117,7 +117,8 @@ grasp:
   grasp_depth: 0.5
   straddle_push_m: 0.004   # how far the straddle pushes past a light touch
   close_on_stall_m: 0.003  # a stall with both tips this far below the top closes there; 0: off
-  held_gap_offset_m: 0.0   # how much wider the jaw reads than a block it fully grips (this stand)
+  jaw_gap_offset_m: 0.0    # how much wider the model's jaw gap is than the real one (this stand's gripper)
+  jaw_file: ""             # e.g. a file in the stand folder: learns jaw_gap_offset_m from verified lifts
   lift_m: 0.04
   sag_m: 0.02              # a still arm this far below a lift or hover point counts as there
   stall_s: 2.0             # a still arm short of its point this long ends the run
@@ -448,12 +449,20 @@ counts as a failed attempt; the last attempt closes anyway. `close_rounds: 0` cl
 look.
 
 With a camera, a failed close is retried instead of ending the run: an empty close, or a jaw that
-stops more than 6 mm narrower than the block's width plus `held_gap_offset_m` (an edge or corner grip;
-the jaw opens first). A jaw that holds wider than the block is a full grip read through the gripper's
-calibration: the success note shows the held gap, and `held_gap_offset_m` is that gap minus the
-block's width. The arm rises with
-the jaw open and comes back to the hover, where the hover look finds the block again. This repeats up
-to `max_attempts`, and the last attempt lifts what it holds. Plain `grasp` keeps its old behaviour.
+stops more than 6 mm narrower than the block's width (an edge or corner grip; the jaw opens first). A
+jaw that holds wider than the block is a full grip. The arm rises with the jaw open and comes back to
+the hover, where the hover look finds the block again. This repeats up to `max_attempts`, and the last
+attempt lifts what it holds. Plain `grasp` keeps its old behaviour.
+
+A real gripper may read its jaw wider than the model puts it at the same reading. `jaw_gap_offset_m`
+is that difference for the stand, 0 in simulation: every grasp-based strategy then opens, closes,
+releases and checks the jaw as it really is, and finds the jaw tips where they really are. To measure
+it, grip a block of known width and lift it: the success note shows the held gap ("szczeka 39 mm"), and
+the offset is that gap minus the block's width. With `jaw_file` set (for example a file in the stand
+folder) the strategy learns it on its own: each verified lift adds the held gap minus the block's width
+to a running mean over the last 10 lifts, and the next run uses that mean instead of the setting. A
+release opens past the jaw as it holds, not only past the block's width, so a gripper that reads wide
+still lets go.
 
 `residual_file` keeps, per stand, a running mean over the last 10 runs of how far the camera moved the
 aim from the detector's first pose, written after each lift. The next run adds it to the first aim.

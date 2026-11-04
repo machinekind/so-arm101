@@ -348,6 +348,7 @@ class TouchStrategy(Strategy[TouchSettings]):
         """Starts from where the arm is, with or without a pose: the pose may come later."""
         spec = load_robot(run.folder)
         self._kin = RobotKinematics(spec)
+        obs = self._observed(obs)
         self._lo, self._hi = self._hardware_limits(run.limits)
         self._max_step = self._step_limits(run.max_vel)
         self._simulated = bool(run.simulated)
@@ -376,6 +377,10 @@ class TouchStrategy(Strategy[TouchSettings]):
         self._hang_q, self._hang_command_q = self._q_measured.copy(), self.q_cmd.copy()
         self._t = float(obs.t)
         self._enter(WAIT)
+
+    def _observed(self, obs: Observation) -> Observation:
+        """`obs` as the strategy reads it; subclasses may convert readings. Touch takes it as it is."""
+        return obs
 
     def _hardware_limits(self, hw: Mapping[str, tuple[float, float]]) -> tuple[np.ndarray, np.ndarray]:
         """The description's limits and the MJCF ranges, intersected with the ones on the arm (`run.limits`).

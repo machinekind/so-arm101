@@ -33,8 +33,13 @@ Subclasses can refine the aim through `before_straddle`. With the probe on, `bef
 also refines the aim, and `after_touch` and `after_miss` judge the probe. `before_close` runs at the
 bottom of the straddle with the open jaw around the block, before the jaw closes.
 `after_grasp_failed` handles grasp failures. A subclass that can look again (`_looks_again`) also treats
-a jaw closed well inside the block's width as a failed close (`EDGE_GRIP_M`, `held_gap_offset_m`), and
-retries an empty or edge close from the hover within `max_attempts`, with the jaw open on the way up.
+a jaw closed well inside the block's width as a failed close (`EDGE_GRIP_M`), and retries an empty or
+edge close from the hover within `max_attempts`, with the jaw open on the way up.
+
+`jaw_gap_offset_m`, or the running mean that `jaw_file` learns from verified lifts, says how much wider the
+model's jaw gap is than the real one at the same gripper reading. The strategy turns the gripper's
+reading and command into the model's on the way in and back on the way out, so every opening, close,
+release, jaw check and fingertip position uses the real jaw.
 Subclasses can extend `carrying` and return `release()` for a handover.
 `candidates` supplies geometry or library grasps. `grasp_verdict` supplies the verdict for logs
 and judges.
@@ -70,6 +75,7 @@ jaw clearances count along straight down for the tilted hand.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 from collections.abc import Mapping
@@ -146,8 +152,13 @@ TILT_RESTARTS = 2
 #: Why no tilted grasp was tried: the block's yaw is unknown.
 NEEDS_YAW = "dlon pochylona potrzebuje obrotu bloku"
 #: A held jaw whose gap is narrower than the chosen grasp width by more than this grips an edge or a
-#: corner [m]. A wider gap is a full grip read through the gripper's calibration (`held_gap_offset_m`).
+#: corner [m]. A wider gap is a full grip.
 EDGE_GRIP_M = 0.006
+#: `jaw_file` keeps a running mean of the jaw calibration over at most this many verified lifts.
+JAW_RUNS = 10
+#: A verified lift whose held gap differs from the block's width by more than this does not teach the jaw
+#: calibration [m].
+JAW_OFFSET_MAX_M = 0.02
 #: A straddle that stalls with the measured TCP this close to the grasp target closes there [m].
 CLOSE_NEAR_M = 0.005
 
@@ -276,9 +287,12 @@ class GraspSettings(TouchSettings):
     #: Largest tilt of the hand from straight down [deg], tried when straight down is out of reach. The
     #: tilted hand needs the block square to the arm. Zero, or `probe: true`, keeps the hand straight down.
     max_tilt_deg: float = 0.0
-    #: How much wider the measured jaw gap reads than a block the jaw fully grips [m]: this stand's gripper
-    #: calibration. An edge grip reads narrower than the block's width plus this.
-    held_gap_offset_m: float = 0.0
+    #: How much wider the model's jaw gap is than the real gap between the pads at the same gripper reading
+    #: [m]: this stand's gripper calibration, 0 in simulation. Every opening, close and release uses it.
+    jaw_gap_offset_m: float = 0.0
+    #: JSON file with this stand's jaw calibration learned from verified lifts; once it holds one, it
+    #: replaces `jaw_gap_offset_m`. Empty keeps none [path].
+    jaw_file: str = ""
 
 
 @dataclass
@@ -306,6 +320,9 @@ class GraspStatus:
     edge_closes: int = 0
     #: Straddles that stalled with the jaw tips low beside the block and closed there.
     low_closes: int = 0
+    #: The jaw calibration in use [m] and how many lifts taught it; 0 runs for the setting.
+    jaw_offset_m: float = 0.0
+    jaw_runs: int = 0
     #: How far the measured TCP rose above the grasp point [m].
     lifted_m: float = float("nan")
     #: Grasp verdict key in `VERDICTS`, or '' before a verdict.
@@ -493,6 +510,9 @@ class GraspStrategy(TouchStrategy):
         #: How far the lift raises the block [m]: `lift_m`, or less off another block when out of reach.
         self._lift_m = config.lift_m
         self._lift_off_point = np.zeros(3)
+        #: The jaw calibration in use [m] (`jaw_gap_offset_m`, `jaw_file`), and whether this run taught it.
+        self._jaw_offset = 0.0
+        self._jaw_learned = False
         #: Where the TCP closes the jaw [m, base frame]: the grasp target, or where a low stall held it.
         self._close_at = np.full(3, np.nan)
         #: When the straddle stalled low beside the block, to close where it stands [s, `obs.t`]; NaN if not.
@@ -555,6 +575,9 @@ class GraspStrategy(TouchStrategy):
     # ------------------------------------------------------------------- start
     def start(self, run: RunInfo, obs: Observation) -> None:
         """Initialize the probe and reject openings that the jaw cannot reach or distinguish as a hold."""
+        self.grasp = GraspStatus()
+        self._load_jaw()
+        self._jaw_learned = False
         super().start(run, obs)
         kin, spec, cfg = self.kin, self.kin.spec, self.grasp_settings
         if spec.gripper is None or spec.gripper_range_q is None:
@@ -606,7 +629,7 @@ class GraspStrategy(TouchStrategy):
         self._watched_step, self._empty_ticks = -1, 0
         self._drop_t, self._drop_xy = float("nan"), None
 
-        self.grasp = GraspStatus()
+        self.grasp = GraspStatus(jaw_offset_m=self.grasp.jaw_offset_m, jaw_runs=self.grasp.jaw_runs)
         self.block_rotation = np.eye(3)
         self._rot, self._psi, self._headings = None, float("nan"), []
         self._tilt, self._psi_rel, self._grip_rel = 0.0, float("nan"), float("nan")
@@ -630,6 +653,7 @@ class GraspStrategy(TouchStrategy):
         """Update the jaw reading and candidate headings before running the touch tick."""
         if self._kin is None or self._jaw is None:
             raise RuntimeError("grasp: act() przed start()")
+        obs = self._observed(obs)
         kin, g = self.kin, self._g
         q_measured = kin.to_q(obs.joints)
         # Missing command joints fall back to the last target.
@@ -641,7 +665,69 @@ class GraspStrategy(TouchStrategy):
         self.grasp.jaw_gap_m = float(np.linalg.norm(moving - fixed))
         if self.status.phase == WAIT:
             self._take_heading(obs)
-        return super().act(obs)
+        return self._commanded(super().act(obs))
+
+    # ------------------------------------------------------------------ the jaw's calibration
+    def _observed(self, obs: Observation) -> Observation:
+        """`obs` with the gripper's reading and command turned into the model's (`jaw_gap_offset_m`)."""
+        name = self.kin.spec.gripper
+        if not self._jaw_offset or name is None:
+            return obs
+        joints, command = dict(obs.joints), dict(obs.command)
+        for values in (joints, command):
+            if name in values:
+                values[name] = self._regrip(float(values[name]), -self._jaw_offset)
+        return replace(obs, joints=joints, command=command)
+
+    def _commanded(self, action: Action) -> Action:
+        """`action` with the gripper's target turned from the model's into the real gripper's."""
+        name = self.kin.spec.gripper
+        if not self._jaw_offset or name is None or name not in action.target:
+            return action
+        target = dict(action.target)
+        target[name] = self._regrip(float(target[name]), self._jaw_offset)
+        return replace(action, target=target)
+
+    def _regrip(self, gripper: float, wider_m: float) -> float:
+        """The gripper value [app units] whose model jaw gap is `wider_m` [m] wider than at `gripper`'s."""
+        kin = self.kin
+        lo, hi = kin.jaw_gap(0.0), kin.jaw_gap(100.0)
+        return kin.gripper_for_gap(min(max(kin.jaw_gap(gripper) + wider_m, lo), hi))
+
+    def _load_jaw(self) -> None:
+        """Take the jaw calibration from `jaw_file` when it holds one, else from `jaw_gap_offset_m`."""
+        cfg = self.grasp_settings
+        self._jaw_offset, runs = float(cfg.jaw_gap_offset_m), 0
+        if cfg.jaw_file:
+            try:
+                data = json.loads(Path(cfg.jaw_file).expanduser().read_text())
+                offset, runs = float(data["jaw_gap_offset_m"]), int(data["runs"])
+                if math.isfinite(offset) and runs > 0:
+                    self._jaw_offset = offset
+                else:
+                    runs = 0
+            except FileNotFoundError:
+                pass
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                logger.warning("Nie odczytano kalibracji szczeki z %s: %s", cfg.jaw_file, exc)
+                runs = 0
+        self.grasp.jaw_offset_m, self.grasp.jaw_runs = self._jaw_offset, runs
+
+    def _learn_jaw(self) -> None:
+        """Add this lift's held gap minus the block's width to `jaw_file`'s running mean."""
+        cfg = self.grasp_settings
+        sample = self.grasp.jaw_gap_m + self._jaw_offset - self._width_m
+        if not cfg.jaw_file or self._jaw_learned or not abs(sample) <= JAW_OFFSET_MAX_M:
+            return
+        self._jaw_learned = True
+        runs = min(self.grasp.jaw_runs + 1, JAW_RUNS)
+        mean = self._jaw_offset + (sample - self._jaw_offset) / runs if self.grasp.jaw_runs else sample
+        try:
+            Path(cfg.jaw_file).expanduser().write_text(json.dumps({"jaw_gap_offset_m": mean, "runs": runs}))
+        except OSError as exc:
+            logger.warning("Nie zapisano kalibracji szczeki do %s: %s", cfg.jaw_file, exc)
+            return
+        logger.info("Kalibracja szczeki: %.1f mm (srednia z %d)", mean * 1000, runs)
 
     @property
     def reading(self) -> JawReading:
@@ -1024,6 +1110,8 @@ class GraspStrategy(TouchStrategy):
 
     def _enter(self, phase: str) -> None:
         super()._enter(phase)
+        if phase == CARRY and self.grasp.verdict == "lifted":
+            self._learn_jaw()
         if phase == DESCEND:
             self._before_descent_pending, self._descent_waited = True, False
         if phase == OPEN:
@@ -1327,15 +1415,13 @@ class GraspStrategy(TouchStrategy):
         return self.hold()
 
     def _edge_grip(self) -> bool:
-        """Whether the held jaw's gap is more than `EDGE_GRIP_M` narrower than the chosen grasp width plus
-        `held_gap_offset_m`.
+        """Whether the held jaw's gap is more than `EDGE_GRIP_M` narrower than the chosen grasp width.
 
         Checked only where a failed close is retried after another look (`_looks_again`) and attempts
         remain: the last attempt lifts what it holds."""
         if not self._looks_again or self.status.attempt >= self.grasp_settings.max_attempts:
             return False
-        full = self._width_m + self.grasp_settings.held_gap_offset_m
-        return self.grasp.jaw_gap_m < full - EDGE_GRIP_M
+        return self.grasp.jaw_gap_m < self._width_m - EDGE_GRIP_M
 
     @property
     def _looks_again(self) -> bool:

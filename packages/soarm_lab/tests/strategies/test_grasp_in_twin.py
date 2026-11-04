@@ -216,7 +216,8 @@ def test_its_settings_become_the_panel_form():
                                            "straddle_push_m", "close_on_stall_m",
                                            "lift_m", "hold_s", "max_attempts", "carry_s", "release", "wait_s",
                                            "recover_m", "grasp_source", "library_dir", "min_score",
-                                           "max_tilt_deg", "held_gap_offset_m"]
+                                           "max_tilt_deg", "jaw_gap_offset_m",
+                                           "jaw_file"]
     assert fields["block"].kind is str and fields["block"].default == "cube"
     assert fields["block"].choices == tuple(BLOCKS)
     assert fields["probe"].kind is bool and fields["probe"].default is False

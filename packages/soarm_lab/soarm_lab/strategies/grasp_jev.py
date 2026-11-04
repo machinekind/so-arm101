@@ -494,6 +494,8 @@ class GraspJevStrategy(GraspStrategy):
         self._turn_rad = 0.0
         # Release progress, ease-off and rise targets, and next aim before regrasping.
         self._released = False
+        #: The held jaw's gap when the release began [m]; NaN before a release.
+        self._held_gap_m = float("nan")
         self._eased = False
         self._ease_point = np.zeros(3)
         self._release_point = np.zeros(3)
@@ -511,6 +513,7 @@ class GraspJevStrategy(GraspStrategy):
         """
         self.judge.check()
         self.gap_open_m = self.short_m + 2 * self.grasp_settings.open_margin_m
+        self._held_gap_m = float("nan")
         super().start(run, obs)
         self._reset_judging()
         spec = self.kin.spec
@@ -865,8 +868,22 @@ class GraspJevStrategy(GraspStrategy):
 
     @property
     def release_cmd(self) -> float:
-        """Return the gripper command that releases a held block [app units]."""
-        return self.cmd_open
+        """Return the gripper command that releases a held block [app units]: the open jaw, and at least
+        `open_margin_m` past the held jaw on each side."""
+        return max(self.cmd_open, self._past_held(self.grasp_settings.open_margin_m))
+
+    def _past_held(self, margin_m: float) -> float:
+        """The gripper command `margin_m` [m] past the held jaw on each side [app units]; 0 before a hold."""
+        if not math.isfinite(self._held_gap_m):
+            return 0.0
+        kin = self.kin
+        return kin.gripper_for_gap(min(self._held_gap_m + 2 * margin_m, kin.jaw_gap(100.0)))
+
+    def _enter(self, phase: str) -> None:
+        if phase == LET_GO:
+            # The release opens relative to the jaw as it holds now.
+            self._held_gap_m = self.grasp.jaw_gap_m
+        super()._enter(phase)
 
     def _let_go_rise_z(self) -> float:
         """Return the TCP height the open hand rises to after easing off [m, base frame]."""

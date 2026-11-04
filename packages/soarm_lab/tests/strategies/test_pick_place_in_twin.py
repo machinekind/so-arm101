@@ -1186,3 +1186,76 @@ def test_seeded_campaign(twin_robots, scenario):
     if not error:
         assert all(r.ok and r.holds[0] for r in results if r.outcome == "placed"), report
         assert max(r.others_shift_m for r in results) < 0.002, report
+
+
+# --------------------------------------------------------------------------- a gripper that reads wide
+class WideGripper:
+    """A gripper whose readings and commands put the jaw `offset_m` wider than the simulated one really is,
+    as a stand's gripper calibration may: the strategy sees and sends its own values."""
+
+    def __init__(self, strategy: Any, offset_m: float):
+        self.strategy, self.offset_m = strategy, offset_m
+        self.hz = strategy.hz
+        self.time_limit_s = getattr(strategy, "time_limit_s", None)
+        self.name = KIN.spec.gripper
+
+    def _regrip(self, gripper: float, wider_m: float) -> float:
+        lo, hi = KIN.jaw_gap(0.0), KIN.jaw_gap(100.0)
+        return KIN.gripper_for_gap(min(max(KIN.jaw_gap(gripper) + wider_m, lo), hi))
+
+    def _seen(self, obs: Any) -> Any:
+        joints, command = dict(obs.joints), dict(obs.command)
+        for values in (joints, command):
+            if self.name in values:
+                values[self.name] = self._regrip(float(values[self.name]), self.offset_m)
+        return replace(obs, joints=joints, command=command)
+
+    def start(self, run: Any, obs: Any) -> None:
+        self.strategy.start(run, self._seen(obs))
+
+    def act(self, obs: Any) -> Any:
+        action = self.strategy.act(self._seen(obs))
+        target = dict(action.target)
+        if self.name in target:
+            target[self.name] = self._regrip(float(target[self.name]), -self.offset_m)
+        return replace(action, target=target)
+
+    def stop(self, reason: str) -> None:
+        self.strategy.stop(reason)
+
+
+@pytest.mark.render
+@pytest.mark.parametrize("calibrated", [True, False], ids=["calibrated", "not calibrated"])
+def test_a_gripper_that_reads_10_mm_wide_grips_and_releases_a_cube_on_a_table_spot(twin, calibrated: bool):
+    """The held jaw reads 10 mm wider than the cube. With `jaw_gap_offset_m` set it reads the cube's width;
+    without it, the opening of the stand keeps room, the grip is no edge grip, and the release opens past
+    the held jaw, so the cube is let go either way."""
+    sinking = add_blocks(twin, Placed("red", "cube", PICK_XY, rgba=RED))
+    clock = Clock()
+    spot = (0.22, 0.07)
+    settings = {"jaw_gap_offset_m": 0.010} if calibrated else {"open_margin_m": 0.014}
+    strategy = built(label="red", place_x_m=spot[0], place_y_m=spot[1], wrist_camera="wrist", **settings)
+    runner = StrategyRunner(twin, WideGripper(strategy, 0.010), objects=Cameras(twin, clock, ("red",)),
+                            cameras=("wrist",))
+
+    held: list[float] = []
+
+    def carried() -> bool:
+        if strategy.started and strategy.status.phase == "carry_over":
+            held.append(strategy.grasp.jaw_gap_m)
+        return False
+
+    runner.start(threaded=False)
+    drive(twin, runner, 120.0, clock, until=carried)
+
+    assert runner.status.stopped_because == "zadanie wykonane", (strategy.status, strategy.place)
+    assert strategy.place.outcome == "placed" and strategy.grasp.edge_closes == 0
+    assert strategy.status.attempt == 1
+    width = 2 * block("cube").half_size[1]
+    assert held and np.median(held) == pytest.approx(width + (0.0 if calibrated else 0.010), abs=0.0015)
+    settle(twin)
+    red, rotation = truth(twin, "red")
+    # Uncalibrated, where the cube sits in the hand is off by about half the reading's error.
+    assert np.linalg.norm(red[:2] - np.array(spot)) < (0.004 if calibrated else 0.007)
+    assert red[2] == pytest.approx(block("cube").half_size[2], abs=0.0005) and tilt_deg(rotation) < 2.0
+    assert not sinking.artefacts(), sinking.depth
