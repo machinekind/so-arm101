@@ -80,7 +80,7 @@ With this package installed alongside the twin, its Strategies tab offers:
   open jaw on the block before it closes and retries a bad close; see [Wrist camera](#wrist-camera).
 - `grasp_jev`: judges the close and lift, then applies the chosen grasp step;
   see [Jev in the grasp loop](#jev-in-the-grasp-loop).
-- `pick_place`: picks a block and places it on another block or a table spot, then checks the
+- `pick_place`: picks a block and places it on another block or at a pose, then checks the
   result in the cameras; see [Pick and place](#pick-and-place).
 - `dream`: runs Dream Labs' Dream-1 model from a prompt and the cameras; see [Dream Labs](#dream-labs).
 
@@ -135,7 +135,8 @@ grasp_wrist:
 pick_place:
   label: red cube
   block: cube
-  place_on: blue cube        # empty: the table spot place_x_m, place_y_m
+  place_on: blue cube        # empty: the pose place_x_m, place_y_m, place_z_m, place_yaw_deg
+  supports: ""               # at a pose: the blocks it rests on, e.g. "blue cube, green cube"
   place_on_block: cube
   judge: jev                 # or none
   wrist_camera: wrist        # empty: no wrist look
@@ -455,8 +456,11 @@ See [generation setup](../../tools/graspgenx/README.md) and the
 ## Pick and place
 
 `pick_place` runs one step of a building plan: pick block `label` and put it on block `place_on`,
-or on the table at `place_x_m`, `place_y_m` when `place_on` is empty. `block` and `place_on_block`
-name both blocks in the catalog. The pick is `grasp` with the wrist look of `grasp_wrist` (off with
+or at a pose when `place_on` is empty: the held block's centre at `place_x_m`, `place_y_m`, its
+bottom `place_z_m` above the table and its long side at `place_yaw_deg`, resting on the blocks named
+in `supports` (comma-separated) or, with none, on the table. The planner's `resolve` gives such a
+pose for each relation, a bridge `across` two blocks included. `block` and `place_on_block` name the
+picked block and the target block in the catalog. The pick is `grasp` with the wrist look of `grasp_wrist` (off with
 an empty `wrist_camera`) and, with `judge: jev`, the checks of `grasp_jev`. `judge: none` needs no
 `TYPESAFE_API_KEY`. A drop goes through grasp's recovery, then the run goes on to the place.
 `carry_s` and `release` have no effect.
@@ -509,17 +513,31 @@ on the table or on a block.
 | --- | --- | --- |
 | `placed` | verified on the target (the only success) | on the target |
 | `not_found` | no usable pose of `label` before the pick, or none fresh after the release | where it was / unknown |
-| `target_not_seen` | no usable target pose before the pick, or none fresh at the hover | where it was / put back |
+| `target_not_seen` | no usable pose of the target or a support before the pick, or none fresh at the hover | where it was / put back |
 | `pick_failed` | the grasp failed, or Jev stopped it | on the table |
 | `dropped` | dropped and not picked again | on the table |
-| `fell_off` | seen after the release, but not on the target | near the target |
-| `target_moved` | the target moved by the check, or kept moving at the hover | near the target / put back |
+| `fell_off` | seen after the release, but not on the target or at the pose, or leaning at a pose | near the target |
+| `target_moved` | the target or a support moved by the check, the target kept moving at the hover, or the supports moved apart | near the target / put back |
 | `unreachable` | the block or the place cannot be reached with the hand down, straight or tilted, or the open hand could not leave the placed block untouched | where it was / put back |
 | `stopped` | stopped by a person, the time limit or a motion guard | anywhere |
 
+At a pose the hand turns the block to `place_yaw_deg` with `align_yaw` (`false` keeps the hand's
+heading), by the smallest turn its symmetry allows among the headings whose open jaw stays 5 mm away
+from every other object the cameras report, sized from the catalog by the label's shape word. A cube
+set beside another so has its jaw close parallel to the gap, with no finger in it. With no such heading the
+place is `unreachable` before the pick. Each support needs a usable pose before the pick, and the
+carry clears the pose's height. Over the supports the run latches each one's newest camera pose as it
+does a target block's and moves the pose with them: across by their mean shift, up by the highest
+rise. Supports that moved more than `place_tol_m` against each other send the block back as
+`target_moved`. After the release the block must lie within `place_tol_m` of the pose, at its height
+and level within 5°, and each support seen must stand within `place_tol_m` of where it was latched.
+
 The stop reason in the panel says the same in Polish. `place.put_back` tells whether the block
 went back, `place.opened_wide` whether the jaw opened fully to leave it. Known gaps: the twin's cube
-detector maps blocks on the table only, so it cannot verify a stacked block yet. With the hand down
+detector maps blocks on the table only, so it cannot verify a stacked block or a bridge yet. A pose is
+only as good as the supports' camera poses it came from, and the planner lets a bridge rest as little
+as 1 cm on each block, so supports seen 1 cm off can drop it. The jaw check at a pose covers the release only, and a label
+without a shape word counts as a 3 cm square. With the hand down
 the arm reaches about 9 cm high, so off a stack it picks only the top block of two. Straight down, a
 third cube on two fits only around 20 cm from the base, where the hand can leave away from the fixed
 jaw toward the start position. With the hand tilted, a third cube fits out to about 30 cm and a

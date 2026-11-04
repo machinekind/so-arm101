@@ -156,6 +156,28 @@ def test_the_fully_open_moving_jaw_lifts_clear_of_the_tcp(station):
         RobotKinematics(dataclasses.replace(spec, fingertips=("a", ""))).jaw_reach(0.0, moving=True)
 
 
+def test_the_jaw_points_outline_each_jaw_body_in_the_tcp_frame(station):
+    spec = station.spec()
+    kin = RobotKinematics(spec)
+    approach = np.asarray(spec.tcp_approach, float)
+    joints = dict(spec.home, gripper=39.0)
+    T = kin.tcp(joints)
+    fixed, moving = kin.jaw_points(39.0)
+
+    assert fixed.ndim == 2 and fixed.shape[1] == 3 and fixed.shape[0] >= 24 and moving.shape[0] >= 24
+    # Each fingertip lies within its body's points, and the lowest point is the jaw's reach.
+    for points, tip in zip((fixed, moving), kin.fingertips(joints), strict=True):
+        local = T[:3, :3].T @ (tip - T[:3, 3])
+        assert np.all(points.min(axis=0) <= local) and np.all(local <= points.max(axis=0))
+    assert max(float((p @ approach).max()) for p in (fixed, moving)) == pytest.approx(kin.jaw_reach(39.0),
+                                                                                      abs=5e-4)
+    # Opening moves only the moving jaw.
+    assert np.abs(kin.jaw_points(100.0)[1] - kin.jaw_points(0.0)[1]).max() > 0.01
+    assert kin.jaw_points(100.0)[0] == pytest.approx(kin.jaw_points(0.0)[0])
+    with pytest.raises(ValueError, match="jaw_bodies"):
+        RobotKinematics(dataclasses.replace(spec, jaw_bodies=("", ""))).jaw_points(0.0)
+
+
 def test_tip_swing_grows_as_the_hinged_jaw_opens(station):
     """The hinged moving tip trails the fixed tip along the approach when opened wide."""
     kin = RobotKinematics(station.spec())

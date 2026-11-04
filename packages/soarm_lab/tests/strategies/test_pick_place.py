@@ -2,8 +2,8 @@
 
 The supervisor follows each target at once. A squeezed block takes the jaw's pads flat and
 follows the hand. A held block stalls the arm on a support, and a released one lands on the
-support under its centre. After the lift the world records each fingertip that goes into a resting
-block. Twin integration tests cover physics and perception.
+highest support under its outline. After the lift the world records each fingertip that goes into a
+resting block. Twin integration tests cover physics and perception.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ pytest.importorskip("mujoco")
 
 from soarm_lab.blocks import block  # noqa: E402
 from soarm_lab.kinematics import RobotKinematics  # noqa: E402
+from soarm_lab.planner.world import overlap, rectangle  # noqa: E402
 from soarm_lab.robot import load_robot  # noqa: E402
 from soarm_lab.strategies.grasp import NEEDS_YAW, STACK_CLEAR_M, heading, tilt, wrap  # noqa: E402
 from soarm_lab.strategies.grasp_jev import HELD, HELD_OPTIONS, NEXT, NEXT_OPTIONS, GraspJevSettings  # noqa: E402
@@ -35,6 +36,7 @@ from soarm_lab.strategies.pick_place import (  # noqa: E402
     OUTCOMES,
     PickPlaceSettings,
     PickPlaceStrategy,
+    _lean_deg,
     known_yaw,
     yaw_of,
 )
@@ -90,10 +92,9 @@ class Body:
         """`point`'s x and y in the block's frame [m]."""
         return rot_z(self.yaw)[:2, :2].T @ (np.asarray(point, float)[:2] - self.xy)
 
-    def under(self, point: np.ndarray) -> bool:
-        """Whether `point` lies over the block's footprint."""
-        local = self.frame(point)
-        return bool(abs(local[0]) < self.half[0] and abs(local[1]) < self.half[1])
+    @property
+    def footprint(self) -> tuple[tuple[float, float], ...]:
+        return rectangle(float(self.xy[0]), float(self.xy[1]), self.yaw, self.half)
 
     def inside(self, point: np.ndarray) -> bool:
         """Whether `point` lies more than `HIT_M` inside the block."""
@@ -145,8 +146,10 @@ class World:
         return out
 
     def support(self, point: np.ndarray, held: Body) -> float:
-        """The highest top under `point`, the table included [m]."""
-        return max([b.top for b in self.bodies if b is not held and not b.gripped and b.under(point)] + [0.0])
+        """The highest top under the outline of `held` centred at `point`, the table included [m]."""
+        outline = rectangle(float(point[0]), float(point[1]), held.yaw, held.half)
+        return max([b.top for b in self.bodies if b is not held and not b.gripped
+                    and overlap(outline, b.footprint) > HIT_M] + [0.0])
 
     def step(self, target: Mapping[str, float]) -> None:
         cmd = dict(self.command, **target)
@@ -269,9 +272,10 @@ def test_its_settings_are_the_grasp_familys_and_the_places():
     jev = [f.name for f in dataclasses.fields(GraspJevSettings)]
 
     assert names[:len(wrist)] == wrist and set(jev) <= set(names)
-    assert names[-15:] == ["judge", "place_on", "place_on_block", "place_x_m", "place_y_m", "align_yaw",
-                           "carry_clearance_m", "place_gap_m", "place_speed_mps", "release_margin_m",
-                           "retreat_m", "fresh_pose_s", "target_wait_s", "verify_wait_s", "place_tol_m"]
+    assert names[-18:] == ["judge", "place_on", "place_on_block", "place_x_m", "place_y_m", "place_z_m",
+                           "place_yaw_deg", "supports", "align_yaw", "carry_clearance_m", "place_gap_m",
+                           "place_speed_mps", "release_margin_m", "retreat_m", "fresh_pose_s",
+                           "target_wait_s", "verify_wait_s", "place_tol_m"]
     defaults = PickPlaceSettings()
     assert defaults.judge == "jev" and defaults.wrist_camera == "wrist" and defaults.time_limit_s == 240.0
     assert defaults.max_tilt_deg == 30.0
@@ -286,6 +290,13 @@ def test_its_settings_are_the_grasp_familys_and_the_places():
     ({"release_margin_m": -0.001}, "release_margin_m must be positive"),
     ({"place_gap_m": -0.001}, "place_gap_m must be zero or more"),
     ({"place_x_m": math.nan}, "place_x_m must be finite"),
+    ({"place_yaw_deg": math.inf}, "place_yaw_deg must be finite"),
+    ({"place_z_m": -0.001}, "place_z_m must be finite and zero or more"),
+    ({"place_z_m": 0.029}, "place_z_m 0.029 above the table needs supports"),
+    ({"supports": "a", "place_z_m": 0.005}, "supports need place_z_m at their top"),
+    ({"supports": "a", "place_z_m": 0.029, "place_on": "blue"}, "supports needs place_on empty"),
+    ({"supports": "a, A", "place_z_m": 0.029}, "supports names a block twice"),
+    ({"supports": "a, Red", "place_z_m": 0.029}, "supports must name other blocks than label"),
     ({"send_frames": True}, "send_frames needs wrist_camera"),
     ({"place_on": "Red"}, "place_on must name another block than label"),
 ])
@@ -311,6 +322,25 @@ def test_with_judge_jev_it_refuses_to_start_without_a_key(monkeypatch: pytest.Mo
     s = PickPlaceStrategy(PickPlaceSettings(judge="jev", wrist_camera=""))
     with pytest.raises(RuntimeError, match="brak klucza jev"):
         s.start(run_info(), Observation(t=0.0, step=0, joints=dict(SPEC.home), command={}))
+
+
+def rot_x(angle: float) -> np.ndarray:
+    c, s = math.cos(angle), math.sin(angle)
+    return np.array([[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]])
+
+
+def test_a_block_lies_flat_on_any_face_of_its_shape_that_matches_its_bottom():
+    """A cube lies flat on any face, a cuboid only on its broad one, a cylinder however it rolls."""
+    tipped, quarter = rot_x(math.radians(10.0)), rot_x(math.pi / 2)
+    assert _lean_deg(rot_z(0.4), block("cuboid")) == pytest.approx(0.0, abs=1e-6)
+    assert _lean_deg(tipped, block("cuboid")) == pytest.approx(10.0)
+    assert _lean_deg(quarter, block("cube")) == pytest.approx(0.0, abs=1e-6)
+    assert _lean_deg(quarter, block("cuboid")) == pytest.approx(90.0)
+    assert _lean_deg(quarter, block("cylinder")) == pytest.approx(0.0, abs=1e-6)
+    c, sn = math.cos(0.2), math.sin(0.2)
+    pitched = np.array([[c, 0.0, sn], [0.0, 1.0, 0.0], [-sn, 0.0, c]])
+    assert _lean_deg(pitched, block("cylinder")) == pytest.approx(math.degrees(0.2))
+    assert math.isnan(_lean_deg(np.full((3, 3), np.nan), block("cube")))
 
 
 def test_an_identity_rotation_is_yaw_zero_for_a_target_and_unknown_for_the_picked_block():
@@ -944,3 +974,157 @@ def test_the_notes_are_polish_per_place_phase():
     assert notes["carry_up"].startswith("unosze blok do przeniesienia: ")
     assert notes["park"].startswith("odsuwam ramie od bloku: ")
     assert wrap(math.pi / 2) == pytest.approx(math.pi / 2)
+
+
+# ------------------------------------------------------------ at a pose
+def bridge(**settings: Any) -> tuple[PickPlaceStrategy, World]:
+    """A red cuboid to lay across cubes 'a' and 'b', which stand a cube's width apart along x."""
+    d = 2 * CUBE[0]
+    world = World([Body("red", CUBOID, np.array(PICK_XY), CUBOID[2], math.radians(30.0)),
+                   cube("a", (TARGET_XY[0] - d, TARGET_XY[1])), cube("b", (TARGET_XY[0] + d, TARGET_XY[1]))])
+    settings.setdefault("supports", "a, b")
+    s = built(block="cuboid", place_x_m=TARGET_XY[0], place_y_m=TARGET_XY[1], place_z_m=2 * CUBE[2],
+              **settings)
+    return s, world
+
+
+def test_a_cube_goes_to_a_table_pose_turned_to_its_yaw():
+    s = built(place_x_m=0.22, place_y_m=0.08, place_yaw_deg=30.0)
+    world = World([cube("red", PICK_XY)])
+    actions, phases = run(s, world)
+    red = world.body("red")
+
+    assert actions[-1].success and s.place.outcome == "placed" and "latch" not in phases
+    assert np.linalg.norm(red.xy - np.array([0.22, 0.08])) < 0.002 and red.z == pytest.approx(CUBE[2])
+    assert abs(fold(red.yaw - math.radians(30.0), math.pi / 2)) < math.radians(1.0)
+    assert s.place.target_yaw_deg == pytest.approx(30.0) and s.place.rests_on == ()
+    assert s.place.placed_tilt_deg == pytest.approx(0.0)
+
+
+def test_a_cuboid_goes_across_two_cubes():
+    s, world = bridge()
+    actions, phases = run(s, world)
+    red, a, b = world.body("red"), world.body("a"), world.body("b")
+
+    assert actions[-1].success and s.place.outcome == "placed", s.status.stopped_because
+    assert phases[phases.index("carry_over"):] == ["carry_over", "latch", "place", "let_go", "park", "verify"]
+    assert red.z == pytest.approx(a.top + CUBOID[2]) and np.linalg.norm(red.xy - np.array(TARGET_XY)) < 0.002
+    # The long side lies along the line from one cube to the other.
+    assert abs(fold(red.yaw, math.pi)) < math.radians(1.0)
+    assert s.place.rests_on == ("a", "b") and s.place.target_shift_m < 1e-9
+    assert s.status.stopped_because.startswith("blok 'red' odlozony na 'a' i 'b': ")
+    assert not a.gripped and not b.gripped and not world.hits
+
+
+def test_the_jaw_closes_across_the_cube_beside_the_place_not_toward_it():
+    """A cube set 1 cm to the left of another: of the headings that line it up, only those that keep the
+    jaw off the other cube count, so the jaw closes along x, though closing along y needs a smaller turn."""
+    place = (TARGET_XY[0], TARGET_XY[1] + 2 * CUBE[0] + 0.01)
+    s = built(place_x_m=place[0], place_y_m=place[1])
+    world = World([cube("red", PICK_XY, 40.0), cube("blue", TARGET_XY)])
+    actions, _ = run(s, world)
+
+    assert actions[-1].success and s.place.outcome == "placed", s.status.stopped_because
+    assert abs(math.sin(math.radians(s.place.heading_deg))) < math.sin(math.radians(5.0))
+    assert np.linalg.norm(world.body("red").xy - np.array(place)) < 0.002
+    assert np.linalg.norm(world.body("blue").xy - np.array(TARGET_XY)) < 1e-9
+
+
+def test_a_place_with_cubes_on_both_sides_the_jaw_could_close_toward_is_unreachable():
+    place = (TARGET_XY[0], TARGET_XY[1] + 2 * CUBE[0] + 0.01)
+    d = 2 * CUBE[0] + 0.01
+    s = built(place_x_m=place[0], place_y_m=place[1])
+    world = World([cube("red", PICK_XY), cube("blue", TARGET_XY), cube("green", (place[0] + d, place[1]))])
+    _, phases = run(s, world)
+
+    assert s.place.outcome == "unreachable" and "open" not in phases
+    assert "szczeka zahaczylaby o '" in s.status.stopped_because, s.status.stopped_because
+
+
+def test_supports_without_a_pose_before_the_pick_are_target_not_seen_and_the_arm_stays():
+    s, world = bridge(wait_for_pose_s=1.0)
+    world.body("b").seen = False
+    actions, phases = run(s, world)
+
+    assert phases == ["wait"] and s.place.outcome == "target_not_seen"
+    assert s.status.stopped_because.startswith("brak uzytecznego polozenia podpory 'b' (brak w obserwacji)")
+    arm = SPEC.arm_joints
+    assert {n: actions[-1].target[n] for n in arm} == pytest.approx({n: SPEC.home[n] for n in arm})
+
+
+def test_supports_moved_a_little_carry_the_pose_with_them():
+    s, world = bridge()
+    shift = np.array([0.003, -0.002])
+
+    def nudge(world: World, s: PickPlaceStrategy) -> None:
+        for name in ("a", "b"):
+            world.body(name).xy = world.body(name).xy + shift
+
+    actions, _ = run(s, world, on_phase={"carry_over": nudge})
+    red = world.body("red")
+
+    assert actions[-1].success and s.place.outcome == "placed" and s.place.replans == 0
+    assert s.place.target_xy == pytest.approx(tuple(np.array(TARGET_XY) + shift), abs=1e-6)
+    assert np.linalg.norm(red.xy - (np.array(TARGET_XY) + shift)) < 0.002
+
+
+def test_supports_moved_apart_send_the_block_back():
+    s, world = bridge()
+
+    def push(world: World, s: PickPlaceStrategy) -> None:
+        world.body("b").xy = world.body("b").xy + np.array([0.012, 0.0])
+
+    actions, phases = run(s, world, on_phase={"carry_over": push})
+    red = world.body("red")
+
+    assert s.place.outcome == "target_moved" and s.place.put_back and "verify" not in phases
+    assert s.status.stopped_because.startswith("podpory 'a' i 'b' przesuniete wzgledem siebie o 12 mm")
+    assert not red.gripped and np.linalg.norm(red.xy - np.array(PICK_XY)) < 0.01
+
+
+def test_a_support_knocked_at_the_release_is_target_moved():
+    s, world = bridge()
+
+    def knock(world: World, s: PickPlaceStrategy) -> None:
+        world.body("a").xy = world.body("a").xy + np.array([-0.015, 0.0])
+
+    run(s, world, on_phase={"park": knock})
+
+    assert s.place.outcome == "target_moved" and s.place.target_shift_m == pytest.approx(0.015, abs=1e-6)
+    assert s.status.stopped_because == "podpora 'a' przesunieta o 15 mm przy odkladaniu"
+
+
+def test_a_block_left_leaning_at_a_pose_fell_off():
+    s, world = bridge()
+    objects = world.objects
+
+    def lean(world: World, s: PickPlaceStrategy) -> None:
+        def leaning() -> dict[str, ObjectPose]:
+            out = objects()
+            p = out["red"]
+            c, sn = math.cos(math.radians(12.0)), math.sin(math.radians(12.0))
+            tilted = np.array([[1.0, 0.0, 0.0], [0.0, c, -sn], [0.0, sn, c]])
+            out["red"] = ObjectPose(p.position, p.rotation @ tilted, p.source, p.age_s)
+            return out
+
+        world.objects = leaning  # type: ignore[method-assign]
+
+    run(s, world, on_phase={"park": lean})
+
+    assert s.place.outcome == "fell_off" and s.place.placed_tilt_deg == pytest.approx(12.0)
+    assert s.status.stopped_because.endswith(", pochylony o 12 st."), s.status.stopped_because
+
+
+def test_the_latch_note_names_the_supports():
+    s, world = bridge()
+    notes: dict[str, str] = {}
+
+    def note(world: World, s: PickPlaceStrategy) -> None:
+        notes[s.status.phase] = s._note()
+
+    run(s, world, on_phase={"carry_over": note})
+    # The latch passes within one tick here, so its note is read with the phase set.
+    s.status.phase = "latch"
+
+    assert notes["carry_over"].startswith("niose blok nad 'a' i 'b': ")
+    assert s._note() == "sprawdzam podpory 'a' i 'b' w kamerach"

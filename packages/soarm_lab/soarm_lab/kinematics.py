@@ -16,7 +16,8 @@ from galaxeo-manipulators, with two changes:
   over most of the A1X workspace. IK starts from the given pose, from the rest pose and from a few random
   ones, and keeps the best.
 
-The jaw helpers read openings, fingertip positions, tip swing and collision reach from the model.
+The jaw helpers read openings, fingertip positions, tip swing, collision reach and outline points from
+the model.
 
 All poses are in the arm's BASE frame, not the scene's world frame: a camera calibrated relative to the
 base stays correct wherever the arm stands. `camera` returns arm-camera poses in this frame with
@@ -391,6 +392,52 @@ class RobotKinematics:
         if not np.isfinite(best):
             raise ValueError(f"{self.spec.name}: the `jaw_bodies` have no collision geoms")
         return best
+
+    def jaw_points(self, gripper: float) -> tuple[np.ndarray, ...]:
+        """Return points on the collision geoms of each `spec.jaw_bodies` body at `gripper` [app units], in
+        the TCP frame [m], one (N, 3) array per body.
+
+        The points are box corners, mesh vertices and the ends of a round geom's axes, so a body's outline
+        from any side holds its geometry up to the bulge of a round geom between those ends.
+        Raise ValueError if the bodies are missing or have no supported collision geoms."""
+        bodies = [name for name in self.spec.jaw_bodies if name]
+        if not bodies:
+            raise ValueError(f"{self.spec.name}: no `jaw_bodies` in the robot description")
+        self._apply(self.to_q(self._jaw_pose(gripper)))
+        m, d = self.model, self.data
+        origin, R = d.site_xpos[self.site_id], d.site_xmat[self.site_id].reshape(3, 3)
+        axes = np.vstack([np.eye(3), -np.eye(3)])
+        out = []
+        for name in bodies:
+            body = m.body(self.prefix + name).id
+            points = []
+            for g in np.flatnonzero(m.geom_bodyid == body):
+                if not (m.geom_contype[g] or m.geom_conaffinity[g]):
+                    continue
+                size, kind = m.geom_size[g], int(m.geom_type[g])
+                if kind == mujoco.mjtGeom.mjGEOM_BOX:
+                    local = np.array([[x, y, z] for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)]) * size
+                elif kind == mujoco.mjtGeom.mjGEOM_MESH:
+                    mesh = int(m.geom_dataid[g])
+                    start, count = int(m.mesh_vertadr[mesh]), int(m.mesh_vertnum[mesh])
+                    local = np.asarray(m.mesh_vert[start:start + count], float)
+                elif kind == mujoco.mjtGeom.mjGEOM_SPHERE:
+                    local = axes * size[0]
+                elif kind == mujoco.mjtGeom.mjGEOM_ELLIPSOID:
+                    local = axes * size
+                elif kind in (mujoco.mjtGeom.mjGEOM_CAPSULE, mujoco.mjtGeom.mjGEOM_CYLINDER):
+                    r, half = float(size[0]), float(size[1])
+                    ends = np.array([[0.0, 0.0, half], [0.0, 0.0, -half]])
+                    local = (ends[:, None, :] + axes[None, :, :] * r).reshape(-1, 3)
+                else:
+                    continue                                   # Skip planes and height fields.
+                world = local @ d.geom_xmat[g].reshape(3, 3).T + d.geom_xpos[g]
+                points.append((world - origin) @ R)
+            if points:
+                out.append(np.vstack(points))
+        if not out:
+            raise ValueError(f"{self.spec.name}: the `jaw_bodies` have no collision geoms")
+        return tuple(out)
 
     def self_contacts(self, joints: Mapping[str, float]) -> set[tuple[str, str]]:
         """Pairs of the arm's own bodies whose collision geoms meet in pose `joints`, by body name.
