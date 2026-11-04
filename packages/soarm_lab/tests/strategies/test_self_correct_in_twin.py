@@ -17,7 +17,7 @@ from __future__ import annotations
 import math
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 import numpy as np
@@ -32,14 +32,14 @@ from machinekind_twin.clock import VirtualClock  # noqa: E402
 from machinekind_twin.kinematics import inverse  # noqa: E402
 from machinekind_twin.runtime import Twin  # noqa: E402
 from machinekind_twin.strategies import load_strategy  # noqa: E402
-from machinekind_twin.strategy import Action, ObjectPose, Observation, StrategyRunner  # noqa: E402
+from machinekind_twin.strategy import ObjectPose, StrategyRunner  # noqa: E402
 from machinekind_twin.workspace import Workspace  # noqa: E402
 
 from soarm_lab.blocks import block  # noqa: E402
 from soarm_lab.campaign import Run, jsonable, record, runs_per_scenario  # noqa: E402
 from soarm_lab.kinematics import RobotKinematics  # noqa: E402
 from soarm_lab.robot import load_robot  # noqa: E402
-from soarm_lab.strategies.grasp import top_down  # noqa: E402
+from soarm_lab.stand_errors import Backlash, play_for  # noqa: E402
 from soarm_lab.strategies.wrist import WristGraspStrategy  # noqa: E402
 
 CLOCK_STEP = 0.01
@@ -49,8 +49,6 @@ STIFF_SOLIMP = (0.95, 0.99)
 RED = (0.85, 0.25, 0.2, 1.0)
 SPEC = load_robot()
 KIN = RobotKinematics(SPEC)
-#: The arm joints that place the hand, and the pose their play is sized at.
-PLAY_JOINTS = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex")
 #: The detector's error [m], the nudge after the hover look [m] and the play at the hand [m].
 DETECTOR_M = 0.015
 NUDGE_M = 0.005
@@ -77,70 +75,6 @@ def campaign_runs() -> int:
 @dataclass
 class Clock:
     t: float = 0.0
-
-
-# --------------------------------------------------------------------------- the hidden play
-class Backlash:
-    """Hidden play of each joint between the strategy's targets and the simulated arm [deg].
-
-    The strategy sees the motor side: its targets reached, and measured joints that include the play's
-    offset. The arm gets the link side, which follows a target only once the target has taken up the play.
-    """
-
-    def __init__(self, strategy: Any, play_deg: Mapping[str, float]):
-        self.strategy = strategy
-        self.play = dict(play_deg)
-        self.hz = strategy.hz
-        self.time_limit_s = getattr(strategy, "time_limit_s", None)
-        self.motor: dict[str, float] = {}
-        self.link: dict[str, float] = {}
-
-    def _seen(self, obs: Observation) -> Observation:
-        def shifted(values: Mapping[str, float]) -> dict[str, float]:
-            return {k: float(v) + self.motor[k] - self.link[k] if k in self.link else float(v)
-                    for k, v in values.items()}
-
-        return replace(obs, joints=shifted(obs.joints), command=shifted(obs.command))
-
-    def start(self, run: Any, obs: Observation) -> None:
-        self.motor = {k: float(obs.joints[k]) for k in self.play if k in obs.joints}
-        self.link = dict(self.motor)
-        self.strategy.start(run, obs)
-
-    def act(self, obs: Observation) -> Action:
-        action = self.strategy.act(self._seen(obs))
-        target = dict(action.target)
-        for k, play in self.play.items():
-            if k not in target or k not in self.link:
-                continue
-            x, y = float(target[k]), self.link[k]
-            if x > y + play / 2:
-                y = x - play / 2
-            elif x < y - play / 2:
-                y = x + play / 2
-            self.motor[k], self.link[k] = x, y
-            target[k] = y
-        return replace(action, target=target)
-
-    def stop(self, reason: str) -> None:
-        self.strategy.stop(reason)
-
-
-def play_for(metres: float, xy: tuple[float, float] = (0.2, 0.0)) -> dict[str, float]:
-    """Play per joint [deg] that moves the hand `metres` across its whole width, at a grasp over `xy`."""
-    home = dict(SPEC.home, gripper=0.0)
-    sol = KIN.ik(np.array([*xy, 0.02]), top_down(0.0), seed=home)
-    assert sol.ok
-    joints = dict(sol.joints)
-    out = {}
-    for name in PLAY_JOINTS:
-        step = 0.1
-        ahead, back = dict(joints), dict(joints)
-        ahead[name] += step
-        back[name] -= step
-        moved = np.linalg.norm(KIN.tcp(ahead)[:3, 3] - KIN.tcp(back)[:3, 3]) / (2 * step)
-        out[name] = metres / float(moved)
-    return out
 
 
 # --------------------------------------------------------------------------- the twin
@@ -379,45 +313,6 @@ def assert_bar(outcomes: list[Outcome]) -> None:
     passed = sum(o.passed for o in outcomes)
     assert passed >= math.ceil(BAR_SHARE * len(outcomes) - 1e-9), summary(outcomes)
     assert not any(artefacts(o) for o in outcomes), [(o.seed, artefacts(o)) for o in outcomes]
-
-
-# --------------------------------------------------------------------------- the helper
-def test_backlash_hides_the_play_from_the_strategy():
-    """The strategy sees its own targets reached; the arm lags by half the play after a turn."""
-
-    class Echo:
-        hz = 10.0
-
-        def __init__(self) -> None:
-            self.seen: list[dict[str, float]] = []
-            self.targets = iter([{"elbow_flex": 10.0}, {"elbow_flex": 12.0}, {"elbow_flex": 11.0},
-                                 {"elbow_flex": 9.0}])
-
-        def start(self, run, obs) -> None:
-            pass
-
-        def act(self, obs) -> Action:
-            self.seen.append(dict(obs.joints))
-            return Action(target=next(self.targets))
-
-    echo = Echo()
-    play = Backlash(echo, {"elbow_flex": 2.0})
-    obs = Observation(t=0.0, step=0, joints={"elbow_flex": 10.0}, command={"elbow_flex": 10.0})
-    play.start(None, obs)
-    sent = []
-    for _ in range(4):
-        action = play.act(obs)
-        sent.append(action.target["elbow_flex"])
-        # The arm reaches what it was sent.
-        obs = replace(obs, joints={"elbow_flex": sent[-1]}, command={"elbow_flex": sent[-1]})
-    # Up 2 deg moves the arm 1 deg less; back down 1 deg stays inside the play; down 2 more moves 1 deg.
-    assert sent == [10.0, 11.0, 11.0, 10.0]
-    assert [s["elbow_flex"] for s in echo.seen] == [10.0, 10.0, 12.0, 11.0]
-
-
-def test_the_play_is_sized_at_the_hand():
-    play = play_for(PLAY_M)
-    assert set(play) == set(PLAY_JOINTS) and all(0.5 < deg < 10.0 for deg in play.values())
 
 
 # --------------------------------------------------------------------------- the campaigns
