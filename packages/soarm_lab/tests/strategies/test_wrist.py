@@ -553,6 +553,35 @@ def test_measure_picks_the_blob_nearest_the_aim_and_reports_two_or_none(case: st
         assert float(m.problem.split("(x")[1].rstrip(")")) == pytest.approx(0.25, abs=0.08)
 
 
+def test_a_cube_on_another_block_is_measured_at_its_own_height():
+    cv2 = cv2_or_skip()
+    base, yaw = 2 * CUBE[2], math.radians(10.0)
+    pose = {"cube": ObjectPose(np.array([*XY, base + CUBE[2]]), rotation_z(yaw), "kamery", 0.1)}
+    s = started(pose)
+    s.act(obs(dict(SPEC.home), t=0.05, objects=pose))
+    assert s.base_z == pytest.approx(base)
+    sol = KIN.ik(s.straddle_hover, top_down(s._psi), seed=dict(SPEC.home, gripper=s.cmd_open))
+    assert sol.ok
+    joints = dict(sol.joints, gripper=s.cmd_open)
+    # A green cube on the table and the red one 6 mm off the aim on top of it.
+    truth = np.asarray(XY) + along_closing(joints, 0.006)
+    image = np.empty((*SIZE, 3), np.uint8)
+    image[:] = rgb8(TABLE)
+    K, T = frame_K_T(joints)
+    lower = wrist.block_points(block("cube"), XY, yaw)
+    upper = wrist.block_points(block("cube"), truth, yaw) + np.array([0.0, 0.0, base])
+    image[wrist.silhouette(K, T, lower, SIZE, cv2)] = rgb8(PALETTE[2][0])
+    image[wrist.silhouette(K, T, upper, SIZE, cv2)] = rgb8(PAINT["cube"])
+    image[wrist.jaw_mask(KIN, joints, K, T, SIZE, cv2, 0)] = rgb8(GOLD)
+
+    m = s.measure(image, joints)
+    assert m.problem == "" and m.xy == pytest.approx(truth, abs=5e-4)
+    # Measured as if it lay on the table, the same frame misplaces it or does not fit.
+    s.base_z = 0.0
+    flat = s.measure(image, joints)
+    assert flat.problem or float(np.linalg.norm(flat.xy - truth)) > 0.002
+
+
 @pytest.mark.parametrize("where", ["side by side", "one behind the other"])
 def test_two_touching_blocks_of_one_colour_are_one_blob_too_large_for_the_box(where: str):
     cv2_or_skip()

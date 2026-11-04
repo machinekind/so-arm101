@@ -16,7 +16,9 @@ come from the fingertips and the grasp height. With `align_yaw`, the hand turns 
 takes the target's yaw, modulo the smaller yaw period of the two blocks. The carry height keeps the
 held block `carry_clearance_m` above the target and the catalog's tallest block, lowered toward
 `MIN_CARRY_CLEAR_M` when the arm cannot reach it. The release height leaves `place_gap_m` between
-the held block and the target's top. Every planned point must be reachable with the hand down.
+the held block and the target's top, and `GRIP_SLIP_M` more for a block that slid down in the grip
+on the way, which nothing the arm measures shows. Every planned point must be reachable with the hand
+down.
 
 After the release the open hand must leave without touching the placed block. Where the arm reaches,
 it rises until the jaw clears the block's top. Otherwise the jaw opens fully, so that its moving side
@@ -35,6 +37,12 @@ poses captured after the release then verify the result.
 A target not seen at the hover, an unreachable place or a target that keeps moving puts the block
 back where it was picked, without verification. The carry back stays above the target the hand
 hovered over. `PlaceStatus.outcome` names the result with one of `OUTCOMES`.
+
+A block may be picked off another block: the grasp counts from its observed bottom, and every carry
+clears what it was picked from. The blocks under it, found from their poses before the pick, are
+checked with fresh camera poses once the hand is away from them; a shift over `place_tol_m` is
+reported in `PlaceStatus.support_moved` and the stop reason. A put-back returns the block onto its
+stack, moved with the block under it when that one was seen to move.
 """
 
 from __future__ import annotations
@@ -52,7 +60,7 @@ from machinekind_twin_api.strategy import Action, ObjectPose, Observation, RunIn
 
 from ..blocks import block
 from ..blocks.classic_world import BLOCKS
-from .grasp import CARRY, DROP_SETTLE_S, JAW_WAIT_S, MAX_ROT_ERR_DEG, heading, top_down, wrap
+from .grasp import CARRY, DROP_SETTLE_S, IN_HAND_M, JAW_WAIT_S, MAX_ROT_ERR_DEG, heading, top_down, wrap
 from .grasp_jev import LET_GO, GraspJevSettings, GraspJevStrategy
 from .jaw import JawReading
 from .judges import Judge, JudgeError, Questions, Reply
@@ -96,8 +104,13 @@ MIN_CARRY_CLEAR_M = 0.01
 HEIGHT_STEP_M = 0.005
 #: The top of the catalog's tallest block lying on the table [m].
 TABLE_TOP_M = max(2 * b.half_size[2] for b in BLOCKS.values())
+#: A block the picked one rests on has its centre at most this far from the picked one's across [m].
+SUPPORT_XY_M = max(b.half_size[0] for b in BLOCKS.values()) + 0.005
 #: The slow part of the descent starts this far above the release height [m].
 SLOW_ABOVE_M = 0.015
+#: A held block may slide this far down in the grip on the way. The release starts this much higher, so
+#: such a block is not pressed onto the target [m].
+GRIP_SLIP_M = 0.003
 #: A placed block's centre may lie this far above or below the expected height [m].
 PLACED_Z_TOL_M = 0.01
 #: A fresh target pose this close to the planned one is latched without a new hover [m, deg].
@@ -129,7 +142,7 @@ class PickPlaceSettings(GraspJevSettings, WristGraspSettings):
     align_yaw: bool = True
     #: Clearance of the held block's bottom over the target and the table's blocks while carrying [m].
     carry_clearance_m: float = 0.03
-    #: Gap between the held block's bottom and the target's top at the release [m].
+    #: Gap between the held block's bottom, where it was gripped, and the target's top at the release [m].
     place_gap_m: float = 0.002
     #: TCP speed of the last part of the descent onto the target [m/s].
     place_speed_mps: float = 0.02
@@ -185,6 +198,11 @@ class PlaceStatus:
     height_error_m: float = float("nan")
     #: How far the target moved by the verification [m]. NaN when not seen.
     target_shift_m: float = float("nan")
+    #: The blocks the picked one rested on, the largest shift of one seen after the pick [m] (NaN when
+    #: none was seen) and whether it exceeds `place_tol_m`.
+    supports: tuple[str, ...] = ()
+    support_shift_m: float = float("nan")
+    support_moved: bool = False
 
 
 @dataclass(frozen=True)
@@ -320,8 +338,9 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         self._hand_xy = np.zeros(2)
         self._hang = float("nan")
         self._held_rel = -math.pi / 2
-        #: Where the held block was picked [m, base frame].
+        #: Where the held block was picked: its centre in the hand and before the close [m, base frame].
         self._pick_xy = np.zeros(2)
+        self._pick_aim = np.zeros(2)
         self._start_tcp = np.zeros(3)
         self._park_point = np.zeros(3)
         self._park_s = 0.0
@@ -340,6 +359,11 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         self._opened = True
         #: When the open hand finished rising [s, `obs.t`].
         self._released_t = float("nan")
+        #: Positions of the blocks the picked one rested on before the pick and since the lift [m].
+        self._supports: dict[str, np.ndarray] = {}
+        self._support_now: dict[str, np.ndarray] = {}
+        #: When the first verified lift ended [s, `obs.t`].
+        self._lifted_t = float("nan")
 
     def start(self, run: RunInfo, obs: Observation) -> None:
         """Start the grasp family's checks, then clear the place state."""
@@ -347,6 +371,10 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         self.place = PlaceStatus(target=self.target_label)
         self._reset_place()
         self._start_tcp = self.tcp_cmd.copy()
+
+    def act(self, obs: Observation) -> Action:
+        self._note_supports(obs)
+        return super().act(obs)
 
     # ------------------------------------------------------------------ judge on or off
     def after_touch(self, obs: Observation) -> Action:
@@ -392,6 +420,7 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         problem = self._place_problem(obs)
         if problem:
             return self._finish(UNREACHABLE, problem)
+        self._find_supports(obs)
         return action
 
     def _place_problem(self, obs: Observation) -> str:
@@ -407,6 +436,57 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         plan = self._plan_place(xy, top, yaw, from_xy=pick_xy, hang=self._grasp_z - self._bottom(),
                                 hand_xy=np.zeros(2))
         return plan if isinstance(plan, str) else ""
+
+    def _find_supports(self, obs: Observation) -> None:
+        """Note the blocks the picked one rests on: centres below its bottom by at most the tallest block's
+        height and within `SUPPORT_XY_M` of it across."""
+        self._supports = {}
+        if self.base_z > 0 and self.grasp.block_xy is not None:
+            xy = np.asarray(self.grasp.block_xy, float)
+            for key, pose in obs.objects.items():
+                label = normalised(str(key))
+                if label == self.label or self._pose_problem(pose):
+                    continue
+                p = np.asarray(pose.position, float)
+                if (self.base_z - TABLE_TOP_M <= p[2] < self.base_z
+                        and float(np.linalg.norm(p[:2] - xy)) <= SUPPORT_XY_M):
+                    self._supports[label] = p.copy()
+        self.place.supports = tuple(sorted(self._supports))
+
+    def _note_supports(self, obs: Observation) -> None:
+        """After the lift, keep the newest fresh pose of each block the picked one rested on, taken with the
+        hand away from it, and how far the farthest moved."""
+        if not self._supports or not math.isfinite(self._lifted_t):
+            return
+        for label, before in self._supports.items():
+            pose = self._fresh(obs, label, self._lifted_t)
+            if pose is not None and float(np.linalg.norm(self.tcp_cmd[:2] - before[:2])) > IN_HAND_M:
+                self._support_now[label] = np.asarray(pose.position, float).copy()
+        shifts = [float(np.linalg.norm(now - self._supports[k])) for k, now in self._support_now.items()]
+        if not shifts:
+            return
+        place = self.place
+        place.support_shift_m = max(shifts)
+        moved = place.support_shift_m > self.place_settings.place_tol_m
+        if moved and not place.support_moved:
+            logger.warning("Blok pod podniesionym przesuniety o %.0f mm", place.support_shift_m * 1000)
+        place.support_moved = moved
+
+    def _put_back_spot(self) -> tuple[np.ndarray, float]:
+        """Return where the held block goes back [m, base frame] and the top it lands on [m above the table].
+
+        On the table that is where it was picked. On a stack it is where it stood before the pick, moved with
+        the one block it was picked from when that one was seen to move. After a regrasp the aim comes from a
+        sighting after the drop, which already shows where the blocks are."""
+        if self.base_z <= 0:
+            return self._pick_xy, 0.0
+        xy, top = self._pick_aim.copy(), self._bottom()
+        if len(self._supports) == 1 and not self.grasp.recoveries:
+            (label, before), = self._supports.items()
+            now = self._support_now.get(label)
+            if now is not None and float(np.linalg.norm(now - before)) > self.place_settings.place_tol_m:
+                xy, top = xy + (now - before)[:2], max(top + float(now[2] - before[2]), 0.0)
+        return xy, top
 
     # ------------------------------------------------------------------ planning
     @property
@@ -463,15 +543,15 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
                     over_m: float = 0.0) -> PlacePlan | str:
         """Plan the carry, release and retreat over `xy` at surface `top`, or say why none is reachable.
 
-        The carry starts at `from_xy` (the TCP now) and also clears `over_m`. `hang` and `hand_xy` place
-        the held block in the hand; the measured ones by default.
+        The carry starts at `from_xy` (the TCP now) and also clears `over_m` and what the block was picked
+        from. `hang` and `hand_xy` place the held block in the hand; the measured ones by default.
         """
         cfg = self.place_settings
         hang = self._hang if hang is None else hang
         hand_xy = self._hand_xy if hand_xy is None else hand_xy
         from_xy = self.tcp_cmd[:2].copy() if from_xy is None else np.asarray(from_xy, float).copy()
-        floor = max(top, TABLE_TOP_M, over_m)
-        release_z = top + cfg.place_gap_m + hang
+        floor = max(top, TABLE_TOP_M, over_m, self._bottom())
+        release_z = top + cfg.place_gap_m + GRIP_SLIP_M + hang
         low = floor + MIN_CARRY_CLEAR_M + hang
         want = max(floor + cfg.carry_clearance_m + hang, low)
         if over_m > 0:
@@ -571,12 +651,14 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         T = kin.tcp(measured)
         self._hand_xy = rot2(-heading(kin, measured)) @ (centre - T[:2, 3])
         self._hang = self._grasp_z - self._bottom()
-        self._pick_xy = centre
+        self._pick_xy, self._pick_aim = centre, aim.copy()
         yaw = known_yaw(self.block_rotation)
         # Squeezed faces lie flat on the pads, so the block sits a whole quarter turn from the heading.
         rel = -math.pi / 2 if yaw is None else wrap(yaw - self._psi)
         self._held_rel = round(rel / (math.pi / 2)) * (math.pi / 2)
         self.place.hang_m = self._hang
+        if not math.isfinite(self._lifted_t):
+            self._lifted_t = self._t
         self._placing, self._place_plan, self._replans, self._over_top = True, None, 0, 0.0
         self._target_seen = None
         self._enter(TARGET)
@@ -588,7 +670,7 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
             return action
         over = 0.0
         if self._putting_back:
-            xy, top, yaw, over = self._pick_xy, 0.0, None, self._over_top
+            (xy, top), yaw, over = self._put_back_spot(), None, self._over_top
         elif self.target_label:
             pose = self._pose_of(obs, self.target_label)
             why = self._pose_problem(pose)
@@ -843,10 +925,14 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         assert plan is not None
         since = self._released_t + DROP_SETTLE_S
         mine = self._fresh(obs, self.label, since)
+        late = self._t - self._phase_t0 >= cfg.verify_wait_s - 1e-9
         if mine is None:
-            if self._t - self._phase_t0 >= cfg.verify_wait_s - 1e-9:
+            if late:
                 return self._finish(NOT_FOUND, f"odlozony blok '{self.label}' niewidoczny w kamerach od "
                                                f"{cfg.verify_wait_s:.0f} s")
+            return self.hold()
+        if not late and any(label not in self._support_now for label in self._supports):
+            # The blocks the picked one rested on get the same wait.
             return self.hold()
         if self.target_label:
             target = self._fresh(obs, self.target_label, since)
@@ -870,6 +956,8 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
     # ------------------------------------------------------------------ the end
     def _finish(self, outcome: str, reason: str, success: bool = False) -> Action:
         self._pending = outcome
+        if self.place.support_moved:
+            reason += f"; blok pod podniesionym przesuniety o {self.place.support_shift_m * 1000:.0f} mm"
         return self._halt(reason, self.kin.from_q(self.q_cmd), success=success)
 
     def _end(self, reason: str, success: bool = False) -> None:
@@ -904,7 +992,10 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
     def _note(self) -> str:
         st = self.status
         mm = st.distance * 1000
-        where = f"'{self.target_label}'" if self.target_label and not self._putting_back else "stol"
+        if self._putting_back:
+            where = "miejsce chwytu" if self.base_z > 0 else "stol"
+        else:
+            where = f"'{self.target_label}'" if self.target_label else "stol"
         if st.phase == TARGET:
             return f"czekam na polozenie celu '{self.target_label}'"
         if st.phase == CARRY_UP:

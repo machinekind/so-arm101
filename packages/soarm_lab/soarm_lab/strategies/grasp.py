@@ -39,6 +39,17 @@ jaw rules and reach checks. The chosen width sets openings and sideways retry di
 Depth and offset place the jaw midpoint below the nominal top by default.
 With `probe: true`, depth counts from the measured top and the probe targets the block centre.
 `MIN_BITE_M` keeps the shallower tip below the top despite its swing.
+
+A block whose pose puts its bottom more than `ON_BLOCK_M` above the table rests on another block.
+The hover, probe and grasp heights then count from its bottom, the pose height minus its resting
+half height. The open jaw's lowest point stays `STACK_CLEAR_M` above the block under it, which
+limits the grasp depth, and a grasp whose shallower tip then bites less than `MIN_BITE_M` is skipped.
+While the jaw closes, the hand keeps the fingertips' midpoint over the block, and the jaw slows until the
+hand keeps up, so the moving jaw does not slide the block across the one under it.
+Where the arm cannot reach the hover or the lift with the hand down, both come down in
+`HEADROOM_STEP_M` steps to `MIN_HOVER_CLEAR_M` over the top and `MIN_LIFT_M`.
+A regrasp after a drop counts from the bottom of the block as seen after the drop, so a block that
+fell back onto a block keeps the same limits.
 """
 
 from __future__ import annotations
@@ -76,6 +87,16 @@ logger = logging.getLogger(__name__)
 PROBE_BELOW_M = 0.010
 #: The lowest TCP height of the grasp point [m]: the jaw's sole stays above the table.
 MIN_GRASP_Z = 0.012
+#: A block whose bottom lies higher than this above the table rests on another block [m].
+ON_BLOCK_M = 0.007
+#: The open jaw's lowest point stays this far above the block under the picked one [m].
+STACK_CLEAR_M = 0.006
+#: Over another block, a hover and a lift out of reach come down in steps of this [m].
+HEADROOM_STEP_M = 0.005
+#: The lowest hover over another block leaves the open jaw this far above the picked block's top [m].
+MIN_HOVER_CLEAR_M = 0.015
+#: The lowest lift off another block [m].
+MIN_LIFT_M = 0.02
 #: How long the jaw may take to open, to start closing and to stand after the close [s].
 JAW_WAIT_S = 3.0
 #: The supervisor's gripper command is on the target within this many app units.
@@ -340,8 +361,9 @@ class GraspStrategy(TouchStrategy):
         self._axis = roll_axis(spec)
         self.short_m = 2 * spec.half_size[1]
         self.height_m = 2 * spec.half_size[2]
-        #: Nominal top above the table [m], used until a probe measures it.
-        self.top_nominal = self.height_m
+        #: The picked block's bottom above the table [m]: 0 on the table, the top of the block under it
+        #: on a stack.
+        self.base_z = 0.0
         #: Maximum centre height accepted as resting on the table [m, base frame].
         self.rest_z_max = max(spec.half_size) + 0.01
         #: The jaw's reach below the TCP [m], from the model once `start` has it.
@@ -390,6 +412,8 @@ class GraspStrategy(TouchStrategy):
         # Straddle and lift TCP targets [m, base frame].
         self._straddle_xy = np.full(2, np.nan)
         self._grasp_z = float("nan")
+        #: How far the lift raises the block [m]: `lift_m`, or less off another block when out of reach.
+        self._lift_m = config.lift_m
         self._lift_off_point = np.zeros(3)
         #: Lift ticks spent moving the target or waiting for the supervisor's command [count].
         self._lift_ticks = 0
@@ -424,6 +448,26 @@ class GraspStrategy(TouchStrategy):
             return float(self.grasp_settings.touch_z)
         return max(MIN_TOUCH_Z, self.top_nominal - PROBE_BELOW_M + self._reach_m)
 
+    @property
+    def top_nominal(self) -> float:
+        """Nominal top above the table [m], used until a probe measures it."""
+        return self.base_z + self.height_m
+
+    def _rest_at(self, base: float) -> None:
+        """Set the picked block's bottom [m above the table]: the table up to `ON_BLOCK_M`."""
+        base = float(base) if base > ON_BLOCK_M else 0.0
+        if base != self.base_z:
+            self.base_z = base
+            if self._auto_touch_z:
+                self.config = replace(self.config, touch_z=self._probe_z())
+
+    def _grasp_floor(self, cmd_open: float) -> float:
+        """The lowest TCP height of the close [m]: above the table, or with the jaw opened to `cmd_open`
+        [app units] `STACK_CLEAR_M` above the block under the picked one."""
+        if self.base_z <= 0:
+            return MIN_GRASP_Z
+        return max(MIN_GRASP_Z, self.base_z + self.kin.jaw_reach(cmd_open) + STACK_CLEAR_M)
+
     # ------------------------------------------------------------------- start
     def start(self, run: RunInfo, obs: Observation) -> None:
         """Initialize the probe and reject openings that the jaw cannot reach or distinguish as a hold."""
@@ -446,7 +490,10 @@ class GraspStrategy(TouchStrategy):
             self.cmd_block = kin.gripper_for_gap(self.short_m)
         except ValueError as exc:
             raise RuntimeError(f"grasp: {exc}") from exc
-        if self._auto_touch_z and abs(self._reach_m - JAW_REACH_M) > 1e-4:
+        stacked, self.base_z = self.base_z != 0.0, 0.0
+        if self.config.hover_m != cfg.hover_m:
+            self.config = replace(self.config, hover_m=cfg.hover_m)
+        if self._auto_touch_z and (stacked or abs(self._reach_m - JAW_REACH_M) > 1e-4):
             self.config = replace(self.config, touch_z=self._probe_z())
         self._centre_probe = kin.jaw_centre(self.cmd_probe)
         self._centre_open = kin.jaw_centre(self.cmd_open)
@@ -480,6 +527,7 @@ class GraspStrategy(TouchStrategy):
         self._rot, self._psi, self._headings = None, float("nan"), []
         self._block_xy0, self._shift_k, self._retarget_xy = None, 0, None
         self._straddle_xy, self._grasp_z = np.full(2, np.nan), float("nan")
+        self._lift_m = cfg.lift_m
         self._turn_t0 = float("nan")
         self._before_descent_pending = self._before_straddle_pending = self._descent_waited = False
 
@@ -515,10 +563,11 @@ class GraspStrategy(TouchStrategy):
         return self._reading
 
     def _take_heading(self, obs: Observation) -> None:
-        """Take candidate headings from the pose that `_wait` will latch this tick."""
+        """Take candidate headings and the block's bottom from the pose that `_wait` will latch this tick."""
         pose = {normalised(str(key)): value for key, value in obs.objects.items()}.get(self.label)
         if pose is None or self._pose_problem(pose):
             return
+        self._rest_at(float(np.asarray(pose.position, float)[2]) - self.block.half_size[2])
         rotation = np.asarray(pose.rotation, float)
         if rotation.shape != (3, 3) or not np.all(np.isfinite(rotation)):
             rotation = np.eye(3)
@@ -556,9 +605,14 @@ class GraspStrategy(TouchStrategy):
                 # The shallower tip lies half the swing above the planned midpoint.
                 skips["zbyt plytko"] += 1
                 continue
-            grasp_z = self._grasp_height(top, cand.depth_m, jaw.centre_open)
-            plan = self._plan(xy, cand, jaw, grasp_z)
-            failure = self._reach(plan, cand.psi, jaw.cmd_open)
+            grasp_z = self._grasp_height(top, cand.depth_m, jaw.centre_open, jaw.cmd_open)
+            if self.base_z > 0:
+                # Over another block the floor may cut the depth: the shallower tip must still bite.
+                swing = jaw.swing_m if math.isfinite(jaw.swing_m) else self.kin.tip_swing(jaw.cmd_open)
+                if top - (grasp_z - float(jaw.centre_open[0])) - swing / 2 < MIN_BITE_M:
+                    skips["zbyt plytko"] += 1
+                    continue
+            plan, failure = self._reachable(xy, cand, jaw, grasp_z, top)
             if failure is None:
                 self.grasp.skipped = rejections_text(skips, SKIPS)
                 self._take_plan(xy, cand, jaw, plan, grasp_z)
@@ -633,14 +687,38 @@ class GraspStrategy(TouchStrategy):
         return JawPlan(plain + widened, width_m - cfg.squeeze_m, cmd_open, cmd_closed, cmd_block,
                        kin.jaw_centre(cmd_plain), kin.tip_swing(cmd_open))
 
-    def _plan(self, xy: np.ndarray, cand: GraspCandidate, jaw: JawPlan, grasp_z: float
-              ) -> dict[str, np.ndarray]:
+    def _reachable(self, xy: np.ndarray, cand: GraspCandidate, jaw: JawPlan, grasp_z: float, top: float
+                   ) -> tuple[dict[str, np.ndarray], tuple[np.ndarray, dict[str, float], IKSolution] | None]:
+        """Return the plan with the set hover and lift and its first unreachable point, or None.
+
+        Over another block, lower the hover and the lift step by step to their least while one of them is
+        out of reach.
+        """
+        hover = self.config.touch_z + self.grasp_settings.hover_m
+        lift = grasp_z + self.grasp_settings.lift_m
+        while True:
+            plan = self._plan(xy, cand, jaw, grasp_z, hover, lift)
+            failure = self._reach(plan, cand.psi, jaw.cmd_open)
+            heights = ("probe_hover", "straddle_hover", "lift")
+            if (failure is None or self.base_z <= 0
+                    or not any(np.array_equal(failure[0], plan[name]) for name in heights)):
+                return plan, failure
+            low_hover = min(hover, top + self.kin.jaw_reach(jaw.cmd_open) + MIN_HOVER_CLEAR_M)
+            low_lift = min(lift, grasp_z + MIN_LIFT_M)
+            if hover <= low_hover and lift <= low_lift:
+                return plan, failure
+            hover, lift = max(hover - HEADROOM_STEP_M, low_hover), max(lift - HEADROOM_STEP_M, low_lift)
+
+    def _plan(self, xy: np.ndarray, cand: GraspCandidate, jaw: JawPlan, grasp_z: float,
+              hover_z: float | None = None, lift_z: float | None = None) -> dict[str, np.ndarray]:
         """Return candidate TCP targets in the base frame [m].
 
-        Probe over the block centre. Place the open jaw at that centre plus the grasp offset.
+        Probe over the block centre. Place the open jaw at that centre plus the grasp offset. The hover
+        and lift heights default to the set ones.
         """
         u = np.array([math.cos(cand.psi), math.sin(cand.psi)])
-        hover_z = self.config.touch_z + self.config.hover_m
+        hover_z = self.config.touch_z + self.config.hover_m if hover_z is None else hover_z
+        lift_z = grasp_z + self.grasp_settings.lift_m if lift_z is None else lift_z
         # Jaw midpoint = TCP + R @ centre. With the hand down, centre[2] lies along the heading.
         probe_xy = xy - self._centre_probe[2] * u
         straddle_xy = xy + np.asarray(cand.offset_xy, float) - jaw.centre_open[2] * u
@@ -649,7 +727,7 @@ class GraspStrategy(TouchStrategy):
                 "probe_bottom": np.array([*probe_xy, self.config.touch_z]),
                 "straddle_hover": np.array([*straddle_xy, hover_z]),
                 "grasp": np.array([*straddle_xy, grasp_z]),
-                "lift": np.array([*straddle_xy, grasp_z + self.grasp_settings.lift_m])}
+                "lift": np.array([*straddle_xy, lift_z])}
 
     def _reach(self, plan: dict[str, np.ndarray], psi: float, cmd_open: float
                ) -> tuple[np.ndarray, dict[str, float], IKSolution] | None:
@@ -714,18 +792,26 @@ class GraspStrategy(TouchStrategy):
             self._block_xy0 = xy.copy()
         self._straddle_xy = plan["straddle_xy"].copy()
         self._grasp_z = float(grasp_z)
+        cfg = self.grasp_settings
+        hover_m = float(plan["straddle_hover"][2]) - self.config.touch_z
+        hover_m = cfg.hover_m if abs(hover_m - cfg.hover_m) < 1e-9 else hover_m
+        if hover_m != self.config.hover_m:
+            self.config = replace(self.config, hover_m=hover_m)
+        lift_m = float(plan["lift"][2]) - self._grasp_z
+        self._lift_m = cfg.lift_m if abs(lift_m - cfg.lift_m) < 1e-9 else lift_m
         grasp.grasp_point = (float(self._straddle_xy[0]), float(self._straddle_xy[1]), self._grasp_z)
 
-    def _grasp_height(self, top_m: float, depth_m: float | None = None, centre: np.ndarray | None = None
-                      ) -> float:
-        """Return closing TCP height [m above the table, base frame], bounded by `MIN_GRASP_Z`.
+    def _grasp_height(self, top_m: float, depth_m: float | None = None, centre: np.ndarray | None = None,
+                      cmd_open: float | None = None) -> float:
+        """Return closing TCP height [m above the table, base frame], bounded by `_grasp_floor`.
 
-        Place the midpoint `depth_m` below `top_m`, using open-tip `centre` in the TCP frame [m].
-        Omitted depth and centre use the chosen grasp.
+        Place the midpoint `depth_m` below `top_m`, using open-tip `centre` in the TCP frame [m] and
+        opening `cmd_open` [app units]. Omitted values use the chosen grasp.
         """
         depth = self._depth_m if depth_m is None else depth_m
         centre = self._centre_open if centre is None else centre
-        return max(MIN_GRASP_Z, top_m - depth + float(centre[0]))
+        floor = self._grasp_floor(self.cmd_open if cmd_open is None else cmd_open)
+        return max(floor, top_m - depth + float(centre[0]))
 
     @property
     def straddle_hover(self) -> np.ndarray:
@@ -959,7 +1045,10 @@ class GraspStrategy(TouchStrategy):
 
     def _close(self, obs: Observation) -> Action | None:
         self._set_jaw_goal(self.cmd_closed)
-        self._ramp_jaw()
+        gripper = self.kin.spec.gripper
+        assert gripper is not None
+        follow = self.base_z > 0 and self.kin.from_q(self.q_cmd)[gripper] > self.cmd_block
+        self._ramp_jaw(self._follow_step_q() if follow else math.inf)
         reading, jaw = self.reading, self.kin.spec.jaw
         # A jaw that has not started closing can satisfy the holding rule.
         self._jaw_moved |= reading.q <= self._q_open_entry - jaw.margin
@@ -969,7 +1058,11 @@ class GraspStrategy(TouchStrategy):
                 assert self._jaw is not None
                 self._jaw.mark()
                 self.grasp.verdict = "held"
-                self._lift_off_point = self.grasp_target + np.array([0.0, 0.0, self.grasp_settings.lift_m])
+                closed_at = self.grasp_target
+                if self.base_z > 0:
+                    closed_at = self._close_point()
+                    self.grasp.grasp_point = (float(closed_at[0]), float(closed_at[1]), float(closed_at[2]))
+                self._lift_off_point = closed_at + np.array([0.0, 0.0, self._lift_m])
                 self._lift_ticks = 0
                 self._enter(LIFT_OFF)
                 return None
@@ -983,7 +1076,25 @@ class GraspStrategy(TouchStrategy):
                                   f"({self.grasp.jaw_gap_m * 1000:.0f} mm)", self.kin.from_q(self.q_cmd))
             return self._halt(f"szczeka nie staje {JAW_WAIT_S:.0f} s po zamknieciu - serwo albo odczyt",
                               self.kin.from_q(self.q_cmd))
+        if self.base_z > 0:
+            # The tips meet the block together, so it does not slide across the block under it.
+            return self._drive(self._close_point(), self.approach_step_m)
         return self.hold()
+
+    def _follow_step_q(self) -> float:
+        """The jaw step [rad] that moves the fingertips' midpoint `descend_step_m` in one tick."""
+        span_m = abs(float(self._centre_open[2] - self.kin.jaw_centre(self.cmd_block)[2]))
+        span_q = abs(self._q(self.cmd_open) - self._q(self.cmd_block))
+        return span_q * self.descend_step_m / span_m if span_m > 1e-9 else math.inf
+
+    def _close_point(self) -> np.ndarray:
+        """Where the TCP keeps the fingertips' midpoint over the block while the jaw closes onto it [m]."""
+        gripper = self.kin.spec.gripper
+        assert gripper is not None
+        cmd = max(self.kin.from_q(self.q_cmd)[gripper], self.cmd_block)
+        shift = float(self._centre_open[2] - self.kin.jaw_centre(cmd)[2])
+        return np.array([*(self._straddle_xy + shift * np.array([math.cos(self._psi), math.sin(self._psi)])),
+                         self._grasp_z])
 
     def _lift_off(self, obs: Observation) -> Action | None:
         self.grasp.lifted_m = float(self._tcp_measured[2]) - self._grasp_z
@@ -999,7 +1110,7 @@ class GraspStrategy(TouchStrategy):
         if (not on_point and not self.status.out_of_reach) or not self._command_on_target:
             self._lift_ticks += 1
         # Allow `JAW_WAIT_S` after travel for the measured arm to arrive.
-        lift_m = self.grasp_settings.lift_m
+        lift_m = self._lift_m
         travel = max(lift_m / self.config.speed_mps, self._lift_ticks / self.hz)
         if self._t - self._phase_t0 >= travel + JAW_WAIT_S:
             return self._halt(f"ramie nie podnioslo bloku ({self.grasp.lifted_m * 1000:.0f} mm z "
@@ -1153,18 +1264,22 @@ class GraspStrategy(TouchStrategy):
         """Re-aim through `retarget` and count the next grasp against the attempt budget.
 
         Close the jaw on the way to hover. By default, open there and straddle below the catalog top.
-        With `probe: true`, measure the top before straddling.
+        With `probe: true`, measure the top before straddling. The grasp counts from the block's bottom
+        as seen, so a block on another block gets the stack's limits.
         An unreachable sighting stops the run and keeps the old aim.
         """
         grasp = self.grasp
         saved = self._block_xy0, self._shift_k, self.block_rotation, self._headings
+        base = self.base_z
         # The sideways shifts after a tip stall start from the new block point.
         self._block_xy0, self._shift_k = None, 0
         self._heading_from(seen.rotation)
+        self._rest_at(seen.z - self.block.half_size[2])
         try:
             self.retarget(seen.xy[0], seen.xy[1])
         except RuntimeError as exc:
             self._block_xy0, self._shift_k, self.block_rotation, self._headings = saved
+            self._rest_at(base)
             grasp.verdict = "taken"
             return self._halt(f"blok upadl poza zasiegiem: {exc} - czekam na czlowieka",
                               self.kin.from_q(self.q_cmd))
@@ -1173,8 +1288,9 @@ class GraspStrategy(TouchStrategy):
         grasp.recoveries += 1
         grasp.verdict = "recovering"
         self._empty_ticks = 0
-        logger.info("Blok lezy na blacie w (%.3f, %.3f) m - ponowna proba", *seen.xy)
-        return self.hold("blok lezy na blacie - ponowna proba")
+        where = "na blacie" if self.base_z <= 0 else "na innym bloku"
+        logger.info("Blok lezy %s w (%.3f, %.3f) m - ponowna proba", where, *seen.xy)
+        return self.hold(f"blok lezy {where} - ponowna proba")
 
     def _sighting(self, obs: Observation, squeezing: bool) -> Sighting | None:
         """Classify the observed block pose for hold monitoring and recovery.
@@ -1258,10 +1374,12 @@ class GraspStrategy(TouchStrategy):
     def _set_jaw_goal(self, gripper: float) -> None:
         self._jaw_goal_q = float(np.clip(self._q(gripper), self._lo[self._g], self._hi[self._g]))
 
-    def _ramp_jaw(self) -> None:
-        """Advance the gripper target toward its goal at `SPEED_SHARE` of the supervisor's speed limit."""
+    def _ramp_jaw(self, step_q: float = math.inf) -> None:
+        """Advance the gripper target toward its goal at `SPEED_SHARE` of the supervisor's speed limit, and at
+        most `step_q` [rad] per tick."""
         g = self._g
-        delta = float(np.clip(self._jaw_goal_q - self.q_cmd[g], -self._grip_step_q, self._grip_step_q))
+        step = min(self._grip_step_q, step_q)
+        delta = float(np.clip(self._jaw_goal_q - self.q_cmd[g], -step, step))
         before = float(self.q_cmd[g])
         self.q_cmd[g] = float(np.clip(before + delta, self._lo[g], self._hi[g]))
         if self.q_cmd[g] != before:

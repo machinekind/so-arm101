@@ -20,6 +20,8 @@ current aim along any block side the image cannot locate. Each move is measured 
 after all arm joints settle. A residual inconsistent with that move restores the original
 aim if it remains reachable.
 
+A block on another block is measured at its own height, from the bottom the grasp took from its pose.
+
 Looks finish after convergence or `rounds` moves. Missing or stale frames, ambiguous blobs,
 poor fits, excessive shifts and an unsettled arm skip the look. The straddle (or probe) then
 continues from the settled aim. Looks consume no grasp attempts. An empty `wrist_camera`
@@ -655,6 +657,10 @@ class WristGraspStrategy(GraspStrategy):
         shape = small.shape[:2]
         dilate = round(JAW_MASK_DILATE_PX * shape[1] / WORK_WIDTH_PX)
         visible = ~jaw_mask(kin, joints, Kw, T, shape, cv2, dilate)
+        # The block models rest on the table: a camera lowered by the block's bottom sees them as it
+        # sees the block on a stack.
+        T = T.copy()
+        T[2, 3] -= self.base_z
         assert self.grasp.block_xy is not None
         aim = np.asarray(self.grasp.block_xy, float)
         window = self._window or self._sample_hue(small, Kw, T, visible, aim)

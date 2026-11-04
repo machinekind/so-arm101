@@ -169,7 +169,8 @@ def contact(twin: Twin, name: str) -> list[float]:
 class Cameras:
     """Tracker poses of every block from visible simulation detections.
 
-    A block within `HIDDEN_M` of the TCP, or named in `hidden`, is not detected.
+    A block within `HIDDEN_M` of the TCP, or named in `hidden`, is not detected. With `nearest_grab`, only
+    the block nearest the TCP can be taken by a closing jaw, as the twin's stacking tracker does.
     """
 
     twin: Twin
@@ -177,6 +178,7 @@ class Cameras:
     names: tuple[str, ...]
     hidden: set[str] = field(default_factory=set)
     sources: dict[str, list[tuple[float, str]]] = field(default_factory=dict)
+    nearest_grab: bool = False
 
     def __post_init__(self) -> None:
         spec = self.twin.workspace.spec()
@@ -190,14 +192,18 @@ class Cameras:
         status = self.twin.status
         measured, command = dict(status.measured), dict(status.command) or dict(status.measured)
         T_tcp = KIN.tcp(measured)
+        poses = {name: truth(self.twin, name) for name in self.trackers}
+        nearest = min(poses, key=lambda n: float(np.linalg.norm(poses[n][0] - T_tcp[:3, 3])))
         out = {}
         for name, tracker in self.trackers.items():
-            position, rotation = truth(self.twin, name)
+            position, rotation = poses[name]
             seen = None
             if name not in self.hidden and np.linalg.norm(position - T_tcp[:3, 3]) > HIDDEN_M:
                 seen = CubeDetection(position, rotation, area_px=0.0, confidence=1.0, n_cameras=2,
                                      t=self.clock.t)
             grip_q, grip_cmd = float(KIN.to_q(measured)[self.g]), float(KIN.to_q(command)[self.g])
+            if self.nearest_grab and name != nearest:
+                grip_cmd = grip_q
             got = tracker.update(seen, T_tcp, grip_q, grip_cmd, self.closed, self.clock.t)
             self.sources.setdefault(name, []).append((self.clock.t, tracker.source))
             if got is None:
@@ -352,6 +358,106 @@ def test_a_third_cube_goes_on_two_and_the_open_jaw_leaves_the_stack_untouched(tw
     assert max(shift) < 0.002 and base[2] == pytest.approx(half, abs=0.0005)
     assert max(tilt_deg(r) for r in (red_rot, blue_rot, base_rot)) < 2.0
     assert abs(((yaw_deg(red_rot) - yaw_deg(blue_rot) + 45) % 90) - 45) < 4.0
+    assert all(c < 0.5 for c in contact(twin, "red"))
+
+
+def stacked(twin: Twin, lower: Placed, *others: Placed) -> None:
+    """Put a red cube on `lower` at the pick spot, with `others` around, and let the stack settle."""
+    add_blocks(twin, lower, Placed("red", "cube", (0.2, 0.12), rgba=RED), *others)
+    move(twin, "red", lower.xy, 2 * block(lower.kind).half_size[2] + block("cube").half_size[2])
+    settle(twin)
+
+
+def watched(twin: Twin, name: str) -> tuple[np.ndarray, list[float], list[float], Callable[[], None]]:
+    """Return a block's position now, lists of its shift and height as the run goes, and the watch."""
+    p0 = truth(twin, name)[0]
+    shift: list[float] = []
+    heights: list[float] = []
+
+    def watch() -> None:
+        p = truth(twin, name)[0]
+        shift.append(float(np.linalg.norm(p - p0)))
+        heights.append(float(p[2]))
+
+    return p0, shift, heights, watch
+
+
+def test_the_top_cube_of_a_two_cube_stack_goes_on_another_cube_and_the_lower_one_stays(twin):
+    half = block("cube").half_size[2]
+    stacked(twin, Placed("base", "cube", PICK_XY, rgba=BLUE), Placed("blue", "cube", TARGET_XY, 20.0, BLUE))
+    clock = Clock()
+    strategy = built(label="red", place_on="blue")
+    cameras = Cameras(twin, clock, ("red", "base", "blue"), nearest_grab=True)
+    runner = StrategyRunner(twin, strategy, objects=cameras)
+    _, shift, heights, watch = watched(twin, "base")
+
+    runner.start(threaded=False)
+    drive(twin, runner, 120.0, clock, watch=watch)
+
+    assert runner.status.stopped_because == "zadanie wykonane", (strategy.status, strategy.place)
+    assert strategy.place.outcome == "placed" and strategy.base_z == pytest.approx(2 * half, abs=0.001)
+    assert strategy.place.supports == ("base",) and not strategy.place.support_moved
+    assert strategy.place.support_shift_m < 0.002
+    settle(twin)
+    red, red_rot = truth(twin, "red")
+    blue, blue_rot = truth(twin, "blue")
+    base, base_rot = truth(twin, "base")
+    assert np.linalg.norm(red[:2] - blue[:2]) < 0.004
+    assert red[2] == pytest.approx(blue[2] + 2 * half, abs=0.001)
+    assert max(shift) < 0.002 and min(heights) > half - 0.0004 and base[2] == pytest.approx(half, abs=0.0005)
+    assert max(tilt_deg(r) for r in (red_rot, blue_rot, base_rot)) < 2.0
+    assert all(c < 0.5 for c in contact(twin, "red"))
+
+
+def test_a_cube_comes_off_a_cuboid_to_a_table_spot_and_the_cuboid_stays(twin):
+    stacked(twin, Placed("long", "cuboid", PICK_XY, -30.0, BLUE))
+    clock = Clock()
+    spot = (0.22, 0.07)
+    strategy = built(label="red", place_x_m=spot[0], place_y_m=spot[1])
+    cameras = Cameras(twin, clock, ("red", "long"), nearest_grab=True)
+    runner = StrategyRunner(twin, strategy, objects=cameras)
+    _, shift, heights, watch = watched(twin, "long")
+    half = block("cuboid").half_size[2]
+
+    runner.start(threaded=False)
+    drive(twin, runner, 120.0, clock, watch=watch)
+
+    assert runner.status.stopped_because == "zadanie wykonane", (strategy.status, strategy.place)
+    assert strategy.place.outcome == "placed" and strategy.place.supports == ("long",)
+    assert not strategy.place.support_moved
+    settle(twin)
+    red, red_rot = truth(twin, "red")
+    long, long_rot = truth(twin, "long")
+    assert np.linalg.norm(red[:2] - np.array(spot)) < 0.004
+    assert red[2] == pytest.approx(block("cube").half_size[2], abs=0.0005) and tilt_deg(red_rot) < 2.0
+    assert max(shift) < 0.002 and min(heights) > half - 0.0004 and long[2] == pytest.approx(half, abs=0.0005)
+    assert tilt_deg(long_rot) < 2.0
+
+
+def test_a_target_that_disappears_sends_the_cube_back_onto_its_stack(twin):
+    half = block("cube").half_size[2]
+    stacked(twin, Placed("base", "cube", PICK_XY, rgba=BLUE), Placed("blue", "cube", TARGET_XY, rgba=BLUE))
+    clock = Clock()
+    strategy = built(label="red", place_on="blue")
+    cameras = Cameras(twin, clock, ("red", "base", "blue"), nearest_grab=True)
+    runner = StrategyRunner(twin, strategy, objects=cameras)
+    red0, _ = truth(twin, "red")
+    _, shift, heights, watch = watched(twin, "base")
+
+    runner.start(threaded=False)
+    drive(twin, runner, 60.0, clock, until=lambda: strategy.started and strategy.status.phase == "check",
+          watch=watch)
+    cameras.hidden.add("blue")
+    drive(twin, runner, 120.0, clock, watch=watch)
+
+    assert runner.status.stopped_because == "strategia skonczyla" and not runner.status.success
+    assert strategy.place.outcome == "target_not_seen" and strategy.place.put_back
+    settle(twin)
+    red, red_rot = truth(twin, "red")
+    base, base_rot = truth(twin, "base")
+    assert np.linalg.norm(red[:2] - red0[:2]) < 0.004 and red[2] == pytest.approx(3 * half, abs=0.001)
+    assert max(shift) < 0.002 and min(heights) > half - 0.0004 and base[2] == pytest.approx(half, abs=0.0005)
+    assert tilt_deg(red_rot) < 2.0 and tilt_deg(base_rot) < 2.0
     assert all(c < 0.5 for c in contact(twin, "red"))
 
 

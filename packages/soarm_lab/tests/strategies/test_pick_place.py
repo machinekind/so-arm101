@@ -25,11 +25,12 @@ pytest.importorskip("mujoco")
 from soarm_lab.blocks import block  # noqa: E402
 from soarm_lab.kinematics import RobotKinematics  # noqa: E402
 from soarm_lab.robot import load_robot  # noqa: E402
-from soarm_lab.strategies.grasp import heading, wrap  # noqa: E402
+from soarm_lab.strategies.grasp import STACK_CLEAR_M, heading, wrap  # noqa: E402
 from soarm_lab.strategies.grasp_jev import HELD, HELD_OPTIONS, NEXT, NEXT_OPTIONS, GraspJevSettings  # noqa: E402
 from soarm_lab.strategies.jev import KEY_ENV  # noqa: E402
 from soarm_lab.strategies.judges import Reply, checked_reply  # noqa: E402
 from soarm_lab.strategies.pick_place import (  # noqa: E402
+    GRIP_SLIP_M,
     MIN_CARRY_CLEAR_M,
     OUTCOMES,
     PickPlaceSettings,
@@ -104,7 +105,8 @@ class Body:
         if any(tip[2] >= self.top or tip[2] < self.z - self.half[2] - 0.01 for tip in tips):
             return None
         a, b = (self.frame(tip) for tip in tips)
-        for k in (0, 1):
+        # The closing axis first: tips centred on the block also sit on either side of its other mid-plane.
+        for k in sorted((0, 1), key=lambda k: -abs(a[k] - b[k])):
             if a[k] * b[k] < 0 and abs(a[1 - k]) < self.half[1 - k] and abs(b[1 - k]) < self.half[1 - k]:
                 return k
         return None
@@ -326,7 +328,7 @@ def test_a_cube_goes_on_another_cube_through_every_phase():
     assert abs(fold(red.yaw - blue.yaw, math.pi / 2)) < math.radians(1.0)
     assert s.place.error_m < 0.002 and abs(s.place.height_error_m) < 1e-6
     assert s.status.stopped_because.startswith("blok 'red' odlozony na 'blue': ")
-    assert s.place.release_z == pytest.approx(blue.top + 0.002 + s.place.hang_m)
+    assert s.place.release_z == pytest.approx(blue.top + 0.002 + GRIP_SLIP_M + s.place.hang_m)
     # The jaw opened just past the block, not to the straddle's opening, and left it without a touch.
     assert s.grasp.gap_cmd_m == pytest.approx(2 * CUBE[1] + 0.008, abs=1e-4)
     assert not s.place.opened_wide and not world.hits
@@ -428,7 +430,7 @@ def test_a_target_top_higher_than_planned_stalls_the_descent_and_the_cube_still_
     s = built(place_on="blue")
     base = Body("base", CUBOID, np.array(TARGET_XY), CUBOID[2])
     world = World([cube("red", PICK_XY), base, cube("blue", TARGET_XY, on=2 * CUBOID[2])])
-    # The cameras put the target 6 mm lower than it stands.
+    # The cameras put the target lower than it stands, 6 mm more than the release leaves for a slipped block.
     blue = world.body("blue")
     objects = world.objects
 
@@ -436,7 +438,8 @@ def test_a_target_top_higher_than_planned_stalls_the_descent_and_the_cube_still_
         out = objects()
         if "blue" in out:
             p = out["blue"]
-            out["blue"] = ObjectPose(p.position - np.array([0.0, 0.0, 0.006]), p.rotation, p.source, p.age_s)
+            low = np.array([0.0, 0.0, 0.006 + GRIP_SLIP_M])
+            out["blue"] = ObjectPose(p.position - low, p.rotation, p.source, p.age_s)
         return out
 
     world.objects = lower  # type: ignore[method-assign]
@@ -445,6 +448,149 @@ def test_a_target_top_higher_than_planned_stalls_the_descent_and_the_cube_still_
     assert s.place.contact and s.place.outcome == "placed" and actions[-1].success
     assert world.body("red").z == pytest.approx(blue.top + CUBE[2])
     assert not world.hits
+
+
+# ------------------------------------------------------------ picked off a stack
+def picked_off(lower: Body, **settings: Any) -> tuple[PickPlaceStrategy, World]:
+    """A red cube on `lower` at the pick spot and a blue cube to place it on."""
+    settings.setdefault("place_on", "blue")
+    world = World([lower, cube("red", PICK_XY, on=lower.top), cube("blue", TARGET_XY, 20.0)])
+    return built(**settings), world
+
+
+def lowest_tip(world: World, s: PickPlaceStrategy, lows: list[float], gripped_at: list[np.ndarray]) -> None:
+    """Record the fingertips' lowest point while the red cube is not yet held, and where it was gripped."""
+    red = world.body("red")
+    if not red.gripped and s.status.phase in ("straddle", "close"):
+        lows.append(min(float(tip[2]) for tip in KIN.fingertips(world.joints)))
+    if red.gripped and not gripped_at:
+        gripped_at.append(red.xy.copy())
+
+
+@pytest.mark.parametrize("lower", [cube("base", PICK_XY), Body("base", CUBOID, np.array(PICK_XY), CUBOID[2],
+                                                                math.radians(-30.0))],
+                         ids=["off a cube", "off a cuboid"])
+def test_a_cube_picked_off_a_block_goes_on_another_and_the_lower_block_stays(lower: Body):
+    s, world = picked_off(lower)
+    base = world.body("base")
+    base_xy, base_z = base.xy.copy(), base.z
+    lows: list[float] = []
+    gripped_at: list[np.ndarray] = []
+    actions, phases = run(s, world, watch=lambda world, s: lowest_tip(world, s, lows, gripped_at))
+    red, blue = world.body("red"), world.body("blue")
+
+    assert actions[-1].success and s.place.outcome == "placed", s.status.stopped_because
+    assert s.base_z == pytest.approx(base.top) and s.place.supports == ("base",)
+    # The jaw went down beside the cube and stayed clear of the block under it.
+    assert lows and min(lows) > base.top + STACK_CLEAR_M - 0.002
+    # The hand followed the closing jaw, so the jaw did not slide the cube across the lower block.
+    assert gripped_at and np.linalg.norm(gripped_at[0] - np.asarray(PICK_XY)) < 0.001
+    assert red.z == pytest.approx(blue.top + CUBE[2]) and np.linalg.norm(red.xy - blue.xy) < 0.002
+    assert np.linalg.norm(base.xy - base_xy) < 1e-9 and base.z == base_z and not base.gripped
+    assert s.place.support_shift_m < 1e-9 and not s.place.support_moved
+    assert "przesuniety" not in s.status.stopped_because and not world.hits
+
+
+def test_the_carry_from_a_stack_clears_the_block_it_was_picked_from():
+    s, world = picked_off(cube("base", PICK_XY))
+    top = world.body("base").top
+    bottoms: list[float] = []
+
+    def over(world: World, s: PickPlaceStrategy) -> None:
+        red = world.body("red")
+        if red.gripped and np.linalg.norm(red.xy - np.asarray(PICK_XY)) < 2 * CUBE[0]:
+            bottoms.append(red.z - CUBE[2])
+
+    actions, _ = run(s, world, watch=over)
+
+    assert actions[-1].success and bottoms
+    # Above the stack the held cube only rises, and the carry leaves it well above the lower cube.
+    assert min(bottoms) >= top - 1e-4 and s.place.carry_z - s.place.hang_m >= top + MIN_CARRY_CLEAR_M
+
+
+def test_a_cube_put_back_goes_onto_the_block_it_was_picked_from():
+    s, world = picked_off(cube("base", PICK_XY), target_wait_s=1.0)
+
+    def hide(world: World, s: PickPlaceStrategy) -> None:
+        world.body("blue").seen = False
+
+    actions, _ = run(s, world, on_phase={"check": hide})
+    red, base = world.body("red"), world.body("base")
+
+    assert not actions[-1].success and s.place.outcome == "target_not_seen" and s.place.put_back
+    assert s.place.target_top_m == pytest.approx(base.top)
+    assert not red.gripped and red.z == pytest.approx(base.top + CUBE[2])
+    assert np.linalg.norm(red.xy - base.xy) < 0.002 and not world.hits
+
+
+def test_a_lower_block_that_moved_is_reported_and_the_put_back_follows_it():
+    s, world = picked_off(cube("base", PICK_XY))
+    pushed: list[bool] = []
+
+    def push(world: World, s: PickPlaceStrategy) -> None:
+        if not pushed:
+            pushed.append(True)
+            world.body("base").xy = world.body("base").xy + np.array([0.0, -0.02])
+
+    def nudge(world: World, s: PickPlaceStrategy) -> None:
+        if not s.place.put_back:
+            world.body("blue").xy = world.body("blue").xy + np.array([0.0, 0.01])
+
+    actions, _ = run(s, world, seconds=90.0, on_phase={"carry_up": push, "carry_over": nudge})
+    red, base = world.body("red"), world.body("base")
+
+    assert s.place.outcome == "target_moved" and s.place.put_back
+    assert s.place.support_moved and s.place.support_shift_m == pytest.approx(0.02, abs=1e-6)
+    assert s.status.stopped_because.endswith("blok odlozony z powrotem; blok pod podniesionym przesuniety "
+                                             "o 20 mm")
+    assert not red.gripped and red.z == pytest.approx(base.top + CUBE[2])
+    assert np.linalg.norm(red.xy - base.xy) < 0.002 and not world.hits
+
+
+def test_a_cube_dropped_after_the_pick_off_a_stack_is_picked_again_from_the_table():
+    s, world = picked_off(cube("base", PICK_XY))
+
+    def slip(world: World, s: PickPlaceStrategy) -> None:
+        if s.grasp.drops == 0:
+            red = world.body("red")
+            red.gripped = False
+            red.xy, red.z = np.array([0.19, 0.0]), CUBE[2]
+
+    actions, phases = run(s, world, seconds=90.0, on_phase={"carry_over": slip})
+
+    assert actions[-1].success and s.place.outcome == "placed", s.status.stopped_because
+    assert s.grasp.drops == 1 and s.grasp.recoveries == 1 and s.base_z == 0.0
+    assert world.body("red").z == pytest.approx(world.body("blue").top + CUBE[2])
+    assert world.body("base").z == pytest.approx(CUBE[2]) and not s.place.support_moved
+
+
+def test_a_cuboid_dropped_back_onto_the_cube_it_came_off_is_picked_again_clear_of_that_cube():
+    base = cube("base", PICK_XY)
+    world = World([base, Body("red", CUBOID, np.array(PICK_XY), base.top + CUBOID[2], math.radians(10.0)),
+                   cube("blue", TARGET_XY, 20.0)])
+    s = built(block="cuboid", place_on="blue")
+    lows: list[float] = []
+
+    def slip(world: World, s: PickPlaceStrategy) -> None:
+        if s.grasp.drops == 0:
+            red = world.body("red")
+            red.gripped = False
+            red.xy, red.z = base.xy + np.array([0.003, -0.002]), base.top + CUBOID[2]
+
+    def regrasp_tips(world: World, s: PickPlaceStrategy) -> None:
+        if s.grasp.recoveries and not world.body("red").gripped and s.status.phase in ("straddle", "close"):
+            lows.append(min(float(tip[2]) for tip in KIN.fingertips(world.joints)))
+
+    actions, _ = run(s, world, seconds=90.0, on_phase={"carry_over": slip}, watch=regrasp_tips)
+    red, blue = world.body("red"), world.body("blue")
+
+    assert s.grasp.drops == 1 and s.grasp.recoveries == 1 and s.base_z == pytest.approx(base.top)
+    # The regrasp counts from the cube under the cuboid, so the open jaw stays clear of that cube.
+    assert s.grasp.grasp_point is not None
+    assert s.grasp.grasp_point[2] >= base.top + KIN.jaw_reach(s.cmd_open) + STACK_CLEAR_M - 1e-9
+    assert lows and min(lows) > base.top + STACK_CLEAR_M - 0.002 and not world.hits
+    assert actions[-1].success and s.place.outcome == "placed", s.status.stopped_because
+    assert red.z == pytest.approx(blue.top + CUBOID[2]) and base.z == pytest.approx(CUBE[2])
 
 
 # ------------------------------------------------------------ outcomes

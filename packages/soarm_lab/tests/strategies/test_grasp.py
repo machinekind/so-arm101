@@ -28,12 +28,15 @@ from soarm_lab.strategies.grasp import (  # noqa: E402
     JAW_REACH_M,
     MIN_BITE_M,
     MIN_GRASP_Z,
+    MIN_HOVER_CLEAR_M,
     PROBE_BELOW_M,
     SEEN,
+    STACK_CLEAR_M,
     STALE,
     GraspSettings,
     GraspStatus,
     GraspStrategy,
+    Sighting,
     grasp_headings,
     heading,
     top_down,
@@ -1677,6 +1680,73 @@ def test_a_deep_library_grasp_is_clamped_to_the_minimum_grasp_height(tmp_path, p
     # Only the probe rises from the block before the straddle.
     assert ("rise" in phases) == probe and s.grasp.grasp_point is not None
     assert s.grasp.grasp_point[2] == pytest.approx(MIN_GRASP_Z)
+
+
+def aimed_at(z: float, kind: str = "cube") -> GraspStrategy:
+    """Return a strategy that took a box-fit pose with its centre `z` [m] above the table."""
+    objects = seen(source="kamery", age_s=0.1, z=z, label=kind, yaw_deg=10.0)
+    s = started(objects, block=kind, carry_s=0.5)
+    a = s.act(obs(dict(SPEC.home), t=0.05, objects=objects))
+    assert not a.done, a.note
+    return s
+
+
+def test_a_pose_near_rest_height_counts_as_on_the_table():
+    table, noisy = aimed_at(0.0), aimed_at(CUBE[2] + 0.005)
+
+    assert table.base_z == noisy.base_z == 0.0 and noisy.top_nominal == pytest.approx(2 * CUBE[2])
+    assert noisy.grasp.grasp_point == pytest.approx(table.grasp.grasp_point)
+    assert noisy.config.touch_z == table.config.touch_z and noisy.config.hover_m == 0.04
+
+
+def test_a_cube_on_a_cube_is_grasped_at_its_own_height_under_a_hover_the_arm_reaches():
+    s = aimed_at(3 * CUBE[2])
+    top = 4 * CUBE[2]
+    centre = KIN.jaw_centre(s.cmd_open)
+    reach = KIN.jaw_reach(s.cmd_open)
+
+    assert s.base_z == pytest.approx(2 * CUBE[2]) and s.top_nominal == pytest.approx(top)
+    assert s.grasp.grasp_point is not None
+    assert s.grasp.grasp_point[2] == pytest.approx(top - CUBE[2] + centre[0])
+    # The set hover is out of reach this high, so it comes down but still clears the cube.
+    hover = s.straddle_hover[2]
+    assert s.config.hover_m < 0.04 and hover - reach >= top + MIN_HOVER_CLEAR_M - 1e-9
+    assert s.config.touch_z == pytest.approx(top - PROBE_BELOW_M + KIN.jaw_reach(s.cmd_probe))
+    assert s._lift_m <= 0.04 and s.hover_point[2] == pytest.approx(hover)
+
+
+def test_on_a_cube_a_flat_cuboids_grasp_stays_clear_of_the_cube_and_still_bites():
+    s = aimed_at(2 * CUBE[2] + block("cuboid").half_size[2], kind="cuboid")
+    base = 2 * CUBE[2]
+    top = base + 2 * block("cuboid").half_size[2]
+    reach = KIN.jaw_reach(s.cmd_open)
+
+    assert s.grasp.grasp_point is not None
+    assert s.grasp.grasp_point[2] == pytest.approx(base + reach + STACK_CLEAR_M)
+    bite = top - (s.grasp.grasp_point[2] - KIN.jaw_centre(s.cmd_open)[0]) - KIN.tip_swing(s.cmd_open) / 2
+    assert bite >= MIN_BITE_M and s.grasp.skipped == ""
+
+
+def test_a_regrasp_after_a_drop_onto_the_table_aims_at_the_table():
+    s = aimed_at(3 * CUBE[2])
+    s._regrasp(Sighting(SEEN, (XY[0] + 0.03, XY[1]), CUBE[2], np.eye(3), "kamery", 0.1, 0.0))
+
+    assert s.base_z == 0.0 and s.config.hover_m == 0.04 and s.top_nominal == pytest.approx(2 * CUBE[2])
+    assert s.grasp.grasp_point is not None and s.grasp.grasp_point[2] < 2 * CUBE[2]
+
+
+def test_a_cuboid_that_falls_back_onto_its_cube_is_regrasped_clear_of_the_cube():
+    half = block("cuboid").half_size[2]
+    s = aimed_at(2 * CUBE[2] + half, kind="cuboid")
+    base = 2 * CUBE[2]
+    seen_back = Sighting(SEEN, (XY[0] + 0.004, XY[1]), base + half, np.eye(3), "kamery", 0.1, 0.0)
+    assert s._sighting(obs(dict(SPEC.home), objects=seen(xy=seen_back.xy, z=seen_back.z, label="cuboid",
+                                                           source="kamery", age_s=0.1)), False).kind == SEEN
+    s._regrasp(seen_back)
+
+    assert s.base_z == pytest.approx(base) and s.top_nominal == pytest.approx(base + 2 * half)
+    assert s.grasp.grasp_point is not None
+    assert s.grasp.grasp_point[2] >= base + KIN.jaw_reach(s.cmd_open) + STACK_CLEAR_M - 1e-9
 
 
 def test_the_openings_follow_the_library_grasps_width(tmp_path):

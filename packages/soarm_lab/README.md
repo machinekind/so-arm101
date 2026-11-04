@@ -420,16 +420,26 @@ new hover, twice at most.
 
 The descent is fast down to 1.5 cm above the release height, or starts at the carry height when that
 is lower, and settles. The rest runs at `place_speed_mps` and stops on a stall or with `place_gap_m`
-between the blocks. The jaw opens `release_margin_m` past the block on each side and the hand eases
-off toward the fixed jaw, as in `grasp_jev`. It then rises up to `retreat_m`, and at least until the
-jaw clears the placed block. Where the arm cannot reach that high, as for a third cube on two, the
-jaw opens fully so that its moving side clears the block, and the way to the start position must
-lead away from the fixed jaw. Plans prefer the first exit. With neither, the run ends `unreachable`
-before the pick. The hand then moves to the start position, so the cameras see the result. Poses
-captured after the release must put the block within `place_tol_m` of the target's centre, at the
-target's top plus half its height. A target not seen at the hover, an unreachable place or a target
-that keeps moving puts the block back where it was picked. The carry back stays at least 1 cm above
-the target the hand hovered over.
+between the blocks, plus 3 mm for a block that slid down in the grip on the way. The jaw opens
+`release_margin_m` past the block on each side and the hand eases off toward the fixed jaw, as in
+`grasp_jev`. It then rises up to `retreat_m`, and at least until the jaw clears the placed block.
+Where the arm cannot reach that high, as for a third cube on two, the jaw opens fully so that its
+moving side clears the block, and the way to the start position must lead away from the fixed jaw.
+Plans prefer the first exit. With neither, the run ends `unreachable` before the pick. The hand then
+moves to the start position, so the cameras see the result. Poses captured after the release must
+put the block within `place_tol_m` of the target's centre, at the target's top plus half its height.
+A target not seen at the hover, an unreachable place or a target that keeps moving puts the block
+back where it was picked. The carry back stays at least 1 cm above the target the hand hovered over.
+
+The picked block may rest on another block. Its bottom is its pose height minus half its height;
+above 7 mm it counts as stacked. The grasp then counts from that bottom, keeps the open jaw 6 mm
+above the block under it, and lowers the hover and the lift where the arm cannot reach them. While
+the jaw closes, the hand keeps the fingertips centred on the block, so it does not slide across the
+one under it. Every carry clears the stack it came from, and a put-back returns the block onto it.
+The blocks under the picked one, found from their poses before the pick, are checked again once the
+hand is away. A shift over `place_tol_m` sets `place.support_moved` and is added to the stop reason,
+and a put-back then follows that block. A regrasp after a drop counts from where the block landed,
+on the table or on a block.
 
 `PlaceStatus.outcome` names how the run ended:
 
@@ -447,9 +457,12 @@ the target the hand hovered over.
 
 The stop reason in the panel says the same in Polish. `place.put_back` tells whether the block
 went back, `place.opened_wide` whether the jaw opened fully to leave it. Known gaps: the twin's cube
-detector maps blocks on the table only, so it cannot verify a stacked block yet. Picks from the top
-of a stack are not supported. A third cube on two fits only where the hand can leave away from the
-fixed jaw toward the start position; a fourth never fits.
+detector maps blocks on the table only, so it cannot verify a stacked block yet. With the hand down
+the arm reaches about 9 cm high, so off a stack it picks only the top block of two. A third cube on
+two fits only where the hand can leave away from the fixed jaw toward the start position; a fourth
+never fits. A block that slid down in the grip by more than those 3 mm is pressed onto its target by
+the rest. A dropped block that lands high on another block, such as a cube on a cube, is not picked
+again: recovery waits for a person.
 
 See [pick_place settings](soarm_lab/strategies/pick_place.py) for the full interface.
 
