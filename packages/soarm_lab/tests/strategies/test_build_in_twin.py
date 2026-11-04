@@ -592,11 +592,12 @@ def bridge_layout(seed: int) -> tuple[list[Placed], str, float]:
     placed = [Placed("blue", blue, float(rng.uniform(0.0, 90.0)))]
     away = 1.0 if side == "left" else -1.0
     goal = [(blue[0], blue[1] + away * (2 * HALF + gap)), (blue[0], blue[1] + away * (2 * HALF + gap) / 2)]
-    for name, kind in (("green", "cube"), ("yellow", "cuboid")):
+    # The cuboid is longer, so it keeps further from where green and the bridge go [m].
+    for name, kind, away_m in (("green", "cube", 0.06), ("yellow", "cuboid", 0.08)):
         for _ in range(100_000):
             xy = polar(rng.uniform(0.16, 0.24), rng.uniform(-0.7, 0.7))
             clear = all(math.dist(xy, p.xy) >= 0.07 for p in placed)
-            if clear and all(math.dist(xy, g) >= 0.06 for g in goal):
+            if clear and all(math.dist(xy, g) >= away_m for g in goal):
                 break
         else:
             raise AssertionError(f"seed {seed}: no free spot")
