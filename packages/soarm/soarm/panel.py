@@ -13,7 +13,7 @@ import math
 import threading
 import time
 import webbrowser
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -355,6 +355,31 @@ def _arg(body: dict[str, Any], key: str, kind: type) -> Any:
     raise PanelError(f"Bad field `{key}`: {value!r} (expected {kind.__name__}).")
 
 
+def feetech_settings(config: Path | None, baudrate: int | None) -> dict[str, Any]:
+    """The `feetech:` section of a twin config file (empty without a file), with `--baudrate` over its own.
+
+    The backend checks the section, so the panel and `soarm-zero` run the arm with the twin's settings,
+    the servo gains among them. Raises ValueError for a file that is not a YAML mapping.
+    """
+    settings: dict[str, Any] = {}
+    if config is not None:
+        try:
+            import yaml
+        except ImportError as exc:  # pragma: no cover - depends on the environment
+            raise RuntimeError('--config needs pyyaml:  pip install "soarm[panel]"') from exc
+        try:
+            data = yaml.safe_load(Path(config).read_text(encoding="utf-8")) or {}
+        except yaml.YAMLError as exc:
+            raise ValueError(f"{config}: not valid YAML: {exc}") from exc
+        section = data.get("feetech") if isinstance(data, Mapping) else None
+        if not isinstance(data, Mapping) or not isinstance(section, (Mapping, type(None))):
+            raise ValueError(f"{config}: expected a YAML mapping with a `feetech:` mapping")
+        settings = dict(section or {})
+    if baudrate is not None:
+        settings["baudrate"] = baudrate
+    return settings
+
+
 def detect_port(ports: Iterable[Any]) -> str:
     """The one USB-serial device among `ports` (from `serial.tools.list_ports.comports()`).
 
@@ -374,7 +399,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", default=None,
                         help="the arm's serial port, e.g. COM5, /dev/ttyACM0 or socket://host:5555 "
                              "(default: the one USB-serial device)")
-    parser.add_argument("--baudrate", type=int, default=1_000_000, help="baud rate (default 1 Mbaud)")
+    parser.add_argument("--baudrate", type=int, default=None,
+                        help="baud rate (default: the config's, else 1 Mbaud)")
+    parser.add_argument("--config", type=Path, default=None,
+                        help="a twin config file whose `feetech:` section the arm uses (servo gains, ...)")
     parser.add_argument("--listen", default="127.0.0.1:8765",
                         help="where to listen; default `127.0.0.1:8765`, this machine only")
     parser.add_argument("--robot", type=Path, default=ROBOT_DIR,
@@ -401,11 +429,11 @@ def main(argv: list[str] | None = None) -> int:
 
             port = detect_port(comports())
             logger.info("Port: %s", port)
-        arm = FeetechArm(description.context(port, {"baudrate": args.baudrate}))
+        arm = FeetechArm(description.context(port, feetech_settings(args.config, args.baudrate)))
         arm.connect()
         controller = PanelController(arm, description)
         server = PanelServer((host, tcp_port), controller)
-    except (RuntimeError, ValueError, OSError) as exc:
+    except (RuntimeError, ValueError, TypeError, OSError) as exc:
         logger.error("The panel did not start: %s", exc)
         return 2
 

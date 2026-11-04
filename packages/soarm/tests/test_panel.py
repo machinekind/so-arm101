@@ -23,6 +23,7 @@ from soarm.panel import (
     RobotDescription,
     build_parser,
     detect_port,
+    feetech_settings,
 )
 
 DT = 0.05
@@ -216,9 +217,31 @@ def test_cli_defaults():
     args = build_parser().parse_args([])
     assert args.port is None
     assert args.listen == "127.0.0.1:8765"
-    assert args.baudrate == 1_000_000
+    assert args.baudrate is None and args.config is None   # the backend's 1 Mbaud, no config file
     assert args.robot == soarm.ROBOT_DIR
     assert not args.no_browser
+
+
+def test_config_gives_the_panel_the_twin_settings_of_the_arm(tmp_path, link):
+    """`--config` reads the `feetech:` section of the twin's config file; `--baudrate` goes over it."""
+    config = tmp_path / "twin.yaml"
+    config.write_text("robot: {backend: feetech}\n"
+                      "feetech:\n  baudrate: 500000\n  p_gain: {shoulder_lift: 40}\n", encoding="utf-8")
+    assert feetech_settings(config, None) == {"baudrate": 500_000, "p_gain": {"shoulder_lift": 40}}
+    assert feetech_settings(config, 1_000_000)["baudrate"] == 1_000_000
+    assert feetech_settings(None, None) == {}
+    assert feetech_settings(None, 115_200) == {"baudrate": 115_200}
+
+    connect(link, DESCRIPTION.context("COM_TEST", feetech_settings(config, None)))
+    assert link.registers[2][feetech.ADDR_P_GAIN] == 40
+
+    other = tmp_path / "other.yaml"
+    other.write_text("robot: {backend: sim}\n", encoding="utf-8")
+    assert feetech_settings(other, None) == {}
+    for text in ("- a list\n", "feetech: 5\n", "feetech: [\n"):
+        other.write_text(text, encoding="utf-8")
+        with pytest.raises(ValueError, match="other.yaml"):
+            feetech_settings(other, None)
 
 
 class _Port:
