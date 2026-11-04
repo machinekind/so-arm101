@@ -86,6 +86,7 @@ from .touch import (
     DESCEND,
     HOLD_WAIT_S,
     MIN_TOUCH_Z,
+    PHASE_NAMES,
     SPEED_SHARE,
     WAIT,
     TouchSettings,
@@ -163,6 +164,11 @@ RETARGET = "retarget"
 REOPEN = "reopen"
 #: A rise target: straddle again at a corrected aim with the jaw kept open (`_start_rise`).
 RESTRADDLE = "restraddle"
+#: The phases' names in the panel's notes.
+GRASP_PHASE_NAMES = {**PHASE_NAMES, RISE: "w gore znad bloku", OPEN: "nad blok", STRADDLE: "w dol na blok",
+                     STRADDLED: "szczeka na bloku", CLOSE: "zamykam szczeke", LIFT_OFF: "podnosze blok",
+                     CHECK: "trzymam blok", CARRY: "niose blok", RECOVER: "blok wypadl",
+                     RELEASE: "oddaje blok", REOPEN: "otwieram szczeke"}
 
 #: Consecutive empty readings required to declare a drop. Ignore an isolated bad reading.
 EMPTY_TICKS = 2
@@ -356,6 +362,7 @@ class GraspStrategy(TouchStrategy):
     """Grasps and lifts a block from above; the jaw rule checks the hold on the way up."""
 
     settings = GraspSettings
+    phase_names = GRASP_PHASE_NAMES
 
     def __init__(self, settings: GraspSettings | None = None):
         config = settings if settings is not None else GraspSettings()
@@ -1010,7 +1017,7 @@ class GraspStrategy(TouchStrategy):
         self._ramp_jaw()
         if self._rot is not None and not self._vertical():
             # Finish turning at the hover within `JAW_WAIT_S`.
-            if self._arrived(self.hover_point):
+            if self._arrived(self.hover_point, sag=True):
                 if not np.isfinite(self._turn_t0):
                     self._turn_t0 = self._t
                 elif self._t - self._turn_t0 >= JAW_WAIT_S:
@@ -1019,7 +1026,7 @@ class GraspStrategy(TouchStrategy):
             return self._drive(self.hover_point, self.approach_step_m)
         self._turn_t0 = float("nan")
         # Keep this check here so `_settled` counts only once per tick.
-        if self._settled(self.hover_point):
+        if self._settled(self.hover_point, sag=True):
             if not self.grasp_settings.probe:
                 self.status.attempt += 1
                 # OPEN times its travel to the straddle hover from here.
@@ -1031,9 +1038,7 @@ class GraspStrategy(TouchStrategy):
                     return self._halt(f"szczeka nie zamknela sie przed zejsciem w {JAW_WAIT_S:.0f} s",
                                       self.kin.from_q(self.q_cmd))
                 return self.hold()
-            # Use the settled hover offset as the descent's contact reference.
-            self._bias_z = self._offset_z
-            self._hover_z = float(self._tcp_measured[2])
+            self._take_reference()
             self.status.attempt += 1
             self._enter(DESCEND)
             return None
@@ -1054,7 +1059,7 @@ class GraspStrategy(TouchStrategy):
             self._before_descent_pending = False
             if self._descent_waited:
                 # Refresh the descent reference after the hook held or moved the arm.
-                self._bias_z, self._hover_z = self._offset_z, float(self._tcp_measured[2])
+                self._take_reference()
                 self._settle_count = 0
         return super()._descend(obs)
 
@@ -1127,7 +1132,7 @@ class GraspStrategy(TouchStrategy):
             if not self._arrived(self._rise_ease):
                 return self._drive(self._rise_ease, self.descend_step_m)
             self._rise_ease = None
-        arrived = self._arrived(self._rise_point)
+        arrived = self._arrived(self._rise_point, sag=True)
         # Clear the block before closing so the moving tip cannot sweep across its top.
         # Recovery opens the jaw immediately.
         clear = self._tcp_measured[2] >= self._rise_z0 + CLEAR_BEFORE_CLOSE_M
@@ -1152,7 +1157,7 @@ class GraspStrategy(TouchStrategy):
         self._set_jaw_goal(self.cmd_open)
         self._ramp_jaw()
         reading = self.reading
-        settled = self._settled(self.straddle_hover)
+        settled = self._settled(self.straddle_hover, sag=True)
         jaw_open = abs(reading.q - float(self.q_cmd[self._g])) <= self.kin.spec.jaw.margin
         vertical = self._vertical()
         ready = settled and self._jaw_ready() and jaw_open and vertical
@@ -1163,7 +1168,7 @@ class GraspStrategy(TouchStrategy):
             self._before_straddle_pending = False
         if ready:
             # Refresh the stall reference after moving the TCP and opening the jaw.
-            self._bias_z, self._hover_z = self._offset_z, float(self._tcp_measured[2])
+            self._take_reference()
             self._enter(STRADDLE)
             return None
         travel = float(np.linalg.norm(self.straddle_hover - self._rise_point)) / self.config.speed_mps
@@ -1193,7 +1198,7 @@ class GraspStrategy(TouchStrategy):
 
     def _straddle(self, obs: Observation) -> Action | None:
         st = self.status
-        st.rise_m = self._offset_z - self._bias_z
+        st.rise_m = self._contact_rise()
         if st.rise_m > self.config.contact_gap_m:
             return self._straddle_stall()
         if self._settled(self.grasp_target):
@@ -1312,7 +1317,7 @@ class GraspStrategy(TouchStrategy):
         action = self.carrying(obs, self.reading)
         if action is not None:
             return action
-        if self._arrived(self._lift_off_point):
+        if self._arrived(self._lift_off_point, sag=True):
             self.grasp.hold_ticks = 0
             self._enter(CHECK)
             return None
@@ -1647,13 +1652,18 @@ class GraspStrategy(TouchStrategy):
         return abs(float(self.q_cmd[self._g]) - self._jaw_goal_q) <= 1e-9 and self._jaw_on_command
 
     # ------------------------------------------------------------------ the panel
+    def _phase_name(self) -> str:
+        if self.status.phase == RISE:
+            rise = {OPEN: "w gore po dotyku", RECOVER: "blok wypadl ze szczeki - w gore",
+                    RESTRADDLE: "w gore, poprawiam chwyt"}
+            return rise.get(self._rise_then, "w gore znad bloku")
+        return super()._phase_name()
+
     def _note(self) -> str:
         st, grasp = self.status, self.grasp
         mm = st.distance * 1000
         if st.phase == RISE:
-            rise = {OPEN: "w gore po dotyku", RECOVER: "blok wypadl ze szczeki - w gore",
-                    RESTRADDLE: "w gore, poprawiam chwyt"}
-            text = rise.get(self._rise_then, "w gore znad bloku") + f": {mm:.0f} mm"
+            text = self._phase_name() + f": {mm:.0f} mm"
         elif st.phase == REOPEN:
             text = "chwyt za krawedz - otwieram szczeke"
         elif st.phase == APPROACH:

@@ -8,6 +8,7 @@ tracker's poses around a drop. Twin integration and camera tests cover physics a
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 
@@ -609,6 +610,51 @@ def test_after_a_straddle_stall_the_jaw_closes_only_once_the_tips_are_clear():
     assert answers[stall].target["gripper"] == pytest.approx(s.cmd_open)
 
 
+@dataclass
+class Shelf(Block):
+    """A block under a shelf: once `shelf_z` is set, the TCP cannot go above it [m]."""
+
+    shelf_z: float = math.inf
+
+    def stalls(self, joints: Mapping[str, float]) -> bool:
+        return super().stalls(joints) or float(KIN.tcp(joints)[2, 3]) > self.shelf_z
+
+
+def under_a_shelf(below_hover_m: float) -> tuple[GraspStrategy, list[Action], list[str]]:
+    """A tip lands on the block, and the rise from there stops `below_hover_m` under the hover height."""
+    pose = seen(offset(XY, -0.010))
+    s = started(pose)
+    shelf = Shelf(np.array(XY, float), CUBE)
+    hover_z = s.config.touch_z + s.config.hover_m
+    on_phase = {"rise": lambda t: setattr(shelf, "shelf_z", hover_z - below_hover_m),
+                "approach": lambda t: setattr(shelf, "shelf_z", math.inf)}
+    answers, phases, *_ = follow(s, dict(SPEC.home), pose, 3000, block=shelf, on_phase=on_phase)
+    return s, answers, phases
+
+
+def test_a_rise_that_stops_short_straight_below_its_point_goes_on():
+    s, answers, phases = under_a_shelf(0.012)
+
+    assert answers[-1].success and s.grasp.verdict == "lifted", answers[-1].note
+    assert s.status.attempt == 2 and s.grasp.straddle_stalls == 1
+    assert contains(runs(phases), ["straddled", "rise", "approach", "open", "straddle", "close", "lift_off"])
+    assert phases.count("rise") / s.hz < s.config.stall_s
+    assert not any("ramie stoi" in a.note for a in answers)
+
+
+def test_a_rise_that_stops_beyond_sag_m_ends_and_names_the_joints_that_lag():
+    s, answers, phases = under_a_shelf(0.028)
+
+    assert answers[-1].done and not answers[-1].success and phases[-2] == "rise"
+    note = answers[-1].note
+    found = re.fullmatch(r"w gore znad bloku: ramie stoi (\d+) mm pod celem \((.+) za malo\) - koniec", note)
+    assert found, note
+    assert int(found[1]) >= 25 and ("shoulder_lift" in found[2] or "elbow_flex" in found[2])
+    assert s.status.stopped_because == note
+    # It ends `stall_s` after the arm stopped, not at the run's time limit.
+    assert s.config.stall_s <= phases.count("rise") / s.hz <= s.config.stall_s + 0.6
+
+
 class Aims(GraspStrategy):
     """Records every block centre the run aims at."""
 
@@ -736,10 +782,11 @@ def test_a_block_the_arm_cannot_lift_ends_the_run_with_the_squeeze_kept():
 
     assert phases[-2] == "lift_off" and answers[-1].done and not answers[-1].success
     note = answers[-1].note
-    assert note.startswith("ramie nie podnioslo bloku (") and note.endswith(" mm z 40 mm)"), note
+    assert re.fullmatch(r"podnosze blok: ramie stoi 30 mm pod celem \(.+ za malo\) - koniec", note), note
+    assert "shoulder_lift" in note and "elbow_flex" in note
     assert s.grasp.lifted_m == pytest.approx(0.010, abs=0.002)
-    # The timeout includes planned travel and time for the arm to follow.
-    assert phases.count("lift_off") / s.hz == pytest.approx(0.04 / 0.10 + 3.0, abs=0.06)
+    # The arm stopped early in the lift: the run ends `stall_s` later, before the lift's own time limit.
+    assert s.config.stall_s <= phases.count("lift_off") / s.hz < 0.04 / 0.10 + 3.0
     assert answers[-1].target["gripper"] == pytest.approx(s.cmd_closed)
     assert s.grasp.verdict == "held" and block.gripped
     assert joints["gripper"] == pytest.approx(CUBE_UNITS, abs=0.1)

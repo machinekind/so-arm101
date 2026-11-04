@@ -359,6 +359,88 @@ def test_a_lagging_servo_coming_up_to_the_hover_is_not_a_block():
     assert answers[-1].success and answers[-1].note.startswith("obiekt dotkniety")
 
 
+def lifting_off(s: TouchStrategy, joints: dict[str, float], objects: dict[str, ObjectPose], ticks: int,
+                offset: tuple[float, float, float],
+                last: list[tuple[dict[str, float], dict[str, float]]] | None = None,
+                ) -> tuple[list[Action], list[str]]:
+    """Ticks of an arm whose TCP settles `offset` [m] from the command during the lift, and on it after.
+
+    `last` gets the measured joints and the command of the last tick."""
+    answers, phases = [], []
+    command = dict(joints)
+    for k in range(ticks):
+        if last is not None:
+            last[:] = [(joints, command)]
+        answers.append(a := s.act(obs(joints, t=k / s.hz, objects=objects, command=command)))
+        phases.append(s.status.phase)
+        command = supervised(command, a.target, None)
+        if s.status.phase == "lift":
+            point = tcp(s, command) + np.asarray(offset, float)
+            joints = dict(s.kin.ik_step(point, seed=command, tol=1e-5).joints, gripper=command[SPEC.gripper])
+        else:
+            joints = dict(command)
+        if a.done:
+            break
+    return answers, phases
+
+
+#: Below the hover at the object's x and y, so the run starts with a lift.
+BELOW = (0.2, 0.0, 0.04)
+
+
+@pytest.mark.parametrize("offset", [(0.0, 0.0, -0.015), (-0.009, 0.0, -0.012)],
+                         ids=["straight below", "below and toward the base"])
+def test_a_lift_that_settles_short_below_its_point_counts_as_there(offset):
+    s = started(seen(BELOW[:2]), joints=pose_at(BELOW))
+    answers, phases = lifting_off(s, pose_at(BELOW), seen(BELOW[:2]), 600, offset)
+
+    assert runs(phases)[:3] == ["lift", "approach", "descend"]
+    assert answers[-1].note == "brak kontaktu w punkcie dotyku - obiektu tam nie ma"
+    # The sag counts once the arm has stood still for the settle time, well before `stall_s`.
+    assert phases.count("lift") / s.hz < s.config.stall_s
+
+
+@pytest.mark.parametrize("offset, where, settings", [
+    ((0.0, 0.0, -0.025), "25 mm pod celem", {}),             # beyond sag_m
+    ((0.0, 0.0, -0.015), "15 mm pod celem", {"sag_m": 0.0}),  # sag turned off
+    ((-0.015, 0.0, 0.0), "15 mm od celu", {}),               # beside the point
+    ((-0.014, 0.0, -0.0054), "15 mm od celu", {}),           # mostly beside it
+    ((0.0, 0.0, 0.015), "15 mm nad celem", {}),              # above it
+], ids=["beyond sag_m", "sag_m 0", "beside", "mostly beside", "above"])
+def test_a_lift_that_stands_still_off_its_point_otherwise_ends_after_stall_s(offset, where: str, settings):
+    s = started(seen(BELOW[:2]), joints=pose_at(BELOW), **settings)
+    answers, phases = lifting_off(s, pose_at(BELOW), seen(BELOW[:2]), 600, offset)
+
+    assert runs(phases) == ["lift", "done"] and answers[-1].done and not answers[-1].success
+    note = answers[-1].note
+    assert note.startswith(f"w gore przed nowym celem: ramie stoi {where} (") and note.endswith(") - koniec")
+    assert " st." in note and s.status.stopped_because == note
+    # Half a second of lift, then `stall_s` of an arm that stands still.
+    assert s.config.stall_s <= len(phases) / s.hz <= s.config.stall_s + 0.7
+
+
+def test_the_stall_note_names_the_joints_short_of_their_command_and_by_how_much():
+    s = started(seen(BELOW[:2]), joints=pose_at(BELOW))
+    last: list[tuple[dict[str, float], dict[str, float]]] = []
+    answers, _ = lifting_off(s, pose_at(BELOW), seen(BELOW[:2]), 600, (0.0, 0.0, -0.025), last)
+    note = answers[-1].note
+    measured, command = last[0]
+    lags = {name: abs(measured[name] - command[name]) for name in SPEC.arm_joints}
+
+    named = [name for name in SPEC.arm_joints if name in note]
+    assert named and all(lags[name] >= 0.5 for name in named)
+    assert all(name in note for name, lag in lags.items() if lag >= 0.5)
+    for name in named:
+        assert f"{name} {lags[name]:.1f} st." in note
+
+
+@pytest.mark.parametrize("settings, match", [({"sag_m": -0.01}, "touch: sag_m must be zero or more"),
+                                             ({"stall_s": 0.1}, "touch: stall_s must be at least 0.25 s")])
+def test_the_sag_and_stall_settings_are_checked(settings: dict, match: str):
+    with pytest.raises(ValueError, match=match):
+        TouchStrategy(TouchSettings(**settings))
+
+
 def test_a_stall_above_the_contact_band_is_a_block():
     s = started(seen())
     top = s.config.touch_z + 0.05

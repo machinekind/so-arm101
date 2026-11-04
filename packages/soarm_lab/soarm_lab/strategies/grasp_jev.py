@@ -43,6 +43,7 @@ from machinekind_twin_api.strategy import Action, Frame, Observation, RunInfo
 from .grasp import (
     CARRY,
     CHECK,
+    GRASP_PHASE_NAMES,
     JAW_WAIT_S,
     LIFT_OFF,
     OPEN,
@@ -96,6 +97,9 @@ FRAME_MAX_AGE_S = 1.0
 JUDGE = "judge"
 LOWER = "lower"
 LET_GO = "let_go"
+#: The phases' names in the panel's notes.
+JEV_PHASE_NAMES = {**GRASP_PHASE_NAMES, JUDGE: "ocena chwytu", LOWER: "odkladam blok na stol",
+                   LET_GO: "puszczam blok"}
 
 #: Decision points stored in each record's `state.point`.
 POINT_PROBE = "probe"
@@ -427,6 +431,7 @@ class GraspJevStrategy(GraspStrategy):
     """Grasps a block as `grasp` does; Jev judges each close and lift and picks the next step."""
 
     settings = GraspJevSettings
+    phase_names = JEV_PHASE_NAMES
     #: Refuse an empty `wrist_camera`. Subclasses with an optional camera turn this off.
     camera_required = True
 
@@ -854,7 +859,7 @@ class GraspJevStrategy(GraspStrategy):
             if not self._arrived(self._ease_point):
                 return self._drive(self._ease_point, self.descend_step_m)
             self._eased = True
-        if self._arrived(self._release_point):
+        if self._arrived(self._release_point, sag=True):
             return self._after_let_go()
         return self._drive(self._release_point, self.approach_step_m)
 

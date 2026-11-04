@@ -846,7 +846,7 @@ class WristGraspStrategy(GraspStrategy):
         if self._look is None:
             self._look = self._new_look("probe")
         # Grasp resumes descent only after this hook returns None.
-        settled = self._settled(self.hover_point)
+        settled = self._settled(self.hover_point, sag=True)
         return self._look_step(obs, lambda: self.hover_point, settled)
 
     def before_straddle(self, obs: Observation, settled: bool) -> Action | None:
