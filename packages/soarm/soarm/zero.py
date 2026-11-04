@@ -4,6 +4,7 @@
     uv run soarm-zero --port /dev/ttyACM0 --port /dev/ttyACM1   # several arms, one after the other
     uv run soarm-zero --home                           # robot.yaml's `home` instead of the zero pose
     uv run soarm-zero --off                            # ... then switch torque off (support the arm!)
+    uv run soarm-zero --config twin.yaml               # with the twin config's `feetech:` section
 
 The zero pose is every joint at 0 degrees and the gripper at its zero tick (2048): LeRobot's middle
 pose, upper arm vertical, forearm forward, wrist straight. Torque is enabled where the arm stands
@@ -22,7 +23,7 @@ from pathlib import Path
 
 from . import ROBOT_DIR
 from .feetech import ADDR_TORQUE_ENABLE, FeetechArm
-from .panel import RobotDescription
+from .panel import RobotDescription, feetech_settings
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +36,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="soarm-zero", description=__doc__.split("\n\n")[0])
     parser.add_argument("--port", action="append", default=[],
                         help="serial port, repeatable (default: the one USB-serial device)")
-    parser.add_argument("--baudrate", type=int, default=1_000_000)
+    parser.add_argument("--baudrate", type=int, default=None, help="default: the config's, else 1 Mbaud")
+    parser.add_argument("--config", type=Path, default=None,
+                        help="a twin config file whose `feetech:` section the arm uses (servo gains, ...)")
     parser.add_argument("--robot", type=Path, default=ROBOT_DIR, help="the folder with robot.yaml")
     parser.add_argument("--home", action="store_true",
                         help="go to robot.yaml's `home` instead of the zero pose")
@@ -71,8 +74,9 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.WARNING, format="%(levelname)-7s %(message)s")
     description = RobotDescription.load(args.robot)
     ports = args.port or [detect_port()]
+    settings = feetech_settings(args.config, args.baudrate)
     for port in ports:
-        arm = FeetechArm(description.context(port, {"baudrate": args.baudrate}))
+        arm = FeetechArm(description.context(port, settings))
         arm.connect()
         try:
             target = {j: 0.0 for j in description.joints}

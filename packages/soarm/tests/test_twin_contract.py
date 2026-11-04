@@ -25,7 +25,7 @@ from machinekind_twin_api.entry_points import BACKENDS  # noqa: E402
 
 import soarm  # noqa: E402
 from fake_bus import FakeBusLink  # noqa: E402
-from soarm.feetech import ADDR_GOAL_POSITION, ADDR_TORQUE_ENABLE, FeetechArm  # noqa: E402
+from soarm.feetech import ADDR_GOAL_POSITION, ADDR_P_GAIN, ADDR_TORQUE_ENABLE, FeetechArm  # noqa: E402
 from soarm.lerobot_backend import LeRobotArm  # noqa: E402
 
 
@@ -117,6 +117,26 @@ def test_the_backend_section_of_the_twin_config_reaches_the_backend(spec, soarm_
     assert arm.settings.baudrate == 500_000
     with pytest.raises(ValueError, match="baud"):
         create_backend(config(spec, "feetech", feetech={"baud": 500_000}), spec)
+
+
+def test_the_servo_gains_in_the_twin_config_reach_the_servos(spec, soarm_backends) -> None:
+    section = {"p_gain": {"shoulder_lift": 40, "elbow_flex": 40, "wrist_flex": 40}}
+    arm = create_backend(config(spec, "feetech", feetech=section), spec)
+    link = FakeBusLink()
+    arm.bus.open(link=link)
+    arm.connect()
+    arm.disconnect()
+    assert [link.registers[dev_id][ADDR_P_GAIN] for dev_id in range(1, 7)] == [16, 40, 40, 40, 16, 16]
+
+    watched = open_read_only(config(spec, "feetech", feetech=section), spec, "feetech", "COM_TEST")
+    link = FakeBusLink()
+    watched._plugin.bus.open(link=link)
+    watched.connect()
+    watched.disconnect()
+    assert not link.ops("write") and link.registers[2][ADDR_P_GAIN] == 16
+
+    with pytest.raises(ValueError, match="nieznany staw 'elbow'"):
+        create_backend(config(spec, "feetech", feetech={"p_gain": {"elbow": 40}}), spec)
 
 
 def test_the_twin_builds_the_lerobot_backend_as_it_is(spec, soarm_backends) -> None:

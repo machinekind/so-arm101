@@ -7,9 +7,12 @@ servos do and logs every operation. test_feetech.py and test_twin_contract.py us
 from __future__ import annotations
 
 from soarm.feetech import (
+    ADDR_D_GAIN,
     ADDR_GOAL_POSITION,
+    ADDR_I_GAIN,
     ADDR_MAX_ANGLE_LIMIT,
     ADDR_MIN_ANGLE_LIMIT,
+    ADDR_P_GAIN,
     ADDR_PRESENT_POSITION,
     ADDR_PRESENT_VOLTAGE,
     ADDR_TORQUE_ENABLE,
@@ -23,6 +26,8 @@ from soarm.feetech import (
 )
 
 REST_TICKS = 2048
+#: The position-loop gains LeRobot leaves in the servos: P, D, I.
+LEROBOT_GAINS = (16, 32, 0)
 
 
 class FakeBusLink:
@@ -40,6 +45,9 @@ class FakeBusLink:
                 ADDR_PRESENT_VOLTAGE: 119,
                 ADDR_MIN_ANGLE_LIMIT: 0,
                 ADDR_MAX_ANGLE_LIMIT: 4095,
+                ADDR_P_GAIN: LEROBOT_GAINS[0],
+                ADDR_D_GAIN: LEROBOT_GAINS[1],
+                ADDR_I_GAIN: LEROBOT_GAINS[2],
             }
             for dev_id in ids
         }
@@ -99,8 +107,7 @@ class FakeBusLink:
         elif instruction == INST_READ:
             addr, size = params[0], params[1]
             self.log.append(("read", dev_id, addr, None))
-            value = self.registers[dev_id].get(addr, 0)
-            self._reply(dev_id, value.to_bytes(size, "little"))
+            self._reply(dev_id, self._memory(dev_id, addr, size))
         elif instruction == INST_WRITE:
             addr, value = params[0], int.from_bytes(params[1:], "little")
             self.registers[dev_id][addr] = value
@@ -113,7 +120,7 @@ class FakeBusLink:
             if self.knows_sync_read:
                 for target in params[2:]:
                     if target in self.registers:
-                        self._reply(target, self.registers[target].get(addr, 0).to_bytes(size, "little"))
+                        self._reply(target, self._memory(target, addr, size))
         elif instruction == INST_SYNC_WRITE:
             assert dev_id == BROADCAST_ID, "sync write musi isc rozgloszeniowo"
             addr, size = params[0], params[1]
@@ -127,6 +134,13 @@ class FakeBusLink:
         else:  # pragma: no cover - the backend uses no other instructions
             raise AssertionError(f"nieznana instrukcja 0x{instruction:02X}")
         return len(data)
+
+    def _memory(self, dev_id: int, addr: int, size: int) -> bytes:
+        """`size` bytes from `addr`: one register, or one-byte registers side by side (the gains)."""
+        registers = self.registers[dev_id]
+        if size > 1 and addr + 1 in registers:
+            return bytes(registers.get(addr + k, 0) for k in range(size))
+        return registers.get(addr, 0).to_bytes(size, "little")
 
     def _reply(self, dev_id: int, payload: bytes) -> None:
         if self.silent or dev_id in self.mute:
