@@ -55,6 +55,10 @@ grasp_jev = "soarm_lab.strategies.grasp_jev:GraspJevStrategy"
 grasp_wrist = "soarm_lab.strategies.wrist:WristGraspStrategy"
 pick_place = "soarm_lab.strategies.pick_place:PickPlaceStrategy"
 build = "soarm_lab.strategies.build:BuildStrategy"
+calibrate_approach = "soarm_lab.strategies.calibrate_approach:CalibrateApproachStrategy"
+
+[project.entry-points."machinekind_twin.detectors"]
+charuco = "soarm_lab.detectors.charuco:CharucoDetector"
 
 [project.scripts]
 soarm-lab = "soarm_lab.cli:main"
