@@ -13,6 +13,8 @@
     soarm-lab grasps convert cube workspace/grasps/raw/cube.yml
     soarm-lab grasps show cube
     soarm-lab campaign report workspace/campaign/<run> --out report.md
+    soarm-lab charuco-board --out board.png
+    soarm-lab approach-table ~/stands/desk/approach.json
 
 `station` for training and `--station` for evaluation select an exported station folder
 or a bundled station name. The default is `sim`.
@@ -22,6 +24,9 @@ Evaluation and policy listing use NumPy.
 `grasps` writes block meshes and converts or lists libraries. GraspGenX runs separately.
 See tools/graspgenx/README.md.
 `campaign report` summarises the JSON files of a seeded simulation campaign (jobs/overnight.sh).
+`charuco-board` draws the approach calibration's board for printing (OpenCV). `approach-table` summarises a
+table that `calibrate_approach` wrote: its samples, spreads, self-check and wrist camera, with a suggested
+`focal_px` and tip pixel for `grasp_wrist`.
 """
 
 from __future__ import annotations
@@ -291,6 +296,67 @@ def _campaign_parser(sub) -> None:
     q.set_defaults(fn=_campaign_report)
 
 
+def _charuco_board(a: argparse.Namespace) -> int:
+    import importlib
+
+    import numpy as np
+
+    from .charuco import BoardSpec
+
+    try:
+        cv2 = importlib.import_module("cv2")
+    except ImportError:
+        raise SystemExit("charuco-board needs OpenCV with the aruco module: pip install opencv-contrib-python") \
+            from None
+    spec = BoardSpec(a.squares_x, a.squares_y, a.square_mm / 1000.0, a.marker_mm / 1000.0, a.dictionary)
+    spec.check()
+    px_per_m = a.dpi / 0.0254
+    sheet_w, sheet_h = (int(round(s * px_per_m)) for s in (0.210, 0.297))
+    board = spec.image(cv2, px_per_m)
+    h, w = board.shape[:2]
+    if w > sheet_w or h > sheet_h:
+        raise SystemExit(f"a {spec.size_m[0] * 1000:.0f} x {spec.size_m[1] * 1000:.0f} mm board does not fit an "
+                         "A4 sheet")
+    sheet = np.full((sheet_h, sheet_w), 255, np.uint8)
+    y0, x0 = (sheet_h - h) // 2, (sheet_w - w) // 2
+    sheet[y0:y0 + h, x0:x0 + w] = board
+    text = (f"ChArUco {spec.squares_x}x{spec.squares_y}, square {a.square_mm:.1f} mm, marker {a.marker_mm:.1f} mm, "
+            f"{spec.dictionary}: print at 100%, then measure a square and a marker")
+    cv2.putText(sheet, text, (x0 // 2, max(40, y0 // 2)), cv2.FONT_HERSHEY_SIMPLEX, a.dpi / 600.0, 0,
+                max(1, a.dpi // 150))
+    out = Path(a.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if not cv2.imwrite(str(out), sheet):
+        raise SystemExit(f"could not write {out}")
+    print(f"{out}: A4 at {a.dpi} dpi, board {spec.size_m[0] * 1000:.0f} x {spec.size_m[1] * 1000:.0f} mm, "
+          f"{spec.n_corners} inner corners")
+    return 0
+
+
+def _approach_table(a: argparse.Namespace) -> int:
+    from .approach_table import ApproachTable, summary
+
+    print(summary(ApproachTable.load(a.file)))
+    return 0
+
+
+def _calibration_parsers(sub) -> None:
+    """Build the `charuco-board` and `approach-table` command parsers."""
+    p = sub.add_parser("charuco-board", help="the approach calibration's ChArUco board as an A4 image to print")
+    p.add_argument("--out", required=True, help="the image file to write, e.g. board.png")
+    p.add_argument("--dpi", type=int, default=300, help="the sheet's resolution (default 300)")
+    p.add_argument("--squares-x", type=int, default=3, help="squares along the short side (default 3)")
+    p.add_argument("--squares-y", type=int, default=5, help="squares along the long side (default 5)")
+    p.add_argument("--square-mm", type=float, default=45.0, help="a square's side [mm] (default 45)")
+    p.add_argument("--marker-mm", type=float, default=35.0, help="a marker's side [mm] (default 35)")
+    p.add_argument("--dictionary", default="DICT_6X6_250", help="the ArUco dictionary (default DICT_6X6_250)")
+    p.set_defaults(fn=_charuco_board)
+
+    p = sub.add_parser("approach-table", help="a summary of an approach table from calibrate_approach")
+    p.add_argument("file", help="the table's JSON file")
+    p.set_defaults(fn=_approach_table)
+
+
 def main(argv: list[str] | None = None) -> int:
     import sys
 
@@ -332,6 +398,7 @@ def parser() -> argparse.ArgumentParser:
     _dream_parser(sub)
     _grasps_parser(sub)
     _campaign_parser(sub)
+    _calibration_parsers(sub)
     return ap
 
 
