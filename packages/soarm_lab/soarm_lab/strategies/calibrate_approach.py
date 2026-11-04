@@ -102,8 +102,9 @@ GRASP_DEPTH = 0.5
 OPEN_MARGIN_M = 0.008
 #: Pose sources a corner may come from.
 CORNER_SOURCES = ("kamery", "ostatnie widziane")
-#: The fewest corners a run needs.
+#: The fewest corners a run needs, and captures closer than this count as one sighting [s].
 MIN_CORNERS = 4
+SIGHTING_S = 0.02
 #: The board fit may miss its corners by this much [m, RMS] and its scale may be off by this share.
 FIT_MAX_RMS_M = 0.004
 FIT_MAX_SCALE = 0.03
@@ -557,8 +558,9 @@ class CalibrateApproachStrategy(TouchStrategy):
             position = np.asarray(pose.position, float)
             if position.shape != (3,) or not np.all(np.isfinite(position)):
                 continue
-            seen_at = round(float(obs.t) - float(pose.age_s), 3)
-            self._sightings.setdefault(k, {})[int(round(seen_at * 1000))] = position.copy()
+            # One capture is one sighting, however many ticks read it.
+            seen_at = int(round((float(obs.t) - float(pose.age_s)) / SIGHTING_S))
+            self._sightings.setdefault(k, {})[seen_at] = position.copy()
         if self._measure is True and self._size is None:
             frame = obs.frames.get(cfg.wrist_camera)
             if frame is not None:
