@@ -4,16 +4,19 @@
 the state the model reads, with the build area, and suggests free spots (`best_spot`). `placing`
 says from the arm model where a block can be set down at a given height. `schema` is the JSON Schema of
 the plan the model returns and `parse_plan`. `relations` turns a step's relation into the pose where the
-held block goes and checks afterwards that it holds. `prompt` builds the model's messages.
+held block goes and checks afterwards that it holds. `prompt` builds the model's messages. `steps` walks
+a plan through the world its steps meet: it checks the plan and works out what is left of a fixed one.
 """
 
 from .placing import HandDownReach, PlaceCheck, arm_reach
 from .prompt import PROMPT_VERSION, SYSTEM, StepRecord, build_prompt, system_text
 from .relations import DEFAULT_LIMITS, Limits, RelationError, TargetPose, holds, resolve
 from .schema import PLAN_SCHEMA, Place, Plan, PlanError, Step, parse_plan, plan_schema, schema_json
+from .steps import after_step, check_steps, describe, first_unmet, remaining
 from .world import Box, Reach, World, WorldObject, best_spot, world_state
 
 __all__ = ["DEFAULT_LIMITS", "PLAN_SCHEMA", "PROMPT_VERSION", "SYSTEM", "Box", "HandDownReach", "Limits",
            "Place", "PlaceCheck", "Plan", "PlanError", "Reach", "RelationError", "Step", "StepRecord",
-           "TargetPose", "World", "WorldObject", "arm_reach", "best_spot", "build_prompt", "holds",
-           "parse_plan", "plan_schema", "resolve", "schema_json", "system_text", "world_state"]
+           "TargetPose", "World", "WorldObject", "after_step", "arm_reach", "best_spot", "build_prompt",
+           "check_steps", "describe", "first_unmet", "holds", "parse_plan", "plan_schema", "remaining",
+           "resolve", "schema_json", "system_text", "world_state"]

@@ -436,6 +436,33 @@ def test_a_cube_out_of_straight_down_reach_goes_on_its_stack_with_the_hand_tilte
     assert all(c < 0.5 for c in contact(twin, "red"))
 
 
+def test_a_tilted_pick_closes_on_the_cube_without_pressing_it_into_the_table(twin):
+    """The hand tilts for a place on a two-cube stack. The jaw closes on the picked cube slowly enough that
+    the cube never sinks below its rest height, from the straddle through the lift."""
+    half = block("cube").half_size[2]
+    add_blocks(twin, Placed("red", "cube", (0.178, 0.041), 63.0, RED),
+               Placed("base", "cube", (0.196, -0.033), 16.0, BLUE),
+               Placed("blue", "cube", (0.2, 0.11), 9.0, BLUE))
+    move(twin, "blue", (0.196, -0.033), 3 * half)
+    settle(twin)
+    clock = Clock()
+    strategy = built(label="red", place_on="blue")
+    runner = StrategyRunner(twin, strategy, objects=Cameras(twin, clock, ("red", "base", "blue"),
+                                                            nearest_grab=True))
+    lowest: list[float] = []
+
+    def watch() -> None:
+        if strategy.started and strategy.status.phase in ("straddle", "close", "lift_off"):
+            lowest.append(float(truth(twin, "red")[0][2]))
+
+    runner.start(threaded=False)
+    drive(twin, runner, 120.0, clock, watch=watch)
+
+    assert runner.status.stopped_because == "zadanie wykonane", (strategy.status, strategy.place)
+    assert strategy.place.outcome == "placed" and strategy.grasp.tilt_deg > 0.0
+    assert lowest and min(lowest) > half - 0.0007, min(lowest)
+
+
 @pytest.mark.render
 @pytest.mark.parametrize("off", [0.0, 40.0], ids=["square", "40 deg off square"])
 def test_a_tilted_pick_of_a_cube_without_yaw_in_its_pose_follows_the_wrist_look(twin, off):

@@ -48,7 +48,9 @@ The hover, probe and grasp heights then count from its bottom, the pose height m
 half height. The open jaw's lowest point stays `STACK_CLEAR_M` above the block under it, which
 limits the grasp depth, and a grasp whose shallower tip then bites less than `MIN_BITE_M` is skipped.
 While the jaw closes, the hand keeps the fingertips' midpoint over the block, and the jaw slows until the
-hand keeps up, so the moving jaw does not slide the block across the one under it.
+hand keeps up, so the moving jaw does not slide the block across the one under it. On the table the hand
+stays put, but the jaw closes as slowly until it reaches the block's width, so the moving jaw pushes the
+block instead of striking it into the table.
 Where the arm cannot reach the hover or the lift with the hand down, both come down in
 `HEADROOM_STEP_M` steps to `MIN_HOVER_CLEAR_M` over the top and `MIN_LIFT_M`.
 A regrasp after a drop counts from the bottom of the block as seen after the drop, so a block that
@@ -1237,8 +1239,9 @@ class GraspStrategy(TouchStrategy):
         self._set_jaw_goal(self.cmd_closed)
         gripper = self.kin.spec.gripper
         assert gripper is not None
-        follow = self.base_z > 0 and self.kin.from_q(self.q_cmd)[gripper] > self.cmd_block
-        self._ramp_jaw(self._follow_step_q() if follow else math.inf)
+        # Slow until the jaw reaches the block's width; only a stacked block also has the hand follow.
+        slow = self.kin.from_q(self.q_cmd)[gripper] > self.cmd_block
+        self._ramp_jaw(self._follow_step_q() if slow else math.inf)
         reading, jaw = self.reading, self.kin.spec.jaw
         # A jaw that has not started closing can satisfy the holding rule.
         self._jaw_moved |= reading.q <= self._q_open_entry - jaw.margin

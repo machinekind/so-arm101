@@ -82,6 +82,9 @@ With this package installed alongside the twin, its Strategies tab offers:
   see [Jev in the grasp loop](#jev-in-the-grasp-loop).
 - `pick_place`: picks a block and places it on another block or at a pose, then checks the
   result in the cameras; see [Pick and place](#pick-and-place).
+- `build`: builds from a sentence, planned by the claude or codex CLI, or from a fixed plan: one
+  `pick_place` run per step, a check after each, and a new plan when a step fails; see
+  [Build from a plan](#build-from-a-plan).
 - `dream`: runs Dream Labs' Dream-1 model from a prompt and the cameras; see [Dream Labs](#dream-labs).
 
 All send joint targets through the twin's safety supervisor. Read the
@@ -141,6 +144,12 @@ pick_place:
   judge: jev                 # or none
   wrist_camera: wrist        # empty: no wrist look
   max_tilt_deg: 30           # 0 keeps the hand straight down
+build:
+  task: "a tower of the three cubes, blue at the bottom"
+  plan_json: ""              # a fixed plan: no model is asked
+  planner_cli: codex         # or claude
+  judge: none                # and every other pick_place setting, for each step
+  wrist_camera: wrist
 ```
 
 Goals use metres in the robot's base frame. Enable the panel's 3D goal handle
@@ -173,7 +182,8 @@ See [policy settings](soarm_lab/strategies/policy.py),
 [grasp settings](soarm_lab/strategies/grasp.py),
 [grasp_jev settings](soarm_lab/strategies/grasp_jev.py),
 [grasp_wrist settings](soarm_lab/strategies/wrist.py),
-[pick_place settings](soarm_lab/strategies/pick_place.py) and
+[pick_place settings](soarm_lab/strategies/pick_place.py),
+[build settings](soarm_lab/strategies/build.py) and
 [conventions](../../docs/conventions.md) for the full interfaces.
 
 ## Jev in the touch loop
@@ -552,6 +562,57 @@ the least tilt over a table grid. Both follow the place plan in outline and are 
 they count only a rise that clears the placed block, not the fully open jaw.
 
 See [pick_place settings](soarm_lab/strategies/pick_place.py) for the full interface.
+
+## Build from a plan
+
+`build` turns a sentence (`task`) into steps and runs them. The local claude or codex CLI, logged in
+with a subscription, gets the blocks the cameras see and answers with steps: pick this block, put it
+on that one, beside it, across two blocks as a bridge, or at a table spot. The call runs beside the
+run, so the arm holds still meanwhile and
+the panel shows the wait. The plan is walked through the scene before anything moves; a plan that
+cannot run goes back to the model once with its problems, and a second bad one ends the run. A
+question from the model ends the run with the question; "already done" ends it as a success.
+
+`plan_json` gives the steps instead and asks no model, for a demo without a network. It takes the
+model's JSON or only its list of steps, with unused fields left out:
+
+```json
+[{"pick": "green cube", "place": {"relation": "on", "targets": ["blue cube"]}},
+ {"pick": "red cube", "place": {"relation": "on", "targets": ["green cube"]}}]
+```
+
+A bridge: green beside blue, then the cuboid across both.
+
+```json
+[{"pick": "green cube", "place": {"relation": "next_to", "targets": ["blue cube"], "side": "left",
+                                  "gap_m": 0.015}},
+ {"pick": "yellow cuboid", "place": {"relation": "across", "targets": ["blue cube", "green cube"]}}]
+```
+
+Each step is one `pick_place` run inside this run, with this run's settings (judge, wrist camera,
+speeds, tilt) and its own `step_time_limit_s`. "on" names the block to put it on; the other
+relations become a pose (`place_x_m`, `place_y_m`, `place_z_m`, `place_yaw_deg`), and a bridge's two
+blocks are its `supports`. Before each step the arm turns back to the pose it
+started the run in, so the step starts as a fresh `pick_place` run would. After each step the run
+waits `settle_s` and for fresh poses, then checks that the step and the steps under it still hold.
+What follows depends on the step:
+
+| step ended | then |
+| --- | --- |
+| `placed`, check passes | the next step |
+| `not_found`, `target_not_seen`, `target_moved` | once the blocks are seen again, the same step once more |
+| `unreachable`, `dropped`, `fell_off`, `pick_failed`, or the check fails | a new plan from the scene seen now |
+| `stopped` | the run ends |
+
+A new plan comes from the model, told what ran and what failed, or, with a fixed plan, from the
+fixed plan itself: every step again from the first one that no longer holds, with blocks lying on a
+block it needs set aside on a free table spot first; a fixed plan stops when the same step is
+unreachable twice in a row. At most `max_replans` new plans, `max_steps` steps per plan and
+`max_stack` blocks per stack. The panel shows each step as "krok 2/3: red cube -> green cube
+(placed)". Every model call is kept as a decision with its prompt and answer.
+
+Known gaps: plans count reach with the hand straight down, so they refuse some places a tilted hand
+would reach. Moves do not go around other blocks.
 
 ## Dream Labs
 
