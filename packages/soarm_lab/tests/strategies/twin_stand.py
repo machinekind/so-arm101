@@ -12,7 +12,9 @@ the arm's joints have:
   near (0.2, 0) and turned by up to 10 degrees, as `calib.intrinsics.simulate` lays out its board;
 - `shift_wrist_camera` moves the rendered wrist camera by `mount_m` in a seeded direction, so the strategy's
   camera model is off by that much;
-- `play()` is `stand_errors.play_for(play_m)`, for `Backlash`.
+- `play()` is `stand_errors.play_for(play_m)`, for `Backlash`;
+- `block_error(half_height)` is the same error for the blocks of the pick_place and build tests, whose fake
+  cameras see each block's top.
 
 `perception()` runs the real `charuco` detector through the twin's `Perception`, stepped by `drive`.
 `calibrate()` runs `calibrate_approach` on a stand's twin, the strategy wrapped in `Backlash` when the stand
@@ -150,6 +152,17 @@ class Stand:
     def seen(self, P: np.ndarray) -> np.ndarray:
         """Where the stand's perception puts points `P` (n, 3)."""
         return self.error.field(P)
+
+    def block_error(self, half_height: float) -> Callable[[np.ndarray], np.ndarray]:
+        """Where the stand's perception puts the centres (n, 3) of blocks `half_height` high: the cameras see
+        each block's top, so its error is the field at the top's height."""
+        up = np.array([0.0, 0.0, float(half_height)])
+
+        def perceived(P: np.ndarray) -> np.ndarray:
+            P = np.atleast_2d(np.asarray(P, float))
+            return self.seen(P + up) - up
+
+        return perceived
 
     def play(self) -> dict[str, float]:
         return play_for(self.play_m) if self.play_m else {}
