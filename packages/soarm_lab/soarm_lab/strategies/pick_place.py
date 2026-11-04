@@ -412,6 +412,10 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
             return super().after_grasp_failed(why, obs)
         return super(GraspJevStrategy, self).after_grasp_failed(why, obs)
 
+    def _edge_grip(self) -> bool:
+        """As in `grasp`, unless Jev judges the close."""
+        return not self.judged and super()._edge_grip()
+
     def carrying(self, obs: Observation, reading: JawReading) -> Action | None:
         """Monitor the hold as the grasp family does. A drop ends the place sequence until a regrasp."""
         if self.judged:

@@ -129,8 +129,10 @@ The plugin contracts are the package `machinekind-twin-api` (see the root README
   `soarm_lab.strategies.jaw.JawMonitor` verifies the hold with the same thresholds as the twin's tracker.
   Each carrying tick checks the jaw and `Observation.objects`. A sighting after a drop can trigger
   a regrasp through `retarget`. `release()` ends monitoring and opens the jaw.
-  `soarm_lab.strategies.wrist.WristGraspStrategy` refines the aim from `Observation.frames` at the hover.
-  It fits the block shape to a colour blob through `before_straddle`, and `before_descent` with `probe` on.
+  `soarm_lab.strategies.wrist.WristGraspStrategy` refines the aim from `Observation.frames` at the hover
+  and between the open jaw tips before the close.
+  It fits the block shape to a colour blob through `before_straddle`, `before_close` at the bottom of the
+  straddle, and `before_descent` with `probe` on.
   A named camera requires OpenCV.
   `soarm_lab.strategies.grasp_jev.GraspJevStrategy` judges each close and lift.
   With `probe: true`, it also judges each probe.
