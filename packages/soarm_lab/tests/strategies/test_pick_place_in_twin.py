@@ -9,7 +9,8 @@ The wrist-camera case needs rendering. No test here needs a model key.
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -31,6 +32,8 @@ from machinekind_twin.workspace import Workspace  # noqa: E402
 
 from soarm_lab.blocks import block  # noqa: E402
 from soarm_lab.kinematics import RobotKinematics  # noqa: E402
+from soarm_lab.planner import Place, Step, TargetPose, holds, resolve, world_state  # noqa: E402
+from soarm_lab.planner.schema import SIDE_VECTORS  # noqa: E402
 from soarm_lab.robot import load_robot  # noqa: E402
 from soarm_lab.strategies.grasp_jev import HELD_OPTIONS, NEXT_OPTIONS  # noqa: E402
 from soarm_lab.strategies.jev import KEY_ENV  # noqa: E402
@@ -274,7 +277,7 @@ def test_the_twin_finds_pick_place_and_builds_it_without_a_key(monkeypatch):
     fields = {f.name: f for f in plugin.fields}
 
     assert plugin.cls is PickPlaceStrategy and plugin.settings is PickPlaceSettings
-    assert plugin.summary == ("Picks a block and places it on another block or a table spot, then checks the "
+    assert plugin.summary == ("Picks a block and places it on another block or at a pose, then checks the "
                               "result in the cameras.")
     assert fields["judge"].default == "jev" and fields["place_on"].default == ""
     assert not any(f.required for f in fields.values())
@@ -739,3 +742,197 @@ def test_a_cube_pushed_after_the_wrist_look_is_centred_between_the_jaw_tips_and_
     red, red_rot = truth(twin, "red")
     blue, _ = truth(twin, "blue")
     assert np.linalg.norm(red[:2] - blue[:2]) < 0.004 and tilt_deg(red_rot) < 2.0
+
+
+# --------------------------------------------------------------------------- places at a pose
+GREEN = (0.2, 0.75, 0.3, 1.0)
+
+
+@contextmanager
+def fresh_twin() -> Iterator[Twin]:
+    """A new simulated twin, for tests that run several scenes."""
+    twin = Twin(Workspace(robot="so101"), clock=VirtualClock(t0=0.0))
+    try:
+        yield twin
+    finally:
+        twin.close()
+
+
+def labelled(objects: Objects, labels: Mapping[str, str]) -> Objects:
+    """`objects` keyed by `labels` (simulation name -> label), named by colour and shape as the twin does."""
+
+    def poses() -> dict[str, ObjectPose]:
+        return {labels.get(name, name): pose for name, pose in objects().items()}
+
+    return poses
+
+
+def truth_world(twin: Twin, labels: Mapping[str, str]):
+    """The planner's world state from the simulation's poses, keyed by `labels`."""
+    poses = {label: ObjectPose(*truth(twin, name), "kamery", 0.0) for name, label in labels.items()}
+    return world_state(poses)
+
+
+@dataclass(frozen=True)
+class PoseScene:
+    """Blocks for one place at a pose, the planner step and what came of it."""
+
+    blocks: tuple[Placed, ...]
+    labels: dict[str, str]
+    step: Step
+
+
+@dataclass
+class PoseRun:
+    """How a place at a pose ended: the outcome, the placed block's offset from the pose [m], its lean [deg],
+    the largest shift of another block [m] and the planner's check of the relation."""
+
+    outcome: str
+    error_m: float
+    tilt_deg: float
+    others_shift_m: float
+    holds: tuple[bool, str]
+    pose: TargetPose
+
+    @property
+    def ok(self) -> bool:
+        return self.error_m <= 0.008 and self.tilt_deg <= 3.0
+
+    def line(self) -> str:
+        return (f"{self.outcome:<14} error {self.error_m * 1000:4.1f} mm  tilt {self.tilt_deg:4.1f} deg  "
+                f"others moved {self.others_shift_m * 1000:4.1f} mm  holds {self.holds[0]} ({self.holds[1]})")
+
+
+def bridge_scene(seed: int) -> PoseScene:
+    """A cuboid to lay across two cubes that stand a gap apart, lined up with the line between them."""
+    rng = np.random.default_rng(seed)
+    centre = np.array([0.2, 0.06]) + rng.uniform(-0.012, 0.012, 2)
+    direction = rng.uniform(0.0, math.pi)
+    gap = rng.uniform(0.015, 0.03)
+    u = np.array([math.cos(direction), math.sin(direction)])
+    d = (gap + 2 * block("cube").half_size[0]) / 2
+    a, b = centre - d * u, centre + d * u
+    cube_yaws = math.degrees(direction) + rng.uniform(-5.0, 5.0, 2)
+    pick = (0.2 + rng.uniform(-0.015, 0.015), -0.06 + rng.uniform(-0.015, 0.015))
+    blocks = (Placed("red", "cuboid", pick, float(rng.uniform(-90.0, 90.0)), RED),
+              Placed("a", "cube", (float(a[0]), float(a[1])), float(cube_yaws[0]), BLUE),
+              Placed("b", "cube", (float(b[0]), float(b[1])), float(cube_yaws[1]), GREEN))
+    labels = {"red": "red cuboid", "a": "blue cube", "b": "green cube"}
+    return PoseScene(blocks, labels, Step("red cuboid", Place("across", ("blue cube", "green cube"))))
+
+
+def next_to_scene(seed: int) -> PoseScene:
+    """A cube to set beside another cube, on a random side and with a random gap."""
+    rng = np.random.default_rng(seed)
+    side = str(rng.choice(list(SIDE_VECTORS)))
+    gap = float(rng.uniform(0.005, 0.02))
+    # The place lies near the middle of the reach, the target on its far side.
+    place = np.array([0.205, 0.045]) + rng.uniform(-0.012, 0.012, 2)
+    target = place - np.array(SIDE_VECTORS[side]) * (2 * block("cube").half_size[0] + gap)
+    pick = (0.2 + rng.uniform(-0.015, 0.015), -0.07 + rng.uniform(-0.01, 0.01))
+    yaws = rng.uniform(-45.0, 45.0, 2)
+    blocks = (Placed("red", "cube", pick, float(yaws[0]), RED),
+              Placed("blue", "cube", (float(target[0]), float(target[1])), float(yaws[1]), BLUE))
+    labels = {"red": "red cube", "blue": "blue cube"}
+    return PoseScene(blocks, labels, Step("red cube", Place("next_to", ("blue cube",), side, gap)))
+
+
+def place_at_pose(twin: Twin, scene: PoseScene, on_carry: Callable[[Twin], None] | None = None,
+                  **settings: Any) -> tuple[PoseRun, PickPlaceStrategy]:
+    """Lay out `scene`, resolve its step with the planner from the simulation's poses, run pick_place to that
+    pose with truth-fed trackers and measure the result. `on_carry` runs once as the carry starts."""
+    add_blocks(twin, *scene.blocks)
+    settle(twin)
+    held, *others = (b.name for b in scene.blocks)
+    pose = resolve(scene.step, truth_world(twin, scene.labels))
+    supports = scene.step.place.targets if scene.step.place.relation in ("on", "across") else ()
+    kind = next(b.kind for b in scene.blocks if b.name == held)
+    clock = Clock()
+    strategy = built(label=scene.labels[held], block=kind, place_x_m=pose.x_m, place_y_m=pose.y_m,
+                     place_z_m=pose.z_m, place_yaw_deg=math.degrees(pose.yaw_rad),
+                     supports=", ".join(supports), **settings)
+    cameras = Cameras(twin, clock, tuple(scene.labels))
+    runner = StrategyRunner(twin, strategy, objects=labelled(cameras, scene.labels))
+    start = {name: truth(twin, name)[0] for name in others}
+    shift: list[float] = [0.0]
+    carried: list[bool] = []
+
+    def watch() -> None:
+        if on_carry is not None and not carried and strategy.started and strategy.status.phase == "carry_up":
+            carried.append(True)
+            on_carry(twin)
+            start.update({name: truth(twin, name)[0] for name in others})
+        shift.append(max(float(np.linalg.norm(truth(twin, n)[0] - p0)) for n, p0 in start.items()))
+
+    runner.start(threaded=False)
+    drive(twin, runner, 150.0, clock, watch=watch)
+    settle(twin)
+    position, rotation = truth(twin, held)
+    error = float(np.linalg.norm(position[:2] - np.array([pose.x_m, pose.y_m])))
+    after = truth_world(twin, scene.labels)
+    return PoseRun(strategy.place.outcome, error, tilt_deg(rotation), max(shift),
+                   holds(scene.step, after), pose), strategy
+
+
+def test_a_cuboid_goes_across_two_cubes_as_a_bridge(twin):
+    """The planner's pose for a cuboid across two cubes: the cuboid lands on both, level and lined up, and
+    neither cube moves or sinks."""
+    run, strategy = place_at_pose(twin, bridge_scene(0))
+
+    assert run.outcome == "placed", (strategy.status, strategy.place)
+    assert run.error_m < 0.004 and run.tilt_deg < 2.0, run.line()
+    assert run.others_shift_m < 0.002 and run.holds[0], run.line()
+    assert strategy.place.rests_on == ("blue cube", "green cube") and strategy.place.error_m < 0.004
+    red, red_rot = truth(twin, "red")
+    assert red[2] == pytest.approx(run.pose.z_m + block("cuboid").half_size[2], abs=0.001)
+    assert abs(((yaw_deg(red_rot) - math.degrees(run.pose.yaw_rad) + 90) % 180) - 90) < 4.0
+    for name in ("a", "b"):
+        assert truth(twin, name)[0][2] == pytest.approx(block("cube").half_size[2], abs=0.0005)
+    assert all(c < 0.5 for c in contact(twin, "red"))
+
+
+def test_a_cube_goes_next_to_a_cube_with_the_jaw_clear_of_it(twin):
+    """The jaw closes across the face that does not look at the other cube, so it neither touches nor moves
+    it."""
+    scene = next_to_scene(0)
+    run, strategy = place_at_pose(twin, scene)
+
+    assert run.outcome == "placed", (strategy.status, strategy.place)
+    assert run.error_m < 0.004 and run.tilt_deg < 2.0 and run.holds[0], run.line()
+    assert run.others_shift_m < 0.001, run.line()
+    assert all(c < 0.5 for c in contact(twin, "blue"))
+    red, _ = truth(twin, "red")
+    assert red[2] == pytest.approx(block("cube").half_size[2], abs=0.0005)
+
+
+def test_cubes_nudged_as_the_cuboid_is_carried_take_the_bridge_with_them(twin):
+    """Both cubes move 6 mm as the carry starts: the latch sees it, the hover follows, and the cuboid lands
+    across them where they stand now."""
+    nudge = np.array([0.006, -0.002])
+
+    def push(twin: Twin) -> None:
+        for name in ("a", "b"):
+            p = truth(twin, name)[0]
+            move(twin, name, tuple(p[:2] + nudge), float(p[2]))
+
+    run, strategy = place_at_pose(twin, bridge_scene(1), on_carry=push)
+
+    assert run.outcome == "placed" and strategy.place.replans == 1, (strategy.status, strategy.place)
+    red, red_rot = truth(twin, "red")
+    assert np.linalg.norm(red[:2] - (np.array([run.pose.x_m, run.pose.y_m]) + nudge)) < 0.004
+    assert tilt_deg(red_rot) < 2.0 and run.holds[0] and run.others_shift_m < 0.002, run.line()
+
+
+@pytest.mark.parametrize("scene_of, needed", [(bridge_scene, 8), (next_to_scene, 9)],
+                         ids=["across", "next_to"])
+def test_seeded_places_at_a_pose_land_within_8_mm_and_level(twin_robots, scene_of, needed):
+    """Ten seeded scenes per relation, each in a fresh twin: the placed block ends within 8 mm of the
+    planner's pose and level in at least `needed` of them, and no other block moves."""
+    runs = []
+    for seed in range(10):
+        with fresh_twin() as twin:
+            runs.append(place_at_pose(twin, scene_of(seed))[0])
+    report = "\n".join(f"seed {k}: {run.line()}" for k, run in enumerate(runs))
+    print(report)
+    assert sum(run.ok for run in runs) >= needed, report
+    assert max(run.others_shift_m for run in runs) < 0.002, report

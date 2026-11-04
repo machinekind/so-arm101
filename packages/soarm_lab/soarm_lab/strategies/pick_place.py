@@ -5,11 +5,13 @@ the wrist-camera look of `grasp_wrist` (skipped when `wrist_camera` is empty) an
 the close and lift checks of `grasp_jev`. A drop goes through grasp's recovery and the run then
 continues to the place. See the package README for settings.
 
-The target is block `place_on` (catalog `place_on_block`) or, with `place_on` empty, the table
-spot `place_x_m`, `place_y_m`. A block target's top comes from its pose and the catalog height; a
-pose at table height counts as a block lying on the table. A target rotation without yaw, such as
-identity, counts as yaw 0. Before the pick the target must have a usable pose and a place plan must
-fit, with the held block's place in the hand estimated.
+The target is block `place_on` (catalog `place_on_block`) or, with `place_on` empty, a pose: the held
+block's centre at `place_x_m`, `place_y_m`, its bottom `place_z_m` above the table and its heading
+`place_yaw_deg`, resting on the blocks named in `supports` or on the table. A block target's top comes
+from its pose and the catalog height; a pose at table height counts as a block lying on the table. A
+target rotation without yaw, such as identity, counts as yaw 0. Before the pick the target block or
+each support must have a usable pose and a place plan must fit, with the held block's place in the hand
+estimated.
 
 After the verified lift the run plans the place. The held block's centre and bottom in the hand
 come from the fingertips and the grasp height. With `align_yaw`, the hand turns so the held block
@@ -37,6 +39,13 @@ poses captured after the release then verify the result.
 A target not seen at the hover, an unreachable place or a target that keeps moving puts the block
 back where it was picked, without verification. The carry back stays above the target the hand
 hovered over. `PlaceStatus.outcome` names the result with one of `OUTCOMES`.
+
+At a pose, only headings whose jaw stays `JAW_SIDE_CLEAR_M` clear of every other object at the release
+count, from the objects' poses and catalog sizes; the held block and its supports do not count. Over
+supports the run latches each one's newest fresh pose as it does a target block's and moves the pose
+with them: across by their mean shift, up by the highest rise. Supports that moved apart by more than
+`place_tol_m` put the block back as `target_moved`. The check after the release also needs the block
+level within `LEVEL_TOL_DEG`, and each support seen within `place_tol_m` of its latched pose.
 
 A block may be picked off another block: the grasp counts from its observed bottom, and every carry
 clears what it was picked from. The blocks under it, found from their poses before the pick, are
@@ -67,14 +76,16 @@ from typing import Any
 import numpy as np
 from machinekind_twin_api.strategy import Action, ObjectPose, Observation, RunInfo
 
-from ..blocks import block
+from ..blocks import BlockSpec, block
 from ..blocks.classic_world import BLOCKS
+from ..planner.world import WorldObject, overlap, world_state
 from .grasp import (
     CARRY,
     DROP_SETTLE_S,
     IN_HAND_M,
     JAW_WAIT_S,
     MAX_ROT_ERR_DEG,
+    ON_BLOCK_M,
     GraspCandidate,
     JawPlan,
     hand_down,
@@ -144,6 +155,10 @@ FULL_OPEN = 100.0
 #: A hand that leaves with the fixed jaw beside the placed block moves at least this much away from
 #: it: the cosine of its direction against the closing axis is at most minus this.
 AWAY_COS = 0.25
+#: At a pose, the open jaw keeps this far from other objects at the release [m].
+JAW_SIDE_CLEAR_M = 0.005
+#: A block placed at a pose leans at most this much from level [deg].
+LEVEL_TOL_DEG = 5.0
 
 
 @dataclass
@@ -156,10 +171,15 @@ class PickPlaceSettings(GraspJevSettings, WristGraspSettings):
     place_on: str = ""
     #: Catalog name of the block to place on.
     place_on_block: str = field(default="cube", metadata={"choices": tuple(BLOCKS)})
-    #: Table spot for the held block's centre when `place_on` is empty [m, base frame].
+    #: The pose when `place_on` is empty: the held block's centre [m, base frame], the height its bottom
+    #: lands at [m above the table] and the heading of its long side [deg, counter-clockwise from +x].
     place_x_m: float = 0.2
     place_y_m: float = 0.08
-    #: Turn the held block to the target block's yaw.
+    place_z_m: float = 0.0
+    place_yaw_deg: float = 0.0
+    #: Labels of the blocks the held block will rest on at the pose, comma-separated. Empty is the table.
+    supports: str = ""
+    #: Turn the held block to the target block's yaw, or the pose's.
     align_yaw: bool = True
     #: Clearance of the held block's bottom over the target and the table's blocks while carrying [m].
     carry_clearance_m: float = 0.03
@@ -190,10 +210,12 @@ class PlaceStatus:
 
     #: One of `OUTCOMES` once the run has ended, '' before.
     outcome: str = ""
-    #: The target's label, or '' for the table spot.
+    #: The target's label, or '' for a pose.
     target: str = ""
+    #: The blocks the held block rests on at a pose; () for the table or a target block.
+    rests_on: tuple[str, ...] = ()
     #: Where the held block's centre goes [m, base frame], the surface it lands on [m above the table]
-    #: and the target's yaw [deg]. NaN yaw when unknown or for the table.
+    #: and the target's yaw [deg]. NaN yaw when unknown.
     target_xy: tuple[float, float] | None = None
     target_top_m: float = float("nan")
     target_yaw_deg: float = float("nan")
@@ -214,12 +236,14 @@ class PlaceStatus:
     opened_wide: bool = False
     #: The block went back to where it was picked.
     put_back: bool = False
-    #: The verified block's centre [m, base frame], its distance from the target centre [m] and its
-    #: height against the expected one [m].
+    #: The verified block's centre [m, base frame], its distance from the target centre [m], its height
+    #: against the expected one [m] and how far it leans from level [deg] (NaN without a rotation).
     placed_xyz: tuple[float, float, float] | None = None
     error_m: float = float("nan")
     height_error_m: float = float("nan")
-    #: How far the target moved by the verification [m]. NaN when not seen.
+    placed_tilt_deg: float = float("nan")
+    #: How far the target, or the farthest support of a pose, moved by the verification [m]. NaN when
+    #: not seen.
     target_shift_m: float = float("nan")
     #: The blocks the picked one rested on, the largest shift of one seen after the pick [m] (NaN when
     #: none was seen) and whether it exceeds `place_tol_m`.
@@ -298,7 +322,7 @@ def known_yaw(rotation: Any) -> float | None:
 
 
 class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
-    """Picks a block and places it on another block or a table spot, then checks the result in the cameras."""
+    """Picks a block and places it on another block or at a pose, then checks the result in the cameras."""
 
     settings = PickPlaceSettings
     camera_required = False
@@ -321,10 +345,22 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
             value = getattr(config, name)
             if not value >= 0:
                 raise ValueError(f"pick_place: {name} must be zero or more, is {value}")
-        for name in ("place_x_m", "place_y_m"):
+        for name in ("place_x_m", "place_y_m", "place_yaw_deg"):
             value = getattr(config, name)
             if not math.isfinite(value):
                 raise ValueError(f"pick_place: {name} must be finite, is {value}")
+        if not config.place_z_m >= 0 or not math.isfinite(config.place_z_m):
+            raise ValueError(f"pick_place: place_z_m must be finite and zero or more, is {config.place_z_m}")
+        rests = tuple(normalised(part) for part in config.supports.split(",") if part.strip())
+        if rests:
+            if normalised(config.place_on):
+                raise ValueError("pick_place: supports needs place_on empty: they carry a pose")
+            if len(set(rests)) < len(rests):
+                raise ValueError(f"pick_place: supports names a block twice: {config.supports!r}")
+            if config.place_z_m <= ON_BLOCK_M:
+                raise ValueError(f"pick_place: supports need place_z_m at their top, is {config.place_z_m}")
+        elif not normalised(config.place_on) and config.place_z_m > ON_BLOCK_M:
+            raise ValueError(f"pick_place: place_z_m {config.place_z_m} above the table needs supports")
         if config.send_frames and not config.wrist_camera.strip():
             raise ValueError("pick_place: send_frames needs wrist_camera")
         #: Jev judges the close and lift. Without it the grasp follows plain `grasp`.
@@ -332,14 +368,20 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         super().__init__(config, judge=judge if self.judged else NoJudge(), threaded=threaded, clock=clock,
                          blob=blob)
         self.place_settings = config
-        #: The target's key in `obs.objects`; '' for the table spot.
+        #: The target's key in `obs.objects`; '' for a pose.
         self.target_label = normalised(config.place_on)
         if self.target_label and self.target_label == self.label:
             raise ValueError(f"pick_place: place_on must name another block than label, both are "
                              f"{self.label!r}")
+        if self.label in rests:
+            raise ValueError(f"pick_place: supports must name other blocks than label {self.label!r}")
+        #: The blocks the held block rests on at a pose; () for the table or a target block.
+        self.rest_on = rests
         self.target_block = block(config.place_on_block)
-        self.place = PlaceStatus(target=self.target_label)
+        self.place = PlaceStatus(target=self.target_label, rests_on=self.rest_on)
         self._reset_place()
+        #: The jaw bodies' points in the TCP frame by gripper command.
+        self._jaw_clouds: dict[float, tuple[np.ndarray, ...]] = {}
         self._phases.update({CARRY: self._lifted, TARGET: self._target, CARRY_UP: self._carry_up,
                              CARRY_OVER: self._carry_over, LATCH: self._latch, PLACE: self._place,
                              PARK: self._park, VERIFY: self._verify})
@@ -389,15 +431,24 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         self._lifted_t = float("nan")
         #: The place the pick plans for: the target's centre [m], top [m] and yaw [rad] or None.
         self._goal: tuple[np.ndarray, float, float | None] | None = None
+        #: Positions of a pose's supports when the pose was taken, the newest fresh camera pose of each
+        #: while carrying with its capture time [s, `obs.t`], and the positions the place latched [m].
+        self._rest_ref: dict[str, np.ndarray] = {}
+        self._rest_seen: dict[str, tuple[ObjectPose, float]] = {}
+        self._rest_pos: dict[str, np.ndarray] = {}
+        #: The latest objects, and the other objects a jaw at a pose must clear worked out from them.
+        self._scene: Mapping[str, ObjectPose] = {}
+        self._others: list[WorldObject] | None = None
 
     def start(self, run: RunInfo, obs: Observation) -> None:
         """Start the grasp family's checks, then clear the place state."""
         super().start(run, obs)
-        self.place = PlaceStatus(target=self.target_label)
+        self.place = PlaceStatus(target=self.target_label, rests_on=self.rest_on)
         self._reset_place()
         self._start_tcp = self.tcp_cmd.copy()
 
     def act(self, obs: Observation) -> Action:
+        self._scene, self._others = obs.objects, None
         self._note_supports(obs)
         return super().act(obs)
 
@@ -438,6 +489,19 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
                                                          f"'{self.target_label}' po {wait_s:.0f} s ({why})")
                 return self.hold(f"czekam na polozenie celu '{self.target_label}' ({why})")
             self._target_ready = True
+        if self.rest_on and not self._target_ready:
+            poses = {label: self._pose_of(obs, label) for label in self.rest_on}
+            missing = ", ".join(f"'{label}' ({why})" for label, pose in poses.items()
+                                if (why := self._pose_problem(pose)))
+            if missing:
+                if self._t - self._phase_t0 >= self.config.wait_for_pose_s:
+                    wait_s = self.config.wait_for_pose_s
+                    return self._finish(TARGET_NOT_SEEN, f"brak uzytecznego polozenia podpory {missing} "
+                                                         f"po {wait_s:.0f} s")
+                return self.hold(f"czekam na polozenie podpory {missing}")
+            self._rest_ref = {label: np.asarray(pose.position, float).copy()
+                              for label, pose in poses.items() if pose is not None}
+            self._target_ready = True
         # Grasp ends here only without a usable pose or with an unreachable one.
         self._pending = NOT_FOUND if self._pose_problem(self._pose_of(obs, self.label)) else UNREACHABLE
         self._goal = self._goal_from(obs)
@@ -454,9 +518,9 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         return action
 
     def _goal_from(self, obs: Observation) -> tuple[np.ndarray, float, float | None] | None:
-        """Return the target's centre, top and yaw from `obs`, the table spot, or None without a pose."""
+        """Return the target's centre, top and yaw from `obs`, the pose's, or None without a target pose."""
         if not self.target_label:
-            return self._spot, 0.0, None
+            return self._pose()
         pose = self._pose_of(obs, self.target_label)
         return None if self._pose_problem(pose) else self._target_from(pose)
 
@@ -495,7 +559,7 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
                 return ""
             xy, top, yaw = self._target_from(pose)
         else:
-            xy, top, yaw = self._spot, 0.0, None
+            xy, top, yaw = self._pose()
         pick_xy = self._straddle_xy if np.all(np.isfinite(self._straddle_xy)) else self.tcp_cmd[:2]
         plan = self._plan_place(xy, top, yaw, from_xy=pick_xy, hang=self._grasp_z - self._bottom(),
                                 hand_xy=np.zeros(2))
@@ -553,9 +617,26 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         return xy, top
 
     # ------------------------------------------------------------------ planning
+    def _pose(self, shift: np.ndarray | None = None) -> tuple[np.ndarray, float, float]:
+        """Return the pose's centre [m], the height the held block's bottom lands at [m] and its yaw [rad],
+        moved by `shift` (x, y, z) [m]."""
+        cfg = self.place_settings
+        d = np.zeros(3) if shift is None else np.asarray(shift, float)
+        return (np.array([cfg.place_x_m + d[0], cfg.place_y_m + d[1]]), cfg.place_z_m + float(d[2]),
+                math.radians(cfg.place_yaw_deg))
+
     @property
-    def _spot(self) -> np.ndarray:
-        return np.array([self.place_settings.place_x_m, self.place_settings.place_y_m])
+    def _yaw_period(self) -> float:
+        """The yaw period the held block lines up with its target by [rad]."""
+        if self.target_label:
+            return min(self.block.yaw_period, self.target_block.yaw_period)
+        return self.block.yaw_period
+
+    def _where(self) -> str:
+        """The target block, a pose's supports or the table, for notes."""
+        if self.target_label:
+            return f"'{self.target_label}'"
+        return _names(self.rest_on) if self.rest_on else "stol"
 
     def _bottom(self) -> float:
         """The picked block's bottom height at the close [m above the table]."""
@@ -606,7 +687,7 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         turns = [0.0]
         if not free:
             assert yaw is not None
-            period = min(self.block.yaw_period, self.target_block.yaw_period)
+            period = self._yaw_period
             d = fold(yaw - self._held_rel - self._psi, period)
             near = {round(d + k * period, 9) for k in range(-4, 5) if abs(d + k * period) <= math.pi + 1e-9}
             turns = sorted(near, key=abs)
@@ -658,6 +739,11 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
             away = self._start_tcp[:2] - eased
             leaves = float(away @ u) <= -AWAY_COS * float(np.linalg.norm(away)) - 1e-9
             where = f"({tcp_xy[0]:.3f}, {tcp_xy[1]:.3f}, {release_z:.3f}) m"
+            hit = self._jaw_hit(psi, (np.array([*tcp_xy, release_z]), np.array([*eased, release_z])),
+                                self._place_open_cmd)
+            if hit:
+                problem = problem or f"szczeka zahaczylaby o '{hit}' przy odkladaniu"
+                continue
             at_release = self._reaches(np.array([*tcp_xy, release_z]), psi, seed0)
             if at_release is None:
                 problem = problem or f"punkt odlozenia {where} poza zasiegiem z chwytakiem w dol"
@@ -670,6 +756,10 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
                                       "zasiegiem")
                 continue
             retreat_z, wide = retreat
+            hit = self._jaw_hit(psi, (np.array([*eased, retreat_z]),), FULL_OPEN) if wide else ""
+            if hit:
+                problem = problem or f"otwarta szczeka zahaczylaby o '{hit}' przy odjezdzie"
+                continue
             carry_z = None
             for z in _heights(want, low):
                 up = self._reaches(np.array([*from_xy, z]), self._psi, seed0)
@@ -701,6 +791,48 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
             if self._reaches(np.array([*eased, z]), psi, seed) is not None:
                 return z, True
         return None
+
+    def _jaw_hit(self, psi: float, tcps: tuple[np.ndarray, ...], cmd: float) -> str:
+        """At a pose, the first other object that the jaw at `cmd` [app units], with heading `psi` [rad] and
+        its TCP at any of `tcps` [m], comes within `JAW_SIDE_CLEAR_M` of; '' when none does.
+
+        Each jaw body counts as its outline along and across the closing axis, from its points below the
+        object's top."""
+        if self.target_label or self._putting_back:
+            return ""
+        others = self._other_objects()
+        if not others:
+            return ""
+        R = hand_down(psi, self._tilt)
+        u, v = np.array([math.cos(psi), math.sin(psi)]), np.array([-math.sin(psi), math.cos(psi)])
+        clouds = [np.vstack([points @ R.T + tcp for tcp in tcps]) for points in self._jaw_cloud(cmd)]
+        for obj in others:
+            for cloud in clouds:
+                low = cloud[cloud[:, 2] < obj.top_m + JAW_SIDE_CLEAR_M]
+                if not len(low):
+                    continue
+                a, b = low[:, :2] @ u, low[:, :2] @ v
+                corners = ((a.min(), b.min()), (a.max(), b.min()), (a.max(), b.max()), (a.min(), b.max()))
+                box = tuple((float(p[0]), float(p[1])) for p in (u * s + v * t for s, t in corners))
+                if overlap(box, obj.footprint) > -JAW_SIDE_CLEAR_M:
+                    return obj.label
+        return ""
+
+    def _jaw_cloud(self, cmd: float) -> tuple[np.ndarray, ...]:
+        """The jaw bodies' points in the TCP frame at `cmd` [app units], cached."""
+        key = round(float(cmd), 3)
+        if key not in self._jaw_clouds:
+            self._jaw_clouds[key] = self.kin.jaw_points(key)
+        return self._jaw_clouds[key]
+
+    def _other_objects(self) -> list[WorldObject]:
+        """The latest observation's objects besides the held block, a pose's supports and anything in the
+        gripper, with their sizes from the catalog."""
+        if self._others is None:
+            skip = {self.label, *self.rest_on}
+            world = world_state(self._scene, place_check=_any_place)
+            self._others = [o for o in world.objects.values() if o.label not in skip and not o.in_gripper]
+        return self._others
 
     def _take_plan_place(self, plan: PlacePlan) -> None:
         self._place_plan = plan
@@ -748,7 +880,7 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         if not math.isfinite(self._lifted_t):
             self._lifted_t = self._t
         self._placing, self._place_plan, self._replans, self._over_top = True, None, 0, 0.0
-        self._target_seen = None
+        self._target_seen, self._rest_seen = None, {}
         self._enter(TARGET)
 
     def _target(self, obs: Observation) -> Action | None:
@@ -769,7 +901,7 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
                 return self.hold(f"czekam na polozenie celu '{self.target_label}' ({why})")
             xy, top, yaw = self._target_from(pose)
         else:
-            xy, top, yaw = self._spot, 0.0, None
+            xy, top, yaw = self._pose()
         plan = self._plan_place(xy, top, yaw, over_m=over)
         if isinstance(plan, str):
             if self._putting_back:
@@ -781,11 +913,18 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         return None
 
     def _note_target(self, obs: Observation) -> None:
-        """Keep the target's newest fresh camera pose while carrying toward it."""
-        if self.target_label and not self._putting_back:
+        """Keep the newest fresh camera pose of the target, or of each support of a pose, while carrying
+        toward it."""
+        if self._putting_back:
+            return
+        if self.target_label:
             pose = self._fresh(obs, self.target_label)
             if pose is not None:
                 self._target_seen = (pose, float(obs.t) - float(pose.age_s))
+        for label in self.rest_on:
+            pose = self._fresh(obs, label)
+            if pose is not None:
+                self._rest_seen[label] = (pose, float(obs.t) - float(pose.age_s))
 
     def _put_back(self, outcome: str, why: str) -> Action:
         """Return the held block to where it was picked, then end with `outcome`."""
@@ -826,7 +965,8 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
             # The descent's stall reference.
             self._bias_z, self._hover_z = self._offset_z, float(self._tcp_measured[2])
             self._slow = False
-            self._enter(LATCH if self.target_label and not self._putting_back else PLACE)
+            latch = (self.target_label or self.rest_on) and not self._putting_back
+            self._enter(LATCH if latch else PLACE)
             return None
         if self._timed_out():
             if not self._vertical():
@@ -840,6 +980,8 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         action = self.carrying(obs, self.reading)
         if action is not None:
             return action
+        if not self.target_label:
+            return self._latch_supports(obs)
         plan, cfg, label = self._place_plan, self.place_settings, self.target_label
         assert plan is not None
         self._note_target(obs)
@@ -859,8 +1001,43 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
             turned = abs(fold(yaw - plan.yaw, period))
         small = (moved <= LATCH_SAME_M and abs(top - plan.top_m) <= LATCH_SAME_M
                  and turned <= math.radians(LATCH_SAME_DEG))
+        return self._follow(xy, top, yaw, moved, small, f"cel '{label}' nie stoi w miejscu")
+
+    def _latch_supports(self, obs: Observation) -> Action | None:
+        """Latch each support's pose seen on the way or at the hover and move the pose with them, or put the
+        block back when they moved apart."""
+        plan, cfg = self._place_plan, self.place_settings
+        assert plan is not None
+        self._note_target(obs)
+        since = self._over_t0 - cfg.fresh_pose_s - 1e-9
+        missing = tuple(label for label in self.rest_on
+                        if label not in self._rest_seen or self._rest_seen[label][1] < since)
+        if missing:
+            if self._t - self._phase_t0 >= cfg.target_wait_s:
+                return self._put_back(TARGET_NOT_SEEN, f"podpora {_names(missing)} bez swiezego polozenia "
+                                                       f"od {cfg.target_wait_s:.0f} s")
+            return self.hold()
+        at = {label: np.asarray(self._rest_seen[label][0].position, float).copy() for label in self.rest_on}
+        shifts = np.array([at[label] - self._rest_ref[label] for label in self.rest_on])
+        apart = max(float(np.linalg.norm(a[:2] - b[:2])) for a in shifts for b in shifts)
+        if apart > cfg.place_tol_m:
+            return self._put_back(TARGET_MOVED, f"podpory {_names(self.rest_on)} przesuniete wzgledem siebie "
+                                                f"o {apart * 1000:.0f} mm")
+        xy, top, yaw = self._pose(np.array([*shifts[:, :2].mean(axis=0), shifts[:, 2].max()]))
+        self._rest_pos = at
+        self._over_top = max(self._over_top, top)
+        moved = float(np.linalg.norm(xy - plan.target_xy))
+        small = moved <= LATCH_SAME_M and abs(top - plan.top_m) <= LATCH_SAME_M
+        return self._follow(xy, top, yaw, moved, small, f"podpory {_names(self.rest_on)} nie stoja w miejscu")
+
+    def _follow(self, xy: np.ndarray, top: float, yaw: float | None, moved: float, small: bool,
+                why: str) -> Action | None:
+        """Place at the latched target: a small change rides along the descent, a larger one re-plans the
+        hover, and a target that keeps moving sends the block back with `why`."""
+        plan = self._place_plan
+        assert plan is not None
         if not small and self._replans >= MAX_REPLANS:
-            return self._put_back(TARGET_MOVED, f"cel '{label}' nie stoi w miejscu ({moved * 1000:.0f} mm)")
+            return self._put_back(TARGET_MOVED, f"{why} ({moved * 1000:.0f} mm)")
         new = self._plan_place(xy, top, yaw)
         if isinstance(new, str):
             return self._put_back(UNREACHABLE, new)
@@ -872,7 +1049,7 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
             self._enter(PLACE)
             return None
         if self._replans >= MAX_REPLANS:
-            return self._put_back(TARGET_MOVED, f"cel '{label}' nie stoi w miejscu ({moved * 1000:.0f} mm)")
+            return self._put_back(TARGET_MOVED, f"{why} ({moved * 1000:.0f} mm)")
         self._replans = self.place.replans = self._replans + 1
         # Keep the carry's start: the arm is already at carry height.
         self._take_plan_place(replace(new, from_xy=plan.from_xy))
@@ -1019,8 +1196,10 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
                 return self._finish(NOT_FOUND, f"odlozony blok '{self.label}' niewidoczny w kamerach od "
                                                f"{cfg.verify_wait_s:.0f} s")
             return self.hold()
-        if not late and any(label not in self._support_now for label in self._supports):
-            # The blocks the picked one rested on get the same wait.
+        rests = {label: self._fresh(obs, label, since) for label in self.rest_on}
+        if not late and (any(label not in self._support_now for label in self._supports)
+                         or any(pose is None for pose in rests.values())):
+            # The blocks the picked one rested on, and a pose's supports, get the same wait.
             return self.hold()
         if self.target_label:
             target = self._fresh(obs, self.target_label, since)
@@ -1030,14 +1209,27 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
                 if shift > cfg.place_tol_m:
                     return self._finish(TARGET_MOVED, f"cel '{self.target_label}' przesuniety o "
                                                       f"{shift * 1000:.0f} mm przy odkladaniu")
+        shifts = {label: float(np.linalg.norm(np.asarray(pose.position, float) - self._rest_pos[label]))
+                  for label, pose in rests.items() if pose is not None}
+        if shifts:
+            moved = max(shifts, key=shifts.__getitem__)
+            place.target_shift_m = shift = shifts[moved]
+            if shift > cfg.place_tol_m:
+                return self._finish(TARGET_MOVED, f"podpora '{moved}' przesunieta o {shift * 1000:.0f} mm "
+                                                  "przy odkladaniu")
         p = np.asarray(mine.position, float)
         error = float(np.linalg.norm(p[:2] - plan.target_xy))
         dz = float(p[2]) - (plan.top_m + self.height_m / 2)
         place.placed_xyz = (float(p[0]), float(p[1]), float(p[2]))
         place.error_m, place.height_error_m = error, dz
-        where = f"'{self.target_label}'" if self.target_label else "stol"
+        place.placed_tilt_deg = lean = _lean_deg(mine.rotation, self.block)
+        # A target block's place is not checked for level.
+        level = bool(self.target_label) or not lean > LEVEL_TOL_DEG
+        where = self._where()
         offsets = f"{error * 1000:.0f} mm od srodka, {dz * 1000:+.0f} mm w pionie"
-        if error <= cfg.place_tol_m and abs(dz) <= PLACED_Z_TOL_M:
+        if not level:
+            offsets += f", pochylony o {lean:.0f} st."
+        if error <= cfg.place_tol_m and abs(dz) <= PLACED_Z_TOL_M and level:
             tilted = f" (dlon pochylona {self.grasp.tilt_deg:.0f} st.)" if self._tilt else ""
             return self._finish(PLACED, f"blok '{self.label}' odlozony na {where}: {offsets}{tilted}",
                                 success=True)
@@ -1085,15 +1277,18 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         if self._putting_back:
             where = "miejsce chwytu" if self.base_z > 0 else "stol"
         else:
-            where = f"'{self.target_label}'" if self.target_label else "stol"
+            where = self._where()
         if st.phase == TARGET:
-            return f"czekam na polozenie celu '{self.target_label}'"
+            if self.target_label:
+                return f"czekam na polozenie celu '{self.target_label}'"
+            return f"planuje odlozenie na {where}"
         if st.phase == CARRY_UP:
             return f"unosze blok do przeniesienia: {mm:.0f} mm"
         if st.phase == CARRY_OVER:
             return f"niose blok nad {where}: {mm:.0f} mm"
         if st.phase == LATCH:
-            return f"sprawdzam cel '{self.target_label}' w kamerach"
+            what = f"cel '{self.target_label}'" if self.target_label else f"podpory {_names(self.rest_on)}"
+            return f"sprawdzam {what} w kamerach"
         if st.phase == PLACE:
             return f"opuszczam blok na {where}: {mm:.0f} mm"
         if st.phase == PARK:
@@ -1101,6 +1296,29 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         if st.phase == VERIFY:
             return f"sprawdzam odlozenie w kamerach: {self._t - self._phase_t0:.1f} s"
         return super()._note()
+
+
+def _any_place(x: float, y: float, z: float, spec: BlockSpec) -> bool:
+    """A place check that allows every place: the jaw check reads only the objects' sizes."""
+    return True
+
+
+def _names(labels: tuple[str, ...]) -> str:
+    return " i ".join(f"'{label}'" for label in labels)
+
+
+def _lean_deg(rotation: Any, spec: BlockSpec) -> float:
+    """How far a block at `rotation` leans from lying flat [deg]; NaN when the rotation is invalid.
+
+    A cylinder lies flat with its long body x axis level. A box does with its body z axis, or an axis as
+    long as that one, vertical."""
+    R = np.asarray(rotation, float)
+    if R.shape != (3, 3) or not np.all(np.isfinite(R)):
+        return float("nan")
+    if any(part.kind == "cylinder" for part in spec.parts):
+        return math.degrees(math.asin(min(1.0, abs(float(R[2, 0])))))
+    up = max(abs(float(R[2, k])) for k in range(3) if abs(spec.half_size[k] - spec.half_size[2]) < 1e-6)
+    return math.degrees(math.acos(min(1.0, up)))
 
 
 def _heights(high: float, low: float) -> list[float]:
