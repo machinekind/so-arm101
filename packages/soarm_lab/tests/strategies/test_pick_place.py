@@ -643,11 +643,15 @@ def leaving(track: list[tuple[str, np.ndarray, float]]) -> Hook:
     return record
 
 
-@pytest.mark.parametrize("onto", ["stack", "table"])
-def test_the_open_hand_eases_2_mm_then_rises_slowly_clear_of_the_cube_before_it_moves_away(onto: str):
-    """As on the stand, with a 10 mm release margin: the hand still eases only 2 mm."""
+@pytest.mark.parametrize("onto", ["stack", "table", "stack with an approach table"])
+def test_the_open_hand_eases_2_mm_then_rises_slowly_clear_of_the_cube_before_it_moves_away(onto: str,
+                                                                                            tmp_path):
+    """As on the stand, with a 10 mm release margin: the hand still eases only 2 mm. With an approach table
+    the slow zone lies around the cube where the hand put it, not where the cameras see it."""
     if onto == "stack":
         s, world = stack(release_margin_m=0.010)
+    elif onto != "table":
+        s, world = table_stack(tmp_path, release_margin_m=0.010)
     else:
         s = built(place_x_m=0.22, place_y_m=0.08, release_margin_m=0.010)
         world = World([cube("red", PICK_XY)])
@@ -670,6 +674,10 @@ def test_the_open_hand_eases_2_mm_then_rises_slowly_clear_of_the_cube_before_it_
     assert near and min(jaw for _, jaw in near) >= red.top + clear - 0.001
     steps = [float(np.linalg.norm(b[0] - a[0])) for a, b in zip(near, near[1:], strict=False)]
     assert max(steps) <= 1.5 * 0.02 / s.hz
+    # Past that zone around where the hand put the cube, it speeds up again.
+    far = [float(np.linalg.norm(b[1] - a[1])) for a, b in zip(track, track[1:], strict=False)
+           if a[0] == b[0] == "park" and float(np.linalg.norm(a[1][:2] - red.xy)) >= s._near_m + 0.003]
+    assert far and min(far[:3]) > 2 * 0.02 / s.hz
     assert not world.hits
 
 
@@ -948,6 +956,25 @@ def test_a_cube_dropped_on_the_way_is_picked_again_and_placed():
     assert phases.count("carry_up") == 2
     assert world.body("red").z == pytest.approx(world.body("blue").top + CUBE[2])
     assert s.status.stopped_because.endswith("; ponowienia: 1 z 2")
+
+
+def test_a_cube_dropped_on_the_way_with_the_table_is_picked_again_latched_and_placed(tmp_path):
+    """A latch that asked for the final leg again before the drop does not carry over to the retry: the new
+    carry latches the target again, and the table still corrects the place."""
+    s, world = table_stack(tmp_path)
+
+    def slip_after_a_releg(world: World, s: PickPlaceStrategy) -> None:
+        if s.grasp.drops == 0:
+            s._releg = True
+        slip(world, s)
+
+    actions, phases = run(s, world, seconds=120.0, on_phase={"carry_over": slip_after_a_releg})
+
+    assert actions[-1].success and s.place.outcome == "placed", s.status.stopped_because
+    assert s.place.retries == 1 and s.place.retried == ("dropped",)
+    assert phases[-6:] == ["carry_over", "latch", "place", "let_go", "park", "verify"]
+    assert s.place.correction_from == FROM_TABLE
+    assert np.linalg.norm(world.body("red").xy - world.body("blue").xy) < 0.002
 
 
 def test_with_no_retry_left_a_cube_dropped_on_the_way_is_dropped():
@@ -1700,12 +1727,12 @@ def test_a_leg_start_the_arm_does_not_get_to_is_given_up_and_the_run_goes_on(tmp
     s, world = table_stack(tmp_path)
     arrived = s._arrived
 
-    def never_at_a_leg_start(point: np.ndarray) -> bool:
+    def never_at_a_leg_start(point: np.ndarray, **kwargs: bool) -> bool:
         plan = s._place_plan
         starts = [s._lead_point] + ([plan.lead_point] if plan is not None else [])
         if any(start is not None and np.allclose(point, start) for start in starts):
             return False
-        return arrived(point)
+        return arrived(point, **kwargs)
 
     s._arrived = never_at_a_leg_start  # type: ignore[method-assign]
     actions, _ = run(s, world, seconds=120.0)

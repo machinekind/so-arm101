@@ -56,13 +56,13 @@ hand is sent: the TCP goes to the place the cameras see plus the table's correct
 from the direction of the approach, so the held block lands where the target really is. The final leg into
 the open-jaw hover at the pick and into the carry hover at the place then always runs `approach_lead_m`
 along one direction (`approach_direction`, else the table's preferred one), as the table was measured. The
-pick's first aim takes the table's correction too, and a place that takes the table's correction counts
-the held block across the jaws where that aim put it: a later look between the jaw tips measures through
-the arm's own error. Where the table gives none (outside its corners, at another height, with the hand
-tilted or the leg out of reach), the place takes the pick's own correction instead: the aim the wrist
-camera centred the jaws on minus the detector's (`pick_shift`). Once `table_check_runs` picks in a row
-with the same table differ from it by more than `table_check_m`, the table is not trusted for the run. A
-put-back takes neither.
+pick's first aim takes the table's correction too, and so does the aim of a pick again after a drop or a
+fall. A place that takes the table's correction counts the held block across the jaws where the first aim
+put it: a later look between the jaw tips measures through the arm's own error. Where the table gives
+none (outside its corners, at another height, with the hand tilted or the leg out of reach), the place
+takes the pick's own correction instead: the aim the wrist camera centred the jaws on minus the
+detector's (`pick_shift`). Once `table_check_runs` picks in a row with the same table differ from it
+by more than `table_check_m`, the table is not trusted for the run. A put-back takes neither.
 The corrections move only what the arm is sent to; the latch, the jaw clearances and the check after the
 release still compare camera poses with camera poses.
 
@@ -1129,8 +1129,8 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         return problem
 
     def _plan_turn(self, xy: np.ndarray, top: float, yaw: float | None, turn: float, tcp_xy: np.ndarray,
-                   corr: Correction, heights: tuple[float, float, float, float, float, float], from_xy: np.ndarray,
-                   may_open_wide: bool) -> PlacePlan | str:
+                   corr: Correction, heights: tuple[float, float, float, float, float, float],
+                   from_xy: np.ndarray, may_open_wide: bool) -> PlacePlan | str:
         """Plan the place at heading turn `turn` with the TCP over `tcp_xy` as the cameras see it, sent there
         plus `corr`, or say why it does not fit. The jaw's clearance counts where the cameras see the
         place; the reach where the hand is sent."""
@@ -1290,7 +1290,7 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         self._placing, self._place_plan, self._replans, self._over_top = True, None, 0, 0.0
         self._retrying = ""
         self._target_seen, self._rest_seen = None, {}
-        self._leg_given_up = False
+        self._leg_given_up = self._releg = False
         self._check_table()
         self._table_hand = self._hand_from_table(centre, u, T[:2, 3], heading(kin, measured))
         self._enter(TARGET)
@@ -1706,7 +1706,8 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
             return None
         plan = self._place_plan
         assert plan is not None
-        if float(np.linalg.norm(self.tcp_cmd[:2] - plan.target_xy)) >= self._near_m:
+        # Where the hand was sent to place the block: the target plus the correction.
+        if float(np.linalg.norm(self.tcp_cmd[:2] - plan.target_xy - plan.correction)) >= self._near_m:
             return TouchStrategy._drive(self, self._park_point, self.approach_step_m)
         if not self._park_held:
             return TouchStrategy._drive(self, self._park_point, self.rise_step_m)
@@ -1829,10 +1830,12 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         return super()._recover(obs)
 
     def _regrasp(self, seen: Sighting) -> Action:
-        """Pick the block again where `seen` puts it, as grasp's recovery does.
+        """Pick the block again where `seen` puts it, moved by the approach table's correction there, as
+        grasp's recovery does.
 
         After a fall from the place sequence this is a retry: the place starts over, the place must still
         fit, and a hand above the new hover first moves over it at its height, clear of the target."""
+        seen = self._table_seen(seen)
         if self._fallen is None:
             return super()._regrasp(seen)
         outcome, why = self._fallen
@@ -1865,6 +1868,18 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
             self._transit_point = np.array([*self.hover_point[:2], over])
             self._move(TRANSIT, self._transit_point)
         return self.hold(f"{why} - ponawiam ({place.retries} z {cfg.place_retries})")
+
+    def _table_seen(self, seen: Sighting) -> Sighting:
+        """`seen` moved by the table's correction where it lies, at the grasp height, as the first aim is;
+        unchanged where the table gives none."""
+        base = seen.z - self.block.half_size[2]
+        top = (base if base > ON_BLOCK_M else 0.0) + self.height_m
+        found = self._lookup(np.asarray(seen.xy, float), self._grasp_height(top))
+        if not isinstance(found, Hit):
+            return seen
+        x, y = np.asarray(seen.xy, float) + np.asarray(found.delta_xy, float)
+        logger.info("Poprawka z tablicy przy ponownym chwycie: %.1f, %.1f mm", *(found.delta_xy * 1000))
+        return replace(seen, xy=(float(x), float(y)))
 
     def _over_z(self, z: float) -> float | None:
         """The TCP height over the new hover the hand moves to first from height `z` [m], or None when the

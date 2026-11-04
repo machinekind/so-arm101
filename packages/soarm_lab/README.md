@@ -621,7 +621,7 @@ measures how far, per spot, height and side, into an approach table (see
   that is the hover the jaw opens over; after a wrist look or a correction moves the aim, the hand goes
   back and runs the leg again before it goes down. At the place it is the hover over the target;
 - the place's hover and release move by the table's correction at that spot, height and side. The pick's
-  first aim moves by it too. The look between the jaw tips may then move the aim again, but it measures
+  first aim moves by it too, and so does a pick again after a drop or a fall. The look between the jaw tips may then move the aim again, but it measures
   through the arm's own play, so the place counts the held block across the jaws where the table's aim
   put it (`place.hand_shift_m` says how far that is from the look's aim);
 - what the run compares stays in camera poses: the latch on the target, the jaw clearances and the
