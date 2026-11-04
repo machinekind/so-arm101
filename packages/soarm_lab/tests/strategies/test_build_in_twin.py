@@ -12,17 +12,21 @@ a cuboid across both.
 
 `SOARM_CAMPAIGN_RUNS=<runs>` or `SOARM_CAMPAIGN_DIR=<folder>` also runs the seeded campaign: towers, also with
 the wrist camera and a camera error, knocked towers and bridges (default 10 seeds each), one JSON file per
-run in the folder (`soarm_lab.campaign`).
+run in the folder (`soarm_lab.campaign`). The stand towers see the blocks through a simulated stand's camera
+error (`twin_stand.Stand`), with hidden play in the arm (`Backlash`) and the stand's approach table; they run
+only for a campaign folder, as each stand's calibration takes minutes.
 """
 
 from __future__ import annotations
 
 import json
 import math
+import tempfile
 import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -40,12 +44,14 @@ from machinekind_twin.runtime import Twin  # noqa: E402
 from machinekind_twin.strategies import load_strategy, strategies  # noqa: E402
 from machinekind_twin.strategy import ObjectPose, StrategyRunner  # noqa: E402
 from machinekind_twin.workspace import Workspace  # noqa: E402
+from twin_stand import Stand  # noqa: E402
 
 from soarm_lab.blocks import block  # noqa: E402
 from soarm_lab.campaign import Run, campaign_dir, jsonable, record, runs_per_scenario  # noqa: E402
 from soarm_lab.kinematics import RobotKinematics  # noqa: E402
 from soarm_lab.planner.cli import FakePlanner  # noqa: E402
 from soarm_lab.robot import load_robot  # noqa: E402
+from soarm_lab.stand_errors import Backlash  # noqa: E402
 from soarm_lab.strategies.build import BUILT, BuildSettings, BuildStrategy  # noqa: E402
 from soarm_lab.strategies.jev import KEY_ENV  # noqa: E402
 
@@ -113,6 +119,20 @@ def fresh_twin() -> Iterator[Twin]:
 @dataclass
 class Clock:
     t: float = 0.0
+
+
+#: Where the cameras put block centres (n, 3) that really lie at the given ones [m, base frame].
+SeenAt = Callable[[np.ndarray], np.ndarray]
+
+
+def shifted(offset: tuple[float, float]) -> SeenAt:
+    """Every detection moved by `offset` [m, base frame x and y], as a camera calibration error would."""
+    d = np.array([*offset, 0.0])
+
+    def seen(P: np.ndarray) -> np.ndarray:
+        return np.atleast_2d(np.asarray(P, float)) + d
+
+    return seen
 
 
 @dataclass(frozen=True)
@@ -261,15 +281,15 @@ class Cameras:
     unless `kinds` says otherwise.
 
     A cube within `HIDDEN_M` of the TCP is not detected. Only the cube nearest the TCP can be taken by a
-    closing jaw, as the twin's stacking tracker does. `offset` shifts every detection [m, base frame x and
-    y], as a camera calibration error would.
+    closing jaw, as the twin's stacking tracker does. `error` puts each detection where a wrong camera
+    calibration would (`shifted`, `Stand.block_error`).
     """
 
     twin: Twin
     clock: Clock
     names: tuple[str, ...]
     kinds: dict[str, str] = field(default_factory=dict)
-    offset: tuple[float, float] = (0.0, 0.0)
+    error: SeenAt | None = None
 
     def __post_init__(self) -> None:
         spec = self.twin.workspace.spec()
@@ -290,8 +310,8 @@ class Cameras:
             position, rotation = poses[name]
             seen = None
             if np.linalg.norm(position - T_tcp[:3, 3]) > HIDDEN_M:
-                seen = CubeDetection(position + np.array([*self.offset, 0.0]), rotation, area_px=0.0,
-                                     confidence=1.0, n_cameras=2, t=self.clock.t)
+                at = position if self.error is None else self.error(position[None])[0]
+                seen = CubeDetection(at, rotation, area_px=0.0, confidence=1.0, n_cameras=2, t=self.clock.t)
             grip_q, grip_cmd = float(KIN.to_q(measured)[self.g]), float(KIN.to_q(command)[self.g])
             if name != nearest:
                 grip_cmd = grip_q
@@ -460,9 +480,9 @@ def tower_problem(twin: Twin) -> str:
 
 
 def build_tower(twin: Twin, seed: int, *, planned: bool, knock: bool = False, seconds: float = 700.0,
-                offset: tuple[float, float] = (0.0, 0.0), **extra: Any) -> Result:
+                error: SeenAt | None = None, play: Mapping[str, float] | None = None, **extra: Any) -> Result:
     """Run one seeded build of the tower to its end, then judge it by truth; `extra` goes to the settings,
-    `offset` shifts every detection."""
+    `error` moves every detection and `play` [deg per joint] wraps the strategy in `Backlash`."""
     placed = scene(seed)
     sinking = add_blocks(twin, *placed)
     settle(twin, 0.5)
@@ -479,7 +499,8 @@ def build_tower(twin: Twin, seed: int, *, planned: bool, knock: bool = False, se
         settings["plan_json"] = TOWER_JSON
     strategy = BuildStrategy(BuildSettings(**settings), planner=planner, threaded=False)
     wrist = ("wrist",) if settings["wrist_camera"] else ()
-    runner = StrategyRunner(twin, strategy, objects=Cameras(twin, clock, NAMES, offset=offset), cameras=wrist)
+    driven = Backlash(strategy, play) if play else strategy
+    runner = StrategyRunner(twin, driven, objects=Cameras(twin, clock, NAMES, error=error), cameras=wrist)
     seen = Recorder(twin, strategy, clock, NAMES, "blue", sinking)
     base0 = seen.base0
     knocked: list[float] = []
@@ -690,21 +711,34 @@ def build_bridge(twin: Twin, seed: int, seconds: float = 600.0) -> Result:
 #: Runs per scenario without `SOARM_CAMPAIGN_RUNS`; the campaign runs only when either variable is set.
 RUNS = 10
 CAMPAIGN = campaign_dir() is not None or runs_per_scenario(0) > 0
-#: Scenarios: `build_tower` keywords, a camera error [m] in a seeded direction, or the bridge.
+#: The stands' hidden play at the hand [m]. Runs share a stand by `STAND_RUNS`, so each stand's approach table
+#: is calibrated once.
+PLAY_M = 0.006
+STAND_RUNS = 10
+#: Scenarios: `build_tower` keywords, a camera error [m] in a seeded direction, or the bridge. `stand` names a
+#: stand's camera error ("tilted" or "uniform") with `play_m` of play; `table` uses its approach table.
 SCENARIOS: dict[str, dict[str, Any]] = {
     "tower, fixed plan": {"planned": False},
     "tower, fake planner": {"planned": True},
     "tower, fixed plan, wrist camera": {"planned": False, "wrist_camera": "wrist"},
     "tower, fixed plan, wrist camera, cameras 5 mm off": {"planned": False, "wrist_camera": "wrist",
                                                           "camera_error_m": 0.005},
+    "tower, fixed plan, wrist camera, play 6 mm, camera tilted 10 mm off, table": {
+        "planned": False, "wrist_camera": "wrist", "camera_error_m": 0.01, "stand": "tilted",
+        "play_m": PLAY_M, "table": True},
+    "tower, fixed plan, wrist camera, play 6 mm, camera tilted 10 mm off, pick_shift off": {
+        "planned": False, "wrist_camera": "wrist", "camera_error_m": 0.01, "stand": "tilted",
+        "play_m": PLAY_M, "pick_shift": "off"},
     "knocked tower, fixed plan": {"planned": False, "knock": True},
     "knocked tower, fake planner": {"planned": True, "knock": True},
     "bridge, fixed plan": {"bridge": True}}
-#: Pass bars: the share of runs built by the strategy and by truth, without artefacts. The run with a camera
-#: error only measures.
+#: Pass bars: the share of runs built by the strategy and by truth, without artefacts. The runs that only
+#: measure have zero.
 BARS = {"tower, fixed plan": 0.8, "tower, fake planner": 0.8, "tower, fixed plan, wrist camera": 0.8,
-        "tower, fixed plan, wrist camera, cameras 5 mm off": 0.0, "knocked tower, fixed plan": 0.6,
-        "knocked tower, fake planner": 0.6, "bridge, fixed plan": 0.8}
+        "tower, fixed plan, wrist camera, cameras 5 mm off": 0.0,
+        "tower, fixed plan, wrist camera, play 6 mm, camera tilted 10 mm off, table": 0.8,
+        "tower, fixed plan, wrist camera, play 6 mm, camera tilted 10 mm off, pick_shift off": 0.0,
+        "knocked tower, fixed plan": 0.6, "knocked tower, fake planner": 0.6, "bridge, fixed plan": 0.8}
 
 
 def as_run(scenario: str, result: Result, settings: dict[str, Any]) -> Run:
@@ -728,24 +762,58 @@ def as_run(scenario: str, result: Result, settings: dict[str, Any]) -> Run:
                result.sim_s, result.wall_s, details, result.corrections)
 
 
+_TABLES: Path | None = None
+
+
+def table_dir() -> Path:
+    """Where stand tables go without a campaign folder: one temporary folder per process."""
+    global _TABLES
+    if _TABLES is None:
+        _TABLES = Path(tempfile.mkdtemp(prefix="build-tables-"))
+    return _TABLES
+
+
+def seeded_build(scenario: str, seed: int) -> tuple[Result, dict[str, Any]]:
+    """One seeded build of `scenario` in a fresh twin, and the settings and errors it ran with."""
+    settings = dict(SCENARIOS[scenario])
+    error_m = settings.pop("camera_error_m", 0.0)
+    kind, play_m, table = settings.pop("stand", ""), settings.pop("play_m", 0.0), settings.pop("table", False)
+    error: SeenAt | None = None
+    play: dict[str, float] | None = None
+    record_as: dict[str, Any] = dict(settings)
+    if kind:
+        stand = Stand((seed - 100) // STAND_RUNS, camera=kind, camera_m=error_m, play_m=play_m)
+        error, play = stand.block_error(HALF), stand.play()
+        record_as.update(stand=stand.seed, camera=kind, camera_m=error_m, play_m=play_m)
+        if table:
+            stand.table(table_dir())
+            path = str(stand.table_path(table_dir(), stand.name))
+            settings["approach_file"] = record_as["approach_file"] = path
+    elif error_m:
+        a = np.random.default_rng(10_000 + seed).uniform(0.0, 2 * math.pi)
+        offset = (error_m * math.cos(a), error_m * math.sin(a))
+        error = shifted(offset)
+        record_as["camera_offset_m"] = offset
+    with fresh_twin() as twin:
+        if settings.get("bridge"):
+            result = build_bridge(twin, seed)
+        else:
+            result = build_tower(twin, seed, error=error, play=play, **settings)
+    return result, record_as
+
+
 @pytest.mark.campaign
 @pytest.mark.skipif(not CAMPAIGN, reason="set SOARM_CAMPAIGN_RUNS or SOARM_CAMPAIGN_DIR for the campaign")
 @pytest.mark.parametrize("scenario", [
     pytest.param(name, marks=pytest.mark.render) if settings.get("wrist_camera") else name
     for name, settings in SCENARIOS.items()])
 def test_seeded_campaign(twin_robots, scenario, capsys):
-    settings = dict(SCENARIOS[scenario])
-    error = settings.pop("camera_error_m", 0.0)
+    if SCENARIOS[scenario].get("stand") and campaign_dir() is None:
+        pytest.skip("calibrates stands; set SOARM_CAMPAIGN_DIR to keep their tables")
     results = []
     for seed in range(100, 100 + runs_per_scenario(RUNS)):
-        a = np.random.default_rng(10_000 + seed).uniform(0.0, 2 * math.pi)
-        offset = (error * math.cos(a), error * math.sin(a))
-        with fresh_twin() as twin:
-            if settings.get("bridge"):
-                result = build_bridge(twin, seed)
-            else:
-                result = build_tower(twin, seed, offset=offset, **settings)
-        record(as_run(scenario, result, {**settings, "camera_offset_m": offset}))
+        result, settings = seeded_build(scenario, seed)
+        record(as_run(scenario, result, settings))
         results.append(result)
     good = [r for r in results if r.tower and r.success and not r.artefacts]
     with capsys.disabled():

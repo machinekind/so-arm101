@@ -248,6 +248,22 @@ def test_each_step_gets_a_fresh_clock_and_the_runs_settings() -> None:
         assert made.obs[2].t == pytest.approx(1 / strategy.hz) and made.obs[2].step == 1
 
 
+def test_each_step_gets_the_approach_tables_settings() -> None:
+    table = Table()
+    strategy, steps = build(table, "placed", "placed", approach_file="~/stands/desk/approach.json",
+                            approach_direction="cw", approach_lead_m=0.025, pick_shift="auto",
+                            table_check_m=0.005, max_table_age_days=30.0)
+
+    run(strategy, table)
+
+    assert len(steps.made) == 2
+    for made in steps.made:
+        s = made.settings
+        assert (s.approach_file, s.approach_direction, s.pick_shift) == ("~/stands/desk/approach.json", "cw",
+                                                                          "auto")
+        assert (s.approach_lead_m, s.table_check_m, s.max_table_age_days) == (0.025, 0.005, 30.0)
+
+
 def test_the_model_plans_off_a_prompt_with_the_world_and_its_call_is_a_decision() -> None:
     table = Table()
     planner = FakePlanner([plan(*TOWER)])

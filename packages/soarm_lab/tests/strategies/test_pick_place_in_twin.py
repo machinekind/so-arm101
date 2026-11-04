@@ -6,15 +6,21 @@ every physics step that no block sinks into another or into the table. The physi
 the twin's own, so a block let go above another lands without sinking into it.
 The wrist-camera case needs rendering. No test here needs a model key.
 `twin_robots` pins discovery to soarm's folder.
+
+The seeded campaign also runs on simulated stands (`twin_stand.Stand`): the fake cameras see every block
+through the stand's camera error, `Backlash` adds hidden play to the arm, and the approach table comes from
+the stand's own calibration, made once per stand and kept.
 """
 
 from __future__ import annotations
 
 import math
+import tempfile
 import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -32,6 +38,7 @@ from machinekind_twin.runtime import Twin  # noqa: E402
 from machinekind_twin.strategies import load_strategy, strategies  # noqa: E402
 from machinekind_twin.strategy import ObjectPose, StrategyRunner  # noqa: E402
 from machinekind_twin.workspace import Workspace  # noqa: E402
+from twin_stand import Stand, truth_tcp  # noqa: E402
 
 from soarm_lab.blocks import block  # noqa: E402
 from soarm_lab.campaign import Run, campaign_dir, jsonable, record, runs_per_scenario  # noqa: E402
@@ -39,6 +46,8 @@ from soarm_lab.kinematics import RobotKinematics  # noqa: E402
 from soarm_lab.planner import Place, Step, TargetPose, holds, resolve, world_state  # noqa: E402
 from soarm_lab.planner.schema import SIDE_VECTORS  # noqa: E402
 from soarm_lab.robot import load_robot  # noqa: E402
+from soarm_lab.stand_errors import Backlash  # noqa: E402
+from soarm_lab.strategies.grasp import wrap  # noqa: E402
 from soarm_lab.strategies.grasp_jev import HELD_OPTIONS, NEXT_OPTIONS  # noqa: E402
 from soarm_lab.strategies.jev import KEY_ENV  # noqa: E402
 from soarm_lab.strategies.judges import Reply, checked_reply  # noqa: E402
@@ -69,6 +78,18 @@ KIN = RobotKinematics(SPEC)
 PAN_XY = KIN.joint_anchor(SPEC.arm_joints[0], SPEC.home)[:2]
 
 Objects = Callable[[], dict[str, ObjectPose]]
+#: Where the cameras put block centres (n, 3) that really lie at the given ones [m, base frame].
+SeenAt = Callable[[np.ndarray], np.ndarray]
+
+
+def shifted(offset: tuple[float, float]) -> SeenAt:
+    """Every detection moved by `offset` [m, base frame x and y], as a camera calibration error would."""
+    d = np.array([*offset, 0.0])
+
+    def seen(P: np.ndarray) -> np.ndarray:
+        return np.atleast_2d(np.asarray(P, float)) + d
+
+    return seen
 
 
 @pytest.fixture
@@ -238,8 +259,8 @@ class Cameras:
     """Tracker poses of every block from visible simulation detections.
 
     A block within `HIDDEN_M` of the TCP, or named in `hidden`, is not detected. With `nearest_grab`, only
-    the block nearest the TCP can be taken by a closing jaw, as the twin's stacking tracker does. `offset`
-    shifts every detection [m, base frame x and y], as a camera calibration error would.
+    the block nearest the TCP can be taken by a closing jaw, as the twin's stacking tracker does. `error`
+    puts each detection where a wrong camera calibration would (`shifted`, `Stand.block_error`).
     """
 
     twin: Twin
@@ -248,7 +269,7 @@ class Cameras:
     hidden: set[str] = field(default_factory=set)
     sources: dict[str, list[tuple[float, str]]] = field(default_factory=dict)
     nearest_grab: bool = False
-    offset: tuple[float, float] = (0.0, 0.0)
+    error: SeenAt | None = None
 
     def __post_init__(self) -> None:
         spec = self.twin.workspace.spec()
@@ -269,8 +290,8 @@ class Cameras:
             position, rotation = poses[name]
             seen = None
             if name not in self.hidden and np.linalg.norm(position - T_tcp[:3, 3]) > HIDDEN_M:
-                seen = CubeDetection(position + np.array([*self.offset, 0.0]), rotation, area_px=0.0,
-                                     confidence=1.0, n_cameras=2, t=self.clock.t)
+                at = position if self.error is None else self.error(position[None])[0]
+                seen = CubeDetection(at, rotation, area_px=0.0, confidence=1.0, n_cameras=2, t=self.clock.t)
             grip_q, grip_cmd = float(KIN.to_q(measured)[self.g]), float(KIN.to_q(command)[self.g])
             if self.nearest_grab and name != nearest:
                 grip_cmd = grip_q
@@ -831,14 +852,17 @@ def test_the_wrist_look_and_jev_pick_a_cube_and_place_it_on_another(twin):
 
 
 @pytest.mark.render
+@pytest.mark.parametrize("pick_shift", ["auto", "always"])
 @pytest.mark.parametrize("across", [False, True], ids=["along the jaws", "across the jaws"])
-def test_a_cube_pushed_after_the_wrist_look_is_still_gripped_and_placed(twin, across: bool):
+def test_a_cube_pushed_after_the_wrist_look_is_still_gripped_and_placed(twin, across: bool, pick_shift: str):
     """A push along the jaws leaves the cube between the open pads: the jaw closes at once. A push across them
-    is corrected first."""
+    is corrected first. The pick's own correction, used by default without a table, cannot tell that
+    correction from a camera error: it carries the push to the place, which still lands within the place
+    tolerance."""
     sinking = add_blocks(twin, Placed("red", "cube", (0.205, -0.05), 25.0, RED),
                          Placed("blue", "cube", TARGET_XY, 10.0, BLUE))
     clock = Clock()
-    strategy = built(label="red", place_on="blue", wrist_camera="wrist")
+    strategy = built(label="red", place_on="blue", wrist_camera="wrist", pick_shift=pick_shift)
     cameras = Cameras(twin, clock, ("red", "blue"))
     runner = StrategyRunner(twin, strategy, objects=cameras, cameras=("wrist",))
     pushed: list[np.ndarray] = []
@@ -866,7 +890,16 @@ def test_a_cube_pushed_after_the_wrist_look_is_still_gripped_and_placed(twin, ac
     settle(twin)
     red, red_rot = truth(twin, "red")
     blue, _ = truth(twin, "blue")
-    assert np.linalg.norm(red[:2] - blue[:2]) < 0.004 and tilt_deg(red_rot) < 2.0
+    off = float(np.linalg.norm(red[:2] - blue[:2]))
+    if pick_shift == "auto":
+        assert strategy.place.correction_from == "" and off < 0.004
+    else:
+        # Only a correction moves the aim; the jaws centre a push along them as they close.
+        moved = pushed[0] if across else np.zeros(2)
+        shift = np.array(strategy.place.correction_m)
+        assert strategy.place.correction_from == "pick" and np.linalg.norm(shift - moved) < 0.0015
+        assert off < strategy.place_settings.place_tol_m
+    assert tilt_deg(red_rot) < 2.0
     assert not sinking.artefacts(), sinking.depth
 
 
@@ -932,6 +965,8 @@ class PoseRun:
     #: blocks or a block and the table [m].
     corrections: int = 0
     sank_m: float = 0.0
+    #: What the simulation's truth says of the corrections in use (`in_use`).
+    in_use: dict[str, Any] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -982,11 +1017,12 @@ SPEED_MPS = 0.5
 
 
 def place_at_pose(twin: Twin, scene: PoseScene, on_carry: Callable[[Twin], None] | None = None,
-                  offset: tuple[float, float] = (0.0, 0.0),
+                  error: SeenAt | None = None, play: Mapping[str, float] | None = None,
                   **settings: Any) -> tuple[PoseRun, PickPlaceStrategy]:
     """Lay out `scene`, resolve its step with the planner from the simulation's poses, run pick_place to that
     pose with truth-fed trackers and measure the result. An "on" step goes to its block (`place_on`), the
-    others to the pose. `on_carry` runs once as the carry starts; `offset` shifts every detection.
+    others to the pose. `on_carry` runs once as the carry starts; `error` moves every detection and `play`
+    [deg per joint] wraps the strategy in `Backlash`.
 
     The watch also looks for artefacts: blocks that sink into each other or into the table, a block faster
     than `SPEED_MPS`, a block in the jaws at the end."""
@@ -1007,17 +1043,22 @@ def place_at_pose(twin: Twin, scene: PoseScene, on_carry: Callable[[Twin], None]
                  "place_yaw_deg": math.degrees(pose.yaw_rad), "supports": ", ".join(supports)}
     clock = Clock()
     strategy = built(label=scene.labels[held], block=kinds[held], **place, **settings)
-    cameras = Cameras(twin, clock, tuple(scene.labels), offset=offset)
+    cameras = Cameras(twin, clock, tuple(scene.labels), error=error)
     wrist = ("wrist",) if strategy.config.wrist_camera else ()
-    runner = StrategyRunner(twin, strategy, objects=labelled(cameras, scene.labels), cameras=wrist)
+    driven = Backlash(strategy, play) if play else strategy
+    runner = StrategyRunner(twin, driven, objects=labelled(cameras, scene.labels), cameras=wrist)
     start = {name: truth(twin, name)[0] for name in others}
     shift: list[float] = [0.0]
     carried: list[bool] = []
     fastest = {b.name: 0.0 for b in scene.blocks}
     last = {name: truth(twin, name)[0] for name in fastest}
     timeline: list[tuple[float, int, str]] = []
+    target = names[supports[0]] if relation == "on" else ""
+    used: dict[str, Any] = {}
 
     def watch() -> None:
+        if strategy.started:
+            in_use(twin, strategy, held, target, used)
         if on_carry is not None and not carried and strategy.started and strategy.status.phase == "carry_up":
             carried.append(True)
             on_carry(twin)
@@ -1040,7 +1081,7 @@ def place_at_pose(twin: Twin, scene: PoseScene, on_carry: Callable[[Twin], None]
     goal = np.array([pose.x_m, pose.y_m])
     if relation == "on":
         goal = truth(twin, names[supports[0]])[0][:2]
-    error = float(np.linalg.norm(position[:2] - goal))
+    off = float(np.linalg.norm(position[:2] - goal))
     after = truth_world(twin, scene.labels)
     artefacts = sinking.artefacts()
     for name in fastest:
@@ -1050,12 +1091,45 @@ def place_at_pose(twin: Twin, scene: PoseScene, on_carry: Callable[[Twin], None]
             artefacts.append(f"{scene.labels[name]} in the jaws")
     status = jsonable({"run": strategy.status, "grasp": strategy.grasp, "wrist": strategy.wrist,
                        "place": strategy.place})
-    run = PoseRun(strategy.place.outcome, error, tilt_deg(rotation), max(shift), holds(scene.step, after),
+    run = PoseRun(strategy.place.outcome, off, tilt_deg(rotation), max(shift), holds(scene.step, after),
                   pose, strategy.status.attempt, artefacts, strategy.status.stopped_because, clock.t,
                   time.monotonic() - started, timeline, status,
                   sum(look.verdict in ("moved", "off") for look in strategy.wrist.close_looks),
-                  sinking.deepest())
+                  sinking.deepest(), used)
     return run, strategy
+
+
+def rot2(a: float) -> np.ndarray:
+    c, s = math.cos(a), math.sin(a)
+    return np.array([[c, -s], [s, c]])
+
+
+def in_use(twin: Twin, strategy: PickPlaceStrategy, held: str, target: str, out: dict[str, Any]) -> None:
+    """The corrections as the run uses them, against the simulation's truth [m, base frame x and y].
+
+    At the pick's first close, `pick`: the correction the detector's aim needed for the TCP as it really
+    stands, the table's (`table`) and the pick's own (`own`). At the release onto a target block, `place`:
+    how far the TCP really stands from where the block's place in the hand needs it (`tcp`), how far the
+    block really sits in the hand from the plan's account (`hand`), the block's offset from the target with
+    the jaw still closed (`jaws`) and the heading against the target's bearing [deg]."""
+    phase = strategy.status.phase
+    if phase == "close" and "pick" not in out and strategy._detector_xy is not None:
+        e = truth_tcp(twin)[:2] - strategy.tcp_cmd[:2]
+        need = truth(twin, held)[0][:2] - strategy._detector_xy - e
+        hit, own = strategy._pick_hit, strategy.pick_shift()
+        out["pick"] = {"need": need, "table": None if hit is None else np.asarray(hit) - need,
+                       "own": None if own is None else own - need}
+    plan = strategy._place_plan
+    if phase == "let_go" and "place" not in out and target and plan is not None:
+        tcp = truth_tcp(twin)[:2]
+        block_xy, goal = truth(twin, held)[0][:2], truth(twin, target)[0][:2]
+        hand = rot2(-plan.psi) @ (plan.target_xy - plan.tcp_xy)
+        pan = strategy._pan_xy
+        bearing = math.atan2(float(goal[1] - pan[1]), float(goal[0] - pan[0]))
+        out["place"] = {"source": plan.source, "tcp": tcp - (goal - rot2(plan.psi) @ hand),
+                        "hand": block_xy - tcp - rot2(plan.psi) @ hand,
+                        "jaws": block_xy - goal,
+                        "heading_deg": math.degrees(wrap(plan.psi - bearing))}
 
 
 def test_a_cuboid_goes_across_two_cubes_as_a_bridge(twin):
@@ -1123,21 +1197,59 @@ def on_scene(seed: int) -> PoseScene:
 # --------------------------------------------------------------------------- the seeded campaign
 #: Runs per scenario without `SOARM_CAMPAIGN_RUNS`.
 RUNS = 10
-#: Seeded scenarios: the scene, the settings, the camera error [m] and the share of runs that must succeed.
-#: The wrist camera runs show the self-correcting pick inside pick_place; with every camera off by the
-#: same error, the place shows how much of it the target's pose passes on.
-SCENARIOS: dict[str, tuple[Callable[[int], PoseScene], dict[str, Any], float, float]] = {
-    "cube on cube": (on_scene, {}, 0.0, 0.9),
-    "cube on cube, wrist camera": (on_scene, {"wrist_camera": "wrist"}, 0.0, 0.9),
-    "cube on cube, wrist camera, cameras 5 mm off": (on_scene, {"wrist_camera": "wrist"}, 0.005, 0.0),
-    "cube on cube, wrist camera, cameras 10 mm off": (on_scene, {"wrist_camera": "wrist"}, 0.01, 0.0),
-    "cube on cube, wrist camera, cameras 15 mm off": (on_scene, {"wrist_camera": "wrist"}, 0.015, 0.0),
-    "cuboid across two cubes": (bridge_scene, {}, 0.0, 0.8),
-    "cube next to a cube": (next_to_scene, {}, 0.0, 0.9),
+#: The stands' hidden play at the hand [m]. Runs share a stand by `STAND_RUNS`, so each stand's approach table
+#: is calibrated once.
+PLAY_M = 0.006
+STAND_RUNS = 10
+WRIST = {"wrist_camera": "wrist"}
+
+
+@dataclass(frozen=True)
+class Scenario:
+    """A seeded campaign scenario: the scene, the settings and the share of runs that must succeed.
+
+    `error_m` puts the cameras off. With `camera` "offset" every detection moves by it in a seeded direction.
+    "uniform" and "tilted" go through a simulated stand (`twin_stand.Stand`) with that camera error and
+    `play_m` of hidden play, and with `table` the run uses the stand's calibrated approach table."""
+
+    scene: Callable[[int], PoseScene]
+    settings: Mapping[str, Any] = field(default_factory=dict)
+    share: float = 0.9
+    error_m: float = 0.0
+    camera: str = "offset"
+    play_m: float = 0.0
+    table: bool = False
+
+    @property
+    def on_stand(self) -> bool:
+        return self.camera != "offset"
+
+
+#: The seeded scenarios. Runs with every camera off by the same offset show how much of it reaches the
+#: place; the pick's own correction (`pick_shift`, `always` by default) takes it out. The stand scenarios add
+#: play and the approach table.
+SCENARIOS: dict[str, Scenario] = {
+    "cube on cube": Scenario(on_scene),
+    "cube on cube, wrist camera": Scenario(on_scene, WRIST),
+    "cube on cube, wrist camera, cameras 5 mm off": Scenario(on_scene, WRIST, 0.95, 0.005),
+    "cube on cube, wrist camera, cameras 5 mm off, pick_shift auto": Scenario(
+        on_scene, {**WRIST, "pick_shift": "auto"}, 0.95, 0.005),
+    "cube on cube, wrist camera, cameras 10 mm off": Scenario(on_scene, WRIST, 0.0, 0.01),
+    "cube on cube, wrist camera, cameras 15 mm off": Scenario(on_scene, WRIST, 0.0, 0.015),
+    "cube on cube, wrist camera, play 6 mm, camera tilted 10 mm off, table": Scenario(
+        on_scene, WRIST, 0.9, 0.01, "tilted", PLAY_M, table=True),
+    "cube on cube, wrist camera, play 6 mm, camera uniform 10 mm off, table": Scenario(
+        on_scene, WRIST, 0.9, 0.01, "uniform", PLAY_M, table=True),
+    "cube on cube, wrist camera, play 6 mm, camera tilted 10 mm off, pick_shift always": Scenario(
+        on_scene, WRIST, 0.0, 0.01, "tilted", PLAY_M),
+    "cube on cube, wrist camera, play 6 mm, camera tilted 10 mm off, pick_shift off": Scenario(
+        on_scene, {**WRIST, "pick_shift": "off"}, 0.0, 0.01, "tilted", PLAY_M),
+    "cuboid across two cubes": Scenario(bridge_scene, share=0.8),
+    "cube next to a cube": Scenario(next_to_scene),
 }
 
 
-def as_run(scenario: str, seed: int, run: PoseRun, offset: tuple[float, float],
+def as_run(scenario: str, seed: int, run: PoseRun, errors: Mapping[str, Any],
            settings: Mapping[str, Any]) -> Run:
     """A campaign record of `run`: the pick attempts, and the placed block's offset from its place."""
     done = run.outcome == "placed" and run.ok and run.holds[0]
@@ -1147,43 +1259,75 @@ def as_run(scenario: str, seed: int, run: PoseRun, offset: tuple[float, float],
         reason = "placed, but off its place by truth"
     else:
         reason = "artefact" if run.artefacts else ""
-    details = {"settings": dict(settings), "camera_offset_m": offset, "why": "" if done else run.why,
+    details = {"settings": dict(settings), **errors, "why": "" if done else run.why,
                "outcome": run.outcome, "tilt_deg": run.tilt_deg, "others_shift_m": run.others_shift_m,
                "holds": run.holds, "pose": run.pose, "timeline": run.timeline, "status": run.status,
-               "sank_m": run.sank_m}
+               "sank_m": run.sank_m, "in_use": run.in_use}
     return Run(f"pick_place: {scenario}", seed, done and not run.artefacts, run.attempts, run.error_m, reason,
                run.artefacts, run.sim_s, run.wall_s, details, run.corrections)
 
 
+def table_dir() -> Path:
+    """Where stand tables go without a campaign folder: one temporary folder per process."""
+    global _TABLES
+    if _TABLES is None:
+        _TABLES = Path(tempfile.mkdtemp(prefix="pick-place-tables-"))
+    return _TABLES
+
+
+_TABLES: Path | None = None
+
+
+def seeded_run(scenario: Scenario, seed: int) -> tuple[PoseRun, dict[str, Any], dict[str, Any]]:
+    """One seeded run of `scenario` in a fresh twin: the run, what put the cameras off and the settings."""
+    settings: dict[str, Any] = dict(scenario.settings)
+    error: SeenAt | None = None
+    play: dict[str, float] | None = None
+    errors: dict[str, Any] = {}
+    if scenario.on_stand:
+        stand = Stand(seed // STAND_RUNS, camera=scenario.camera, camera_m=scenario.error_m,
+                      play_m=scenario.play_m)
+        error, play = stand.block_error(block("cube").half_size[2]), stand.play()
+        errors = {"stand": stand.seed, "camera": scenario.camera, "camera_m": scenario.error_m,
+                  "play_m": scenario.play_m}
+        if scenario.table:
+            stand.table(table_dir())
+            settings["approach_file"] = str(stand.table_path(table_dir(), stand.name))
+    elif scenario.error_m:
+        a = np.random.default_rng(10_000 + seed).uniform(0.0, 2 * math.pi)
+        offset = (scenario.error_m * math.cos(a), scenario.error_m * math.sin(a))
+        error = shifted(offset)
+        errors = {"camera_offset_m": offset}
+    with fresh_twin() as twin:
+        run = place_at_pose(twin, scenario.scene(seed), error=error, play=play, **settings)[0]
+    return run, errors, settings
+
+
 @pytest.mark.campaign
 @pytest.mark.parametrize("scenario", [
-    pytest.param(name, marks=pytest.mark.render) if settings.get("wrist_camera") else name
-    for name, (_, settings, _, _) in SCENARIOS.items()])
+    pytest.param(name, marks=pytest.mark.render) if s.settings.get("wrist_camera") else name
+    for name, s in SCENARIOS.items()])
 def test_seeded_campaign(twin_robots, scenario):
     """Seeded scenes, each in a fresh twin: at least the scenario's share of runs places the block within
     8 mm of its place and level, by truth and by the planner's check, without an artefact. Without a camera
     error, a block the strategy calls placed is where truth says, and no other block moves 2 mm.
 
-    The runs with a camera error only measure: their bar is zero, and they run only for a campaign folder
-    (`SOARM_CAMPAIGN_DIR`)."""
-    scene_of, settings, error, share = SCENARIOS[scenario]
-    if not share and campaign_dir() is None:
-        pytest.skip("measures only; set SOARM_CAMPAIGN_DIR to keep the runs")
+    The runs that only measure (bar zero), and the stand runs, whose stands each take minutes to calibrate,
+    run only for a campaign folder (`SOARM_CAMPAIGN_DIR`)."""
+    sc = SCENARIOS[scenario]
+    if (not sc.share or sc.on_stand) and campaign_dir() is None:
+        pytest.skip("measures only or calibrates stands; set SOARM_CAMPAIGN_DIR to keep the runs")
     runs = runs_per_scenario(RUNS)
     results = []
     for seed in range(runs):
-        rng = np.random.default_rng(10_000 + seed)
-        a = rng.uniform(0.0, 2 * math.pi)
-        offset = (error * math.cos(a), error * math.sin(a))
-        with fresh_twin() as twin:
-            run = place_at_pose(twin, scene_of(seed), offset=offset, **settings)[0]
-        record(as_run(scenario, seed, run, offset, settings))
+        run, errors, settings = seeded_run(sc, seed)
+        record(as_run(scenario, seed, run, errors, settings))
         results.append(run)
     report = "\n".join(f"seed {k}: {run.line()}" for k, run in enumerate(results))
     print(report)
     good = [r for r in results if r.outcome == "placed" and r.ok and r.holds[0] and not r.artefacts]
-    assert len(good) >= math.ceil(share * runs - 1e-9), report
-    if not error:
+    assert len(good) >= math.ceil(sc.share * runs - 1e-9), report
+    if not sc.error_m:
         assert all(r.ok and r.holds[0] for r in results if r.outcome == "placed"), report
         assert max(r.others_shift_m for r in results) < 0.002, report
 

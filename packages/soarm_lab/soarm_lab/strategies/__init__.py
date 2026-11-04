@@ -8,6 +8,9 @@ the network. `grasp` picks up a block from above. `jaw` supplies the shared cont
 `grasp_wrist` (`wrist`) refines the grasp aim and yaw from the wrist camera.
 `grasp_jev` asks Jev after each close and lift through `judges.Consultation`.
 With `probe: true`, it also asks after each probe.
+`pick_place` picks a block and places it on another block or at a pose; `build` runs one `pick_place` per
+step of a plan. `calibrate_approach` measures how the arm lands on what the stand's cameras see, into the
+approach table that `pick_place` reads; `approach` holds the final-leg directions and place heights both use.
 `packages/soarm_lab/pyproject.toml` registers each strategy under the `machinekind_twin.strategies` entry
 point group. The twin finds it there and runs it through its
 `StrategyRunner`.

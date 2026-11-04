@@ -689,9 +689,9 @@ class TouchStrategy(Strategy[TouchSettings]):
             self._stalled = np.asarray(point, float).copy()
         return False
 
-    def _settled(self, point: np.ndarray, *, sag: bool = False) -> bool:
+    def _settled(self, point: np.ndarray, *, sag: bool = False, watch: bool = True) -> bool:
         """Whether the arm has been arrived at `point` (`_arrived`) for `settle_ticks` ticks in a row."""
-        self._settle_count = self._settle_count + 1 if self._arrived(point, sag=sag) else 0
+        self._settle_count = self._settle_count + 1 if self._arrived(point, sag=sag, watch=watch) else 0
         return self._settle_count >= self.settle_ticks
 
     def _sags(self, point: np.ndarray) -> bool:
