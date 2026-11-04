@@ -50,6 +50,18 @@ out of the jaw on the way, through grasp's recovery. A retry after the check nee
 block, lying flat, and of the target or each support. The hand first moves over the block at its
 height, and each new pick gets the whole `max_attempts`. `PlaceStatus.retries` counts the retries.
 
+With `approach_file`, the approach table that `calibrate_approach` measured on this stand moves where the
+hand is sent: the TCP goes to the place the cameras see plus the table's correction there, at the height and
+from the direction of the approach, so the held block lands where the target really is. The final leg into
+the open-jaw hover at the pick and into the carry hover at the place then always runs `approach_lead_m`
+along one direction (`approach_direction`, else the table's preferred one), as the table was measured. The
+pick's first aim takes the table's correction too. Where the table gives none (outside its corners, at
+another height, with the hand tilted or the leg out of reach), the place takes the pick's own correction
+instead: the aim the wrist camera centred the jaws on minus the detector's (`pick_shift`). A table that
+disagrees with that by more than `table_check_m` is not trusted for the run. A put-back takes neither.
+The corrections move only what the arm is sent to; the latch, the jaw clearances and the check after the
+release still compare camera poses with camera poses.
+
 At a pose, only headings whose jaw stays `JAW_SIDE_CLEAR_M` clear of every other object at the release
 count, from the objects' poses and catalog sizes; the held block and its supports do not count. Over
 supports the run latches each one's newest fresh pose as it does a target block's and moves the pose
@@ -86,9 +98,11 @@ from typing import Any
 import numpy as np
 from machinekind_twin_api.strategy import Action, ObjectPose, Observation, RunInfo
 
+from ..approach_table import DIRECTIONS, ApproachTable, Hit
 from ..blocks import BlockSpec, block
 from ..blocks.classic_world import BLOCKS
 from ..planner.world import WorldObject, overlap, world_state
+from .approach import carry_heights, direction_vector, place_heights
 from .grasp import (
     CARRY,
     DROP_SETTLE_S,
@@ -148,12 +162,20 @@ PLACE_PHASE_NAMES = {**JEV_PHASE_NAMES, TARGET: "planuje odlozenie", CARRY_UP: "
                      PLACE: "opuszczam blok", PARK: "odsuwam ramie od bloku", VERIFY: "sprawdzam odlozenie",
                      RETRY: "ponawiam odlozenie", TRANSIT: "przenosze reke nad blok"}
 
+#: When the pick's own correction moves the place (`PickPlaceSettings.pick_shift`): where a table that is
+#: set gives none, also without a table, or never.
+AUTO = "auto"
+ALWAYS = "always"
+OFF = "off"
+PICK_SHIFTS = (AUTO, ALWAYS, OFF)
+#: Where the correction of a place came from, in `PlaceStatus.correction_from`.
+FROM_TABLE = "table"
+FROM_PICK = "pick"
+
 #: Hover re-plans after the latched target moved, before the block goes back.
 MAX_REPLANS = 2
 #: The least clearance of the held block's bottom above the target while carrying [m].
 MIN_CARRY_CLEAR_M = 0.01
-#: Height step for lower carry and retreat heights when the wanted one is out of reach [m].
-HEIGHT_STEP_M = 0.005
 #: The top of the catalog's tallest block lying on the table [m].
 TABLE_TOP_M = max(2 * b.half_size[2] for b in BLOCKS.values())
 #: A block the picked one rests on has its centre at most this far from the picked one's across [m].
@@ -168,6 +190,8 @@ PLACED_Z_TOL_M = 0.01
 #: A fresh target pose this close to the planned one is latched without a new hover [m, deg].
 LATCH_SAME_M = 0.004
 LATCH_SAME_DEG = 3.0
+#: With a final leg, a latch that moves the hover more than this runs the leg again [m].
+RELEG_M = 0.001
 #: The least clearance of the open jaw's lowest point over the placed block's top before the hand leaves,
 #: where the arm cannot rise `retreat_clear_m` [m].
 JAW_CLEAR_M = 0.004
@@ -238,6 +262,23 @@ class PickPlaceSettings(GraspJevSettings, WristGraspSettings):
     place_retries: int = 2
     #: As in `grasp`, but on by default: the hand tilts where the pick or the place needs it [deg].
     max_tilt_deg: float = 30.0
+    #: The approach table `calibrate_approach` wrote for this stand [path]. Empty sends the hand where the
+    #: cameras see the place.
+    approach_file: str = ""
+    #: The side the final leg into the pick's and the place's hover comes from [out|in|ccw|cw]. Empty takes
+    #: the table's preferred one, and without a table the direct way.
+    approach_direction: str = field(default="", metadata={"choices": ("", *DIRECTIONS)})
+    #: Length of that final horizontal leg [m].
+    approach_lead_m: float = 0.03
+    #: Where the table gives no correction, the place takes the pick's own: the aim the wrist camera centred
+    #: the jaws on minus the detector's [auto|always|off]. `auto` only with a table set, `always` without
+    #: one too.
+    pick_shift: str = field(default=ALWAYS, metadata={"choices": PICK_SHIFTS})
+    #: The table's correction at the pick may differ this much from the pick's own before the run stops
+    #: trusting the table [m].
+    table_check_m: float = 0.004
+    #: A table older than this many days is not used. Zero takes any age.
+    max_table_age_days: float = 0.0
 
 
 @dataclass
@@ -291,6 +332,25 @@ class PlaceStatus:
     supports: tuple[str, ...] = ()
     support_shift_m: float = float("nan")
     support_moved: bool = False
+    #: Why `approach_file` is not used, '' when it is or none is set, and the final leg's direction, '' for
+    #: the direct way.
+    table_problem: str = ""
+    direction: str = ""
+    #: About the table in use: settings it was measured with that differ from these, or a pick it disagreed
+    #: with.
+    table_note: str = ""
+    #: The correction added to where the hand is sent at the release [m, base frame x and y], where it came
+    #: from (`FROM_TABLE`, `FROM_PICK` or '') and why the table gave none there ('' when it did or none is
+    #: set).
+    correction_m: tuple[float, float] = (0.0, 0.0)
+    correction_from: str = ""
+    table_miss: str = ""
+    #: How far the table's correction at the pick lay from the pick's own [m]; NaN when not compared. Over
+    #: `table_check_m` the table is not used for the rest of the run.
+    table_check_m: float = float("nan")
+    table_trusted: bool = True
+    #: The place's final leg into the carry hover [m]; 0 for the direct way.
+    lead_m: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -302,7 +362,7 @@ class PlacePlan:
     top_m: float
     yaw: float | None
     #: Closing heading at the release [rad, base frame], its turn from the carry's heading [rad] and the
-    #: TCP's x and y there [m].
+    #: TCP's x and y there as the cameras see the place [m].
     psi: float
     turn: float
     tcp_xy: np.ndarray
@@ -315,14 +375,51 @@ class PlacePlan:
     #: At the retreat the jaw still flanks the placed block, so it opens fully and the hand leaves away
     #: from the fixed jaw.
     wide: bool = False
+    #: Added to `tcp_xy` where the hand is sent [m], and where it came from (`FROM_TABLE`, `FROM_PICK` or '').
+    correction: np.ndarray = field(default_factory=lambda: np.zeros(2))
+    source: str = ""
+    #: The final horizontal leg into the hover at the carry height [m, base frame x and y], or None.
+    leg: np.ndarray | None = None
+    #: Why the table gave no correction here, '' when it did or none is set.
+    miss: str = ""
+
+    @property
+    def cmd_xy(self) -> np.ndarray:
+        """Where the TCP is sent over the place [m, base frame x and y]."""
+        return self.tcp_xy + self.correction
 
     @property
     def hover(self) -> np.ndarray:
-        return np.array([*self.tcp_xy, self.carry_z])
+        return np.array([*self.cmd_xy, self.carry_z])
 
     @property
     def release(self) -> np.ndarray:
-        return np.array([*self.tcp_xy, self.release_z])
+        return np.array([*self.cmd_xy, self.release_z])
+
+    @property
+    def lead_point(self) -> np.ndarray | None:
+        """Where the final leg starts, at the carry height; None without one."""
+        return None if self.leg is None else np.array([*(self.cmd_xy - self.leg), self.carry_z])
+
+
+@dataclass(frozen=True)
+class Correction:
+    """One way to correct a place: the correction [m], where it came from and the final leg it needs (None:
+    none), or a leg it takes if the arm reaches it."""
+
+    delta: np.ndarray
+    source: str
+    leg: np.ndarray | None
+    leg_required: bool = False
+    #: Why the table gave no correction here, '' when it did or none is set.
+    miss: str = ""
+
+
+#: Why the table gave no correction at the place, for the panel: the table's own reasons and this run's.
+MISS_NOTES = {"table": "tablica nieuzyteczna", "height": "wysokosc poza tablica", "direction":
+              "tablica bez tego kierunku", "outside": "cel poza tablica", "stale": "tablica za stara",
+              "tilt": "dlon pochylona", "check": "tablica nie zgadza sie z chwytem",
+              "lead": "podejscie z kierunku tablicy poza zasiegiem"}
 
 
 class NoJudge:
@@ -408,6 +505,19 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
             raise ValueError(f"pick_place: place_z_m {config.place_z_m} above the table needs supports")
         if config.send_frames and not config.wrist_camera.strip():
             raise ValueError("pick_place: send_frames needs wrist_camera")
+        if config.approach_direction not in ("", *DIRECTIONS):
+            raise ValueError(f"pick_place: approach_direction must be empty or one of "
+                             f"{', '.join(DIRECTIONS)}, is {config.approach_direction!r}")
+        if config.pick_shift not in PICK_SHIFTS:
+            raise ValueError(f"pick_place: pick_shift must be one of {', '.join(PICK_SHIFTS)}, is "
+                             f"{config.pick_shift!r}")
+        for name in ("approach_lead_m", "table_check_m"):
+            value = getattr(config, name)
+            if not value > 0 or not math.isfinite(value):
+                raise ValueError(f"pick_place: {name} must be positive, is {value}")
+        if not config.max_table_age_days >= 0:
+            raise ValueError(f"pick_place: max_table_age_days must be zero or more, is "
+                             f"{config.max_table_age_days}")
         #: Jev judges the close and lift. Without it the grasp follows plain `grasp`.
         self.judged = config.judge == JEV
         super().__init__(config, judge=judge if self.judged else NoJudge(), threaded=threaded, clock=clock,
@@ -431,6 +541,9 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         self._jaw_clouds: dict[float, tuple[np.ndarray, ...]] = {}
         #: The latest observation, for a pick again that grasp's recovery starts.
         self._obs: Observation | None = None
+        #: The approach table in use, or None, and the final leg's direction ('' for the direct way).
+        self._table: ApproachTable | None = None
+        self._direction = ""
         self._phases.update({CARRY: self._lifted, TARGET: self._target, CARRY_UP: self._carry_up,
                              CARRY_OVER: self._carry_over, LATCH: self._latch, PLACE: self._place,
                              PARK: self._park, VERIFY: self._verify, RETRY: self._retry,
@@ -501,15 +614,64 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         #: The latest objects, and the other objects a jaw at a pose must clear worked out from them.
         self._scene: Mapping[str, ObjectPose] = {}
         self._others: list[WorldObject] | None = None
+        #: The table's correction at the pick [m], or None; whether the table is still trusted; whether the
+        #: carry has run the final leg, and whether it runs it again after the latch.
+        self._pick_hit: np.ndarray | None = None
+        self._table_trusted = True
+        self._leg_done = True
+        self._releg = False
 
     def start(self, run: RunInfo, obs: Observation) -> None:
-        """Start the grasp family's checks, then clear the place state."""
+        """Start the grasp family's checks, clear the place state and read the approach table."""
         # A retry's pick widened the attempt budget.
         self.grasp_settings = self.place_settings
         super().start(run, obs)
         self.place = PlaceStatus(target=self.target_label, rests_on=self.rest_on)
         self._reset_place()
         self._start_tcp = self.tcp_cmd.copy()
+        self._load_table()
+
+    def _load_table(self) -> None:
+        """Read `approach_file` and choose the final leg's direction. A table that cannot be used leaves a
+        note, and the run goes on without it."""
+        cfg, place = self.place_settings, self.place
+        path = cfg.approach_file.strip()
+        self._table, problem = None, ""
+        if path:
+            try:
+                table = ApproachTable.load(path)
+            except (OSError, ValueError) as exc:
+                problem = f"tablica podejscia nieczytelna: {exc}"
+            else:
+                why = table.problem(self.kin.spec.name)
+                if why:
+                    problem = f"tablica podejscia nieuzyta: {why}"
+                else:
+                    self._table = table
+        self._direction = cfg.approach_direction or (self._table.preferred_direction if self._table else "")
+        if self._table is not None and not self._direction:
+            self._table, problem = None, "tablica podejscia bez kierunku podejscia"
+        place.table_problem, place.direction = problem, self._direction
+        if problem:
+            logger.warning("%s (%s)", problem, path)
+        if self._table is not None:
+            differ = self._protocol_differences(self._table)
+            if differ:
+                logger.warning("Tablica podejscia zmierzona z innymi ustawieniami: %s", differ)
+                place.table_note = f"tablica zmierzona z innymi ustawieniami: {differ}"
+
+    def _protocol_differences(self, table: ApproachTable) -> str:
+        """The settings that differ from those the table was measured with, as `name table/here`."""
+        protocol = table.data.get("protocol") or {}
+        cfg = self.place_settings
+        pairs = (("lead_m", cfg.approach_lead_m), ("carry_clearance_m", cfg.carry_clearance_m),
+                 ("place_gap_m", cfg.place_gap_m), ("place_speed_mps", cfg.place_speed_mps))
+        out = []
+        for key, here in pairs:
+            there = protocol.get(key)
+            if isinstance(there, (int, float)) and abs(float(there) - float(here)) > 1e-9:
+                out.append(f"{key} {float(there):g}/{float(here):g}")
+        return ", ".join(out)
 
     def act(self, obs: Observation) -> Action:
         self._scene, self._others, self._obs = obs.objects, None, obs
@@ -683,6 +845,98 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
                 xy, top = xy + (now - before)[:2], max(top + float(now[2] - before[2]), 0.0)
         return xy, top
 
+    # ------------------------------------------------------------------ the approach table
+    def lead_in(self, xy: np.ndarray) -> np.ndarray | None:
+        """The final leg into the hover over `xy`: `approach_lead_m` along the approach direction, or None
+        without one."""
+        if not self._direction:
+            return None
+        try:
+            d = direction_vector(self._direction, xy, self._pan_xy)
+        except ValueError:
+            return None
+        return self.place_settings.approach_lead_m * d
+
+    def _lookup(self, xy: np.ndarray, z: float) -> Hit | str:
+        """The table's correction for the TCP sent over `xy` at height `z` along the approach direction, or
+        why there is none ('' without a table)."""
+        if self._table is None:
+            return ""
+        if not self._table_trusted:
+            return "check"
+        if self._tilt:
+            return "tilt"
+        found = self._table.lookup(xy, z, self._direction, robot=self.kin.spec.name,
+                                   max_age_days=self.place_settings.max_table_age_days)
+        return found if isinstance(found, Hit) else found.reason
+
+    def _first_shift(self, xy: np.ndarray) -> np.ndarray:
+        """The pick's first aim takes the table's correction at the grasp height; the residual without one."""
+        self._pick_hit = None
+        found = self._lookup(np.asarray(xy, float), self._grasp_height(self.top_nominal))
+        if isinstance(found, Hit):
+            self._pick_hit = np.asarray(found.delta_xy, float).copy()
+            self.wrist.residual_m, self.wrist.residual_runs = (0.0, 0.0), 0
+            return self._pick_hit
+        return super()._first_shift(xy)
+
+    @property
+    def _table_aimed(self) -> bool:
+        """Whether the pick's first aim took the table's correction."""
+        return self._pick_hit is not None and bool(np.any(self._first_shifted))
+
+    @property
+    def _saves_residual(self) -> bool:
+        return not self._table_aimed
+
+    def _pick_correction(self) -> np.ndarray | None:
+        """The pick's own correction for the place, when `pick_shift` allows it and the pick has one."""
+        cfg = self.place_settings
+        if cfg.pick_shift == OFF or (cfg.pick_shift == AUTO and not cfg.approach_file.strip()):
+            return None
+        return self.pick_shift()
+
+    def _check_table(self) -> None:
+        """Compare the table's correction at the pick with the pick's own. Over `table_check_m` the table is
+        not used for the rest of the run, when the pick's correction can stand in for it."""
+        if not self._table_aimed or self._pick_hit is None:
+            return
+        shift = self.pick_shift()
+        if shift is None:
+            return
+        place = self.place
+        off = place.table_check_m = float(np.linalg.norm(shift - self._pick_hit))
+        if off <= self.place_settings.table_check_m or self._pick_correction() is None:
+            return
+        self._table_trusted = place.table_trusted = False
+        place.table_note = f"tablica nie zgadza sie z chwytem o {off * 1000:.0f} mm - poprawka z chwytu"
+        logger.warning("%s", place.table_note)
+
+    def _corrections(self, kind: str, tcp_xy: np.ndarray, release_z: float) -> Correction | None:
+        """The correction of `kind` for a release with the TCP over `tcp_xy` as the cameras see it, at
+        `release_z`, or None when it does not apply.
+
+        `FROM_TABLE` is the table's, with the final leg it was measured with. The fallback is the pick's own,
+        else the table's without the leg, else none; its leg is taken where the arm reaches it."""
+        if self._putting_back:
+            return None if kind == FROM_TABLE else Correction(np.zeros(2), "", None)
+        leg = None if self._tilt else self.lead_in(tcp_xy)
+        found = self._lookup(tcp_xy, release_z)
+        miss = "" if isinstance(found, Hit) else found
+        if kind == FROM_TABLE:
+            if not isinstance(found, Hit) or leg is None:
+                return None
+            return Correction(np.asarray(found.delta_xy, float), FROM_TABLE, leg, leg_required=True)
+        if isinstance(found, Hit) and leg is not None:
+            # The table applied, but no plan with its leg fitted.
+            miss = "lead"
+        shift = self._pick_correction()
+        if shift is not None:
+            return Correction(shift, FROM_PICK, leg, miss=miss)
+        if isinstance(found, Hit):
+            return Correction(np.asarray(found.delta_xy, float), FROM_TABLE, None, miss=miss)
+        return Correction(np.zeros(2), "", leg, miss=miss)
+
     # ------------------------------------------------------------------ planning
     def _pose(self, shift: np.ndarray | None = None) -> tuple[np.ndarray, float, float]:
         """Return the pose's centre [m], the height the held block's bottom lands at [m] and its yaw [rad],
@@ -775,19 +1029,23 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         """Plan the carry, release and retreat over `xy` at surface `top`, or say why none is reachable.
 
         The carry starts at `from_xy` (the TCP now) and also clears `over_m` and what the block was picked
-        from. `hang` and `hand_xy` place the held block in the hand; the measured ones by default.
+        from. `hang` and `hand_xy` place the held block in the hand; the measured ones by default. The
+        table's correction with its final leg comes first, at any heading; the fallback (`_corrections`)
+        after it.
         """
         cfg = self.place_settings
         hang = self._hang if hang is None else hang
         hand_xy = self._hand_xy if hand_xy is None else hand_xy
         from_xy = self.tcp_cmd[:2].copy() if from_xy is None else np.asarray(from_xy, float).copy()
-        floor = max(top, TABLE_TOP_M, over_m, self._bottom())
-        release_z = top + cfg.place_gap_m + GRIP_SLIP_M + hang
-        low = floor + MIN_CARRY_CLEAR_M + hang
-        want = max(floor + cfg.carry_clearance_m + hang, low)
+        release_z, want, low = place_heights(top, hang, cfg.place_gap_m, GRIP_SLIP_M, TABLE_TOP_M,
+                                             cfg.carry_clearance_m, MIN_CARRY_CLEAR_M,
+                                             over=max(over_m, self._bottom()))
         if over_m > 0:
             # Never lower the held block over what the hand hovers above.
             want = max(want, float(self.tcp_cmd[2]))
+        turns = self._turns(yaw, np.asarray(xy, float), hand_xy)
+        if not turns:
+            return "dlon pochylona nie ustawi bloku zgodnie z celem"
         # TCP heights where the jaw at the release opening clears the placed block by `retreat_clear_m` and
         # by `JAW_CLEAR_M`, and where the fully open moving jaw does.
         placed_top = top + cfg.place_gap_m + self.height_m
@@ -795,55 +1053,78 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         safe_z = placed_top + cfg.retreat_clear_m + reach
         clear_z = placed_top + JAW_CLEAR_M + reach
         wide_z = placed_top + JAW_CLEAR_M + self.kin.jaw_reach(FULL_OPEN, moving=True, tilt=self._tilt)
+        heights = (release_z, want, low, safe_z, clear_z, wide_z)
+        problem = ""
+        for kind in (FROM_TABLE, ""):
+            fallback, problem = None, ""
+            for turn in turns:
+                psi = wrap(self._psi + turn)
+                tcp_xy = np.asarray(xy, float) - rot2(psi) @ hand_xy
+                corr = self._corrections(kind, tcp_xy, release_z)
+                if corr is None:
+                    continue
+                plan = self._plan_turn(xy, top, yaw, turn, tcp_xy, corr, heights, from_xy, fallback is None)
+                if isinstance(plan, str):
+                    problem = problem or plan
+                    continue
+                if not plan.wide:
+                    return plan
+                # Once a heading that opens fully is known, only one that rises clear is worth more.
+                fallback = fallback or plan
+            if fallback is not None:
+                return fallback
+        return problem
+
+    def _plan_turn(self, xy: np.ndarray, top: float, yaw: float | None, turn: float, tcp_xy: np.ndarray,
+                   corr: Correction, heights: tuple[float, float, float, float, float, float], from_xy: np.ndarray,
+                   may_open_wide: bool) -> PlacePlan | str:
+        """Plan the place at heading turn `turn` with the TCP over `tcp_xy` as the cameras see it, sent there
+        plus `corr`, or say why it does not fit. The jaw's clearance counts where the cameras see the
+        place; the reach where the hand is sent."""
+        release_z, want, low, safe_z, clear_z, wide_z = heights
+        psi = wrap(self._psi + turn)
+        u = np.array([math.cos(psi), math.sin(psi)])
+        cmd_xy = tcp_xy + corr.delta
+        eased, eased_seen = cmd_xy - self._ease_m * u, tcp_xy - self._ease_m * u
+        away = self._start_tcp[:2] - eased
+        leaves = float(away @ u) <= -AWAY_COS * float(np.linalg.norm(away)) - 1e-9
+        where = f"({cmd_xy[0]:.3f}, {cmd_xy[1]:.3f}, {release_z:.3f}) m"
         seed0 = self.kin.from_q(self.q_cmd)
-        problem, fallback = "", None
-        turns = self._turns(yaw, np.asarray(xy, float), hand_xy)
-        if not turns:
-            return "dlon pochylona nie ustawi bloku zgodnie z celem"
-        for turn in turns:
-            psi = wrap(self._psi + turn)
-            u = np.array([math.cos(psi), math.sin(psi)])
-            tcp_xy = xy - rot2(psi) @ hand_xy
-            eased = tcp_xy - self._ease_m * u
-            away = self._start_tcp[:2] - eased
-            leaves = float(away @ u) <= -AWAY_COS * float(np.linalg.norm(away)) - 1e-9
-            where = f"({tcp_xy[0]:.3f}, {tcp_xy[1]:.3f}, {release_z:.3f}) m"
-            hit = self._jaw_hit(psi, (np.array([*tcp_xy, release_z]), np.array([*eased, release_z])),
-                                self._place_open_cmd)
-            if hit:
-                problem = problem or f"szczeka zahaczylaby o '{hit}' przy odkladaniu"
+        hit = self._jaw_hit(psi, (np.array([*tcp_xy, release_z]), np.array([*eased_seen, release_z])),
+                            self._place_open_cmd)
+        if hit:
+            return f"szczeka zahaczylaby o '{hit}' przy odkladaniu"
+        at_release = self._reaches(np.array([*cmd_xy, release_z]), psi, seed0)
+        if at_release is None:
+            return f"punkt odlozenia {where} poza zasiegiem z chwytakiem w dol"
+        wide_ok = wide_z if leaves and may_open_wide else math.inf
+        retreat = self._retreat(eased, psi, release_z, (safe_z, clear_z), wide_ok, at_release)
+        if retreat is None:
+            return f"po odlozeniu szczeki nie mina bloku: wysokosc {clear_z:.3f} m poza zasiegiem"
+        retreat_z, wide = retreat
+        hit = self._jaw_hit(psi, (np.array([*eased_seen, retreat_z]),), FULL_OPEN) if wide else ""
+        if hit:
+            return f"otwarta szczeka zahaczylaby o '{hit}' przy odjezdzie"
+        carry_z, leg = None, corr.leg
+        for z in carry_heights(want, low):
+            up = self._reaches(np.array([*from_xy, z]), self._psi, seed0)
+            over = None if up is None else self._reaches(np.array([*cmd_xy, z]), psi, up)
+            if over is None:
                 continue
-            at_release = self._reaches(np.array([*tcp_xy, release_z]), psi, seed0)
-            if at_release is None:
-                problem = problem or f"punkt odlozenia {where} poza zasiegiem z chwytakiem w dol"
-                continue
-            # Once a heading that opens fully is known, only one that rises clear is worth more.
-            retreat = self._retreat(eased, psi, release_z, (safe_z, clear_z),
-                                    wide_z if leaves and fallback is None else math.inf, at_release)
-            if retreat is None:
-                problem = problem or (f"po odlozeniu szczeki nie mina bloku: wysokosc {clear_z:.3f} m poza "
-                                      "zasiegiem")
-                continue
-            retreat_z, wide = retreat
-            hit = self._jaw_hit(psi, (np.array([*eased, retreat_z]),), FULL_OPEN) if wide else ""
-            if hit:
-                problem = problem or f"otwarta szczeka zahaczylaby o '{hit}' przy odjezdzie"
-                continue
-            carry_z = None
-            for z in _heights(want, low):
-                up = self._reaches(np.array([*from_xy, z]), self._psi, seed0)
-                if up is not None and self._reaches(np.array([*tcp_xy, z]), psi, up) is not None:
-                    carry_z = z
-                    break
-            if carry_z is None:
-                problem = problem or f"przeniesienie nad cel na wysokosci {low:.3f} m poza zasiegiem"
-                continue
-            plan = PlacePlan(np.asarray(xy, float).copy(), float(top), yaw, psi, turn, tcp_xy, from_xy,
-                             float(carry_z), float(release_z), float(retreat_z), wide)
-            if not wide:
-                return plan
-            fallback = plan
-        return fallback if fallback is not None else problem
+            if leg is not None and self._reaches(np.array([*(cmd_xy - leg), z]), psi, over) is None:
+                if corr.leg_required:
+                    continue
+                leg = None
+            carry_z = z
+            break
+        if carry_z is None:
+            if corr.leg_required:
+                return f"podejscie do {where} z kierunku {self._direction} poza zasiegiem"
+            return f"przeniesienie nad cel na wysokosci {low:.3f} m poza zasiegiem"
+        return PlacePlan(np.asarray(xy, float).copy(), float(top), yaw, psi, turn, np.asarray(tcp_xy, float),
+                         from_xy, float(carry_z), float(release_z), float(retreat_z), wide,
+                         np.asarray(corr.delta, float).copy(), corr.source,
+                         None if leg is None else np.asarray(leg, float).copy(), corr.miss)
 
     def _retreat(self, eased: np.ndarray, psi: float, release_z: float, clear: tuple[float, float],
                  wide_z: float, seed: Mapping[str, float]) -> tuple[float, bool] | None:
@@ -858,7 +1139,7 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         for z in dict.fromkeys((max(release_z + self.place_settings.retreat_m, safe), safe, low)):
             if self._reaches(np.array([*eased, z]), psi, seed) is not None:
                 return z, False
-        for z in _heights(low, max(wide_z, release_z))[1:]:
+        for z in carry_heights(low, max(wide_z, release_z))[1:]:
             if self._reaches(np.array([*eased, z]), psi, seed) is not None:
                 return z, True
         return None
@@ -914,6 +1195,9 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         place.heading_deg = math.degrees(plan.psi)
         place.turn_deg = math.degrees(plan.turn)
         place.carry_z, place.release_z, place.retreat_z = plan.carry_z, plan.release_z, plan.retreat_z
+        place.correction_m = (float(plan.correction[0]), float(plan.correction[1]))
+        place.correction_from, place.table_miss = plan.source, plan.miss
+        place.lead_m = 0.0 if plan.leg is None else float(np.linalg.norm(plan.leg))
         self._over_top = max(self._over_top, plan.top_m)
         if not self._putting_back:
             self._goal = (plan.target_xy.copy(), plan.top_m, plan.yaw)
@@ -953,6 +1237,7 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         self._placing, self._place_plan, self._replans, self._over_top = True, None, 0, 0.0
         self._retrying = ""
         self._target_seen, self._rest_seen = None, {}
+        self._check_table()
         self._enter(TARGET)
 
     def _target(self, obs: Observation) -> Action | None:
@@ -1016,8 +1301,8 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         assert plan is not None
         point = np.array([*plan.from_xy, plan.carry_z])
         if self._arrived(point, sag=True):
-            self._set_heading(plan.psi, plan.tcp_xy)
-            self._move(CARRY_OVER, plan.hover, plan.turn)
+            self._set_heading(plan.psi, plan.cmd_xy)
+            self._carry_to(plan)
             return None
         if self._timed_out():
             mm = self.status.distance * 1000
@@ -1025,19 +1310,35 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
                               self.kin.from_q(self.q_cmd))
         return self._drive(point, self.approach_step_m)
 
+    def _carry_to(self, plan: PlacePlan) -> None:
+        """Carry the block over the target, through the start of the plan's final leg when it has one."""
+        self._leg_done = plan.leg is None
+        self._move(CARRY_OVER, plan.hover, plan.turn, via=plan.lead_point)
+
     def _carry_over(self, obs: Observation) -> Action | None:
-        """Carry the block over the target and turn it to the planned heading."""
+        """Carry the block over the target and turn it to the planned heading, the final leg last."""
         action = self.carrying(obs, self.reading)
         if action is not None:
             return action
         self._note_target(obs)
         plan = self._place_plan
         assert plan is not None
+        lead = plan.lead_point
+        if not self._leg_done and lead is not None:
+            if self._arrived(lead, sag=True):
+                self._leg_done = True
+            elif self._timed_out():
+                mm = self.status.distance * 1000
+                return self._halt(f"ramie nie doszlo do poczatku podejscia ({mm:.0f} mm od niego)",
+                                  self.kin.from_q(self.q_cmd))
+            else:
+                return self._drive(lead, self.approach_step_m)
         if self._settled(plan.hover, sag=True) and self._vertical():
             # The descent's stall reference.
             self._take_reference()
             self._slow = False
-            latch = (self.target_label or self.rest_on) and not self._putting_back
+            latch = (self.target_label or self.rest_on) and not self._putting_back and not self._releg
+            self._releg = False
             self._enter(LATCH if latch else PLACE)
             return None
         if self._timed_out():
@@ -1114,10 +1415,18 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         if isinstance(new, str):
             return self._put_back(UNREACHABLE, new)
         if small and abs(wrap(new.psi - plan.psi)) <= math.radians(LATCH_SAME_DEG):
+            if new.leg is not None and float(np.linalg.norm(new.cmd_xy - plan.cmd_xy)) > RELEG_M:
+                # The hand must still arrive along the final leg: back to the leg's start and along it again,
+                # then down without another latch.
+                self._take_plan_place(replace(new, from_xy=plan.from_xy, turn=plan.turn))
+                self._set_heading(new.psi, new.cmd_xy)
+                self._releg = True
+                self._carry_to(new)
+                return self.hold(f"cel przesuniety o {moved * 1000:.0f} mm - podchodze jeszcze raz")
             # Small corrections ride along the descent, which starts no higher than the hand is.
             self._take_plan_place(replace(new, from_xy=plan.from_xy, turn=plan.turn,
                                           carry_z=min(new.carry_z, plan.carry_z)))
-            self._set_heading(new.psi, new.tcp_xy)
+            self._set_heading(new.psi, new.cmd_xy)
             self._enter(PLACE)
             return None
         if self._replans >= MAX_REPLANS:
@@ -1125,9 +1434,9 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         self._replans = self.place.replans = self._replans + 1
         # Keep the carry's start: the arm is already at carry height.
         self._take_plan_place(replace(new, from_xy=plan.from_xy))
-        self._set_heading(new.psi, new.tcp_xy)
+        self._set_heading(new.psi, new.cmd_xy)
         logger.info("Cel przesuniety o %.0f mm - nowy zawis", moved * 1000)
-        self._move(CARRY_OVER, new.hover, new.turn)
+        self._carry_to(new)
         return self.hold(f"cel przesuniety o {moved * 1000:.0f} mm - nowy zawis")
 
     def _place(self, obs: Observation) -> Action | None:
@@ -1150,7 +1459,7 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
             self._hold_measured()
             return self._halt("ramie nie opuscilo bloku na cel w czasie", self.kin.from_q(self.q_cmd))
         if not self._slow:
-            above = np.array([*plan.tcp_xy, above_z])
+            above = np.array([*plan.cmd_xy, above_z])
             if not self._settled(above):
                 return self._drive(above, self.approach_step_m)
             self._slow = True
@@ -1527,9 +1836,12 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         if not self.place.outcome:
             self.place.outcome = STOPPED
 
-    def _move(self, phase: str, goal: np.ndarray, turn: float = 0.0) -> None:
-        """Enter a carrying phase with a time limit of twice its travel, its turn and `JAW_WAIT_S`."""
-        travel = float(np.linalg.norm(goal - self.tcp_cmd)) / self.config.speed_mps
+    def _move(self, phase: str, goal: np.ndarray, turn: float = 0.0, via: np.ndarray | None = None) -> None:
+        """Enter a carrying phase with a time limit of twice its travel, through `via` if given, its turn and
+        `JAW_WAIT_S`."""
+        path = (float(np.linalg.norm(goal - self.tcp_cmd)) if via is None else
+                float(np.linalg.norm(via - self.tcp_cmd)) + float(np.linalg.norm(goal - via)))
+        travel = path / self.config.speed_mps
         self._move_s = 2 * travel + abs(turn) / math.radians(TURN_DEG_S) + JAW_WAIT_S
         if phase == CARRY_OVER:
             self._over_t0 = self._t
@@ -1559,12 +1871,12 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         if st.phase == CARRY_UP:
             return f"unosze blok do przeniesienia: {mm:.0f} mm"
         if st.phase == CARRY_OVER:
-            return f"niose blok nad {where}: {mm:.0f} mm"
+            return f"niose blok nad {where}: {mm:.0f} mm" + self._correction_note()
         if st.phase == LATCH:
             what = f"cel '{self.target_label}'" if self.target_label else f"podpory {_names(self.rest_on)}"
             return f"sprawdzam {what} w kamerach"
         if st.phase == PLACE:
-            return f"opuszczam blok na {where}: {mm:.0f} mm"
+            return f"opuszczam blok na {where}: {mm:.0f} mm" + self._correction_note()
         if st.phase == PARK:
             return f"odsuwam ramie od bloku: {mm:.0f} mm"
         if st.phase == VERIFY:
@@ -1574,6 +1886,17 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         if st.phase == TRANSIT:
             return f"przenosze reke nad blok: {mm:.0f} mm"
         return super()._note()
+
+    def _correction_note(self) -> str:
+        """The place's correction for the panel, with why the table gave none; '' without a correction."""
+        place = self.place
+        mm = math.hypot(*place.correction_m) * 1000
+        if place.correction_from == FROM_TABLE:
+            return f"; poprawka z tablicy {mm:.0f} mm ({place.direction})"
+        if place.correction_from == FROM_PICK:
+            why = MISS_NOTES.get(place.table_miss, place.table_miss)
+            return f"; poprawka z chwytu {mm:.0f} mm" + (f" - {why}" if why else "")
+        return ""
 
 
 def _any_place(x: float, y: float, z: float, spec: BlockSpec) -> bool:
@@ -1598,12 +1921,3 @@ def _lean_deg(rotation: Any, spec: BlockSpec) -> float:
     up = max(abs(float(R[2, k])) for k in range(3) if abs(spec.half_size[k] - spec.half_size[2]) < 1e-6)
     return math.degrees(math.acos(min(1.0, up)))
 
-
-def _heights(high: float, low: float) -> list[float]:
-    """Return heights from `high` down to `low` in `HEIGHT_STEP_M` steps [m]."""
-    out = [high]
-    while out[-1] - HEIGHT_STEP_M > low + 1e-9:
-        out.append(out[-1] - HEIGHT_STEP_M)
-    if low < high - 1e-9:
-        out.append(low)
-    return out

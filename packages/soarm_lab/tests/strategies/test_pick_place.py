@@ -3,15 +3,18 @@
 The supervisor follows each target at once. A squeezed block takes the jaw's pads flat and
 follows the hand. A held block stalls the arm on a support, and a released one lands on the
 highest support under its outline. After the lift the world records each fingertip that goes into a
-resting block. Twin integration tests cover physics and perception.
+resting block. The cameras may see every block a fixed offset away, as a camera calibration error would.
+Twin integration tests cover physics and perception.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import json
 import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -22,18 +25,23 @@ import soarm
 
 pytest.importorskip("mujoco")
 
+from soarm_lab.approach_table import ApproachTable  # noqa: E402
 from soarm_lab.blocks import block  # noqa: E402
 from soarm_lab.kinematics import RobotKinematics  # noqa: E402
 from soarm_lab.planner.world import overlap, rectangle  # noqa: E402
 from soarm_lab.robot import load_robot  # noqa: E402
+from soarm_lab.strategies.approach import direction_vector, place_heights  # noqa: E402
 from soarm_lab.strategies.grasp import NEEDS_YAW, STACK_CLEAR_M, heading, tilt, wrap  # noqa: E402
 from soarm_lab.strategies.grasp_jev import HELD, HELD_OPTIONS, NEXT, NEXT_OPTIONS, GraspJevSettings  # noqa: E402
 from soarm_lab.strategies.jev import KEY_ENV  # noqa: E402
 from soarm_lab.strategies.judges import Reply, checked_reply  # noqa: E402
 from soarm_lab.strategies.pick_place import (  # noqa: E402
+    FROM_PICK,
+    FROM_TABLE,
     GRIP_SLIP_M,
     MIN_CARRY_CLEAR_M,
     OUTCOMES,
+    TABLE_TOP_M,
     PickPlaceSettings,
     PickPlaceStrategy,
     _lean_deg,
@@ -132,6 +140,8 @@ class World:
     watching: bool = False
     #: Labels whose poses carry no yaw.
     no_yaw: set[str] = field(default_factory=set)
+    #: Where the cameras see every block against where it is [m, base frame x and y].
+    offset: tuple[float, float] = (0.0, 0.0)
 
     def body(self, label: str) -> Body:
         return next(b for b in self.bodies if b.label == label)
@@ -142,7 +152,8 @@ class World:
             if b.seen:
                 rotation = rot_z(b.yaw) if b.yaw and b.label not in self.no_yaw else np.eye(3)
                 source, age = ("w dloni", 0.0) if b.gripped else ("kamery", SEEN_AGE_S)
-                out[b.label] = ObjectPose(np.array([*b.xy, b.z]), rotation, source, age)
+                xy = b.xy + np.array(self.offset)
+                out[b.label] = ObjectPose(np.array([*xy, b.z]), rotation, source, age)
         return out
 
     def support(self, point: np.ndarray, held: Body) -> float:
@@ -278,16 +289,20 @@ def test_its_settings_are_the_grasp_familys_and_the_places():
     jev = [f.name for f in dataclasses.fields(GraspJevSettings)]
 
     assert names[:len(wrist)] == wrist and set(jev) <= set(names)
-    assert names[-22:] == ["judge", "place_on", "place_on_block", "place_x_m", "place_y_m", "place_z_m",
+    assert names[-28:] == ["judge", "place_on", "place_on_block", "place_x_m", "place_y_m", "place_z_m",
                            "place_yaw_deg", "supports", "align_yaw", "carry_clearance_m", "place_gap_m",
                            "place_speed_mps", "release_margin_m", "release_ease_m", "retreat_m",
                            "retreat_speed_mps", "retreat_clear_m", "fresh_pose_s", "target_wait_s",
-                           "verify_wait_s", "place_tol_m", "place_retries"]
+                           "verify_wait_s", "place_tol_m", "place_retries", "approach_file",
+                           "approach_direction", "approach_lead_m", "pick_shift", "table_check_m",
+                           "max_table_age_days"]
     defaults = PickPlaceSettings()
     assert defaults.judge == "jev" and defaults.wrist_camera == "wrist" and defaults.time_limit_s == 240.0
     assert defaults.max_tilt_deg == 30.0 and defaults.place_retries == 2
     retreat = (defaults.release_ease_m, defaults.retreat_speed_mps, defaults.retreat_clear_m)
     assert retreat == (0.002, 0.02, 0.02)
+    assert (defaults.approach_file, defaults.approach_direction, defaults.pick_shift) == ("", "", "always")
+    assert defaults.approach_lead_m == 0.03 and defaults.table_check_m == 0.004
     assert OUTCOMES == ("placed", "not_found", "target_not_seen", "pick_failed", "dropped", "fell_off",
                         "target_moved", "unreachable", "stopped")
 
@@ -313,6 +328,11 @@ def test_its_settings_are_the_grasp_familys_and_the_places():
     ({"supports": "a, Red", "place_z_m": 0.029}, "supports must name other blocks than label"),
     ({"send_frames": True}, "send_frames needs wrist_camera"),
     ({"place_on": "Red"}, "place_on must name another block than label"),
+    ({"approach_direction": "up"}, "approach_direction must be empty or one of out, in, ccw, cw"),
+    ({"pick_shift": "sometimes"}, "pick_shift must be one of auto, always, off"),
+    ({"approach_lead_m": 0.0}, "approach_lead_m must be positive"),
+    ({"table_check_m": math.nan}, "table_check_m must be positive"),
+    ({"max_table_age_days": -1.0}, "max_table_age_days must be zero or more"),
 ])
 def test_bad_settings_are_refused(settings: dict[str, Any], message: str):
     with pytest.raises(ValueError, match=f"pick_place: {message}"):
@@ -1293,3 +1313,289 @@ def test_the_latch_note_names_the_supports():
 
     assert notes["carry_over"].startswith("niose blok nad 'a' i 'b': ")
     assert s._note() == "sprawdzam podpory 'a' i 'b' w kamerach"
+
+
+# ------------------------------------------------------------ the approach table
+#: The stub table's levels: where a held cube lands on the table, a cube and two cubes [m].
+TABLE_LEVELS = [{"surface_m": 0.0, "tcp_z_m": 0.0221}, {"surface_m": 0.029, "tcp_z_m": 0.0511},
+                {"surface_m": 0.058, "tcp_z_m": 0.0801}]
+#: Corners of the stub table: a grid over the pick and the place [m, base frame].
+TABLE_XY = [(x, y) for x in (0.15, 0.2, 0.25) for y in (-0.1, -0.05, 0.0, 0.05, 0.1)]
+#: The fake cameras' offset in the table tests [m]; a correction of minus that puts the hand on the block.
+SEEN_OFF = (0.006, -0.004)
+
+
+def approach_file(folder: Path, delta: tuple[float, float] = (-SEEN_OFF[0], -SEEN_OFF[1]),
+                  directions: tuple[str, ...] = ("ccw",), preferred: str = "ccw",
+                  xy: list[tuple[float, float]] | None = None, **protocol: Any) -> str:
+    """A stub approach table with the same correction everywhere, saved in `folder`."""
+    table = ApproachTable.new(robot=SPEC.name, stand="test", board={},
+                              protocol={"lead_m": 0.03, "carry_clearance_m": 0.03, "place_gap_m": 0.002,
+                                        "place_speed_mps": 0.02, **protocol}, wrist={}, levels=TABLE_LEVELS)
+    table.data["samples"] = [{"spot": 1, "corner": k, "xy_m": list(p), "level": level, "direction": d,
+                              "repeat": r, "delta_m": [*delta, 0.0]}
+                             for k, p in enumerate(xy or TABLE_XY) for level in range(3) for d in directions
+                             for r in (1, 2)]
+    table.data["complete"] = True
+    table.data["preferred_direction"] = preferred
+    return str(table.save(folder / "approach.json"))
+
+
+def table_stack(folder: Path, **settings: Any) -> tuple[PickPlaceStrategy, World]:
+    """`stack` with the stub table, the cameras `SEEN_OFF` off."""
+    s, world = stack(approach_file=approach_file(folder), **settings)
+    world.offset = SEEN_OFF
+    return s, world
+
+
+def leg_points(world: World, s: PickPlaceStrategy, path: list[tuple[str, np.ndarray]]) -> None:
+    path.append((s.status.phase, s.tcp_cmd.copy()))
+
+
+def on_leg(points: list[np.ndarray], end: np.ndarray, d: np.ndarray, lead: float) -> bool:
+    """Whether `points` run along `d` into `end` over the last `lead` metres, on the line."""
+    rel = np.array([p[:2] - end[:2] for p in points])
+    along, across = rel @ d, rel @ np.array([-d[1], d[0]])
+    return bool(np.all(np.abs(across) < 5e-4) and np.all(along <= 5e-4) and along.min() <= -lead + 5e-4
+                and np.all(np.diff(along) >= -1e-5))
+
+
+def test_the_table_sends_the_hand_where_the_blocks_really_are_and_the_check_stays_in_camera_poses(tmp_path):
+    """The cameras see every block 7 mm off. The table's correction moves the pick's first aim and the place's
+    hover and release, so the red cube lands on the blue one; the target and the check after the release
+    stay where the cameras see them."""
+    s, world = table_stack(tmp_path)
+    actions, phases = run(s, world)
+    red, blue, place = world.body("red"), world.body("blue"), s.place
+
+    assert actions[-1].success and place.outcome == "placed", s.status.stopped_because
+    assert np.linalg.norm(red.xy - blue.xy) < 0.002
+    assert place.target_xy == pytest.approx(tuple(blue.xy + np.array(SEEN_OFF)), abs=1e-9)
+    assert place.correction_from == FROM_TABLE and place.correction_m == pytest.approx((-0.006, 0.004))
+    assert place.direction == "ccw" and place.table_problem == "" and place.table_miss == ""
+    assert place.error_m < 0.002 and place.lead_m == pytest.approx(0.03)
+    assert s.grasp.lead_m == pytest.approx(0.03)
+    assert s._first_shifted == pytest.approx((-0.006, 0.004))
+    assert phases[phases.index("carry_over"):] == ["carry_over", "latch", "place", "let_go", "park", "verify"]
+
+
+def test_the_final_leg_runs_along_the_direction_into_the_pick_and_the_place_hovers(tmp_path):
+    s, world = table_stack(tmp_path)
+    path: list[tuple[str, np.ndarray]] = []
+    run(s, world, watch=lambda world, s: leg_points(world, s, path))
+    plan = s._place_plan
+    assert plan is not None and plan.leg is not None
+
+    # From where the approach stopped, through the hover the jaw opens over.
+    k = next(i for i, (phase, _) in enumerate(path) if phase == "open")
+    straddle = [path[k - 1][1]] + [p for phase, p in path[k:] if phase == "open"]
+    assert s.grasp.block_xy is not None
+    d_pick = direction_vector("ccw", s.grasp.block_xy, PAN_XY)
+    assert on_leg(straddle, straddle[-1], d_pick, 0.03)
+    over = [p for phase, p in path if phase == "carry_over"]
+    lead = plan.lead_point
+    assert lead is not None
+    k = min(range(len(over)), key=lambda i: float(np.linalg.norm(over[i] - lead)))
+    assert float(np.linalg.norm(over[k] - lead)) < 5e-4
+    assert on_leg(over[k:], plan.hover, plan.leg / 0.03, 0.03 - 5e-4)
+
+
+def test_without_a_table_or_a_direction_the_place_is_planned_as_before():
+    s, world = stack()
+    actions, phases = run(s, world)
+    plan, place = s._place_plan, s.place
+    assert plan is not None and actions[-1].success
+
+    assert plan.leg is None and plan.source == "" and np.all(plan.correction == 0.0)
+    assert np.allclose(plan.hover[:2], plan.tcp_xy) and place.correction_from == "" and place.lead_m == 0.0
+    assert s.grasp.lead_m == 0.0 and place.direction == "" and place.table_problem == ""
+    assert phases[:3] == ["wait", "approach", "open"]
+    release, want, _ = place_heights(plan.top_m, place.hang_m, 0.002, GRIP_SLIP_M, TABLE_TOP_M, 0.03,
+                                     MIN_CARRY_CLEAR_M, over=s._bottom())
+    assert place.release_z == pytest.approx(release) and place.carry_z == pytest.approx(want)
+
+
+def test_a_direction_without_a_table_runs_the_legs_without_a_correction():
+    s, world = stack(approach_direction="cw")
+    actions, _ = run(s, world)
+
+    assert actions[-1].success and s.place.direction == "cw" and s.place.correction_from == ""
+    assert s.place.lead_m == pytest.approx(0.03) and s.grasp.lead_m == pytest.approx(0.03)
+    assert np.linalg.norm(world.body("red").xy - world.body("blue").xy) < 0.002
+
+
+@pytest.mark.parametrize("problem, expect", [
+    ("missing", "tablica podejscia nieczytelna: "),
+    ("robot", "tablica podejscia nieuzyta: made on robot 'so100', not 'so101'"),
+    ("partial", "tablica podejscia nieuzyta: the calibration did not finish"),
+    ("no direction", "tablica podejscia bez kierunku podejscia"),
+])
+def test_a_table_that_cannot_be_used_leaves_a_note_and_the_run_goes_on(tmp_path, problem, expect):
+    path = approach_file(tmp_path, preferred="" if problem == "no direction" else "ccw")
+    data = json.loads(Path(path).read_text())
+    if problem == "robot":
+        data["robot"] = "so100"
+    if problem == "partial":
+        data["complete"] = False
+    Path(path).write_text(json.dumps(data))
+    s, world = stack(approach_file=str(tmp_path / "nothing.json") if problem == "missing" else path)
+    actions, _ = run(s, world)
+
+    assert actions[-1].success and s.place.table_problem.startswith(expect), s.place.table_problem
+    assert s._table is None and s.place.correction_from == "" and s.place.direction == ""
+
+
+def test_settings_unlike_the_tables_protocol_leave_a_note(tmp_path):
+    s, world = stack(approach_file=approach_file(tmp_path, lead_m=0.05))
+    world.offset = SEEN_OFF
+    actions, _ = run(s, world)
+
+    assert actions[-1].success and s.place.correction_from == FROM_TABLE
+    assert s.place.table_note == "tablica zmierzona z innymi ustawieniami: lead_m 0.05/0.03"
+
+
+def test_a_place_outside_the_table_takes_the_pick_correction_or_none(tmp_path):
+    """The table covers only the pick: the place takes the pick's own correction when the wrist camera
+    centred the jaws, and none with `pick_shift: off`."""
+    pytest.importorskip("cv2")
+    near_pick = [(x, y) for x in (0.17, 0.2, 0.23) for y in (-0.07, -0.04, -0.01)]
+    path = approach_file(tmp_path, xy=near_pick)
+    for shift, source in (("always", FROM_PICK), ("auto", FROM_PICK), ("off", "")):
+        s, world = stack(approach_file=path, wrist_camera="wrist", pick_shift=shift)
+        world.offset = SEEN_OFF
+        red = world.body("red")
+        s.measure = lambda rgb, joints, ref_xy=None, red=red: Measurement(  # type: ignore[method-assign]
+            red.xy.copy(), red.yaw, 0.9, 1000, 1.0, np.zeros(2))
+        actions, _ = run(s, world, frames={"wrist": Frame(np.zeros((48, 64, 3), np.uint8), 0.0)})
+        place = s.place
+
+        assert place.correction_from == source and place.table_miss == "outside", (shift, place)
+        if source:
+            assert place.correction_m == pytest.approx((-0.006, 0.004), abs=1e-6)
+            assert np.linalg.norm(red.xy - world.body("blue").xy) < 0.002
+
+
+def test_the_fallback_goes_pick_then_table_without_its_leg_then_none(tmp_path):
+    s, world = stack(approach_file=approach_file(tmp_path))
+    s.start(run_info(), Observation(t=0.0, step=0, joints=dict(world.joints), command=dict(world.command),
+                                    objects=world.objects()))
+    xy, z = np.array(TARGET_XY), 0.0511
+    table = s._corrections(FROM_TABLE, xy, z)
+    assert table is not None and table.source == FROM_TABLE and table.leg_required
+    assert table.leg == pytest.approx(0.03 * direction_vector("ccw", xy, PAN_XY))
+
+    s._closed_seen, s._detector_xy, s._closed_aim = True, np.array(PICK_XY), np.array(PICK_XY) + 0.005
+    pick = s._corrections("", xy, z)
+    assert pick is not None and pick.source == FROM_PICK and pick.delta == pytest.approx((0.005, 0.005))
+    assert pick.miss == "lead" and not pick.leg_required
+
+    s._closed_seen = False
+    plain = s._corrections("", xy, z)
+    assert plain is not None and plain.source == FROM_TABLE and plain.leg is None
+    s._putting_back = True
+    assert s._corrections(FROM_TABLE, xy, z) is None
+    back = s._corrections("", xy, z)
+    assert back is not None and back.source == "" and np.all(back.delta == 0.0) and back.leg is None
+
+
+def test_a_table_the_pick_disagrees_with_is_not_trusted_for_the_run(tmp_path):
+    s, world = stack(approach_file=approach_file(tmp_path))
+    s.start(run_info(), Observation(t=0.0, step=0, joints=dict(world.joints), command=dict(world.command),
+                                    objects=world.objects()))
+    s._pick_hit, s._first_shifted = np.array([-0.006, 0.004]), np.array([-0.006, 0.004])
+    s._closed_seen, s._detector_xy = True, np.array(PICK_XY)
+    s._closed_aim = np.array(PICK_XY) + np.array([-0.006, 0.004]) + np.array([0.003, 0.0])
+    s._check_table()
+    assert s._table_trusted and s.place.table_check_m == pytest.approx(0.003)
+
+    s._closed_aim = np.array(PICK_XY) + np.array([-0.006, 0.004]) + np.array([0.0, 0.005])
+    s._check_table()
+    assert not s._table_trusted and not s.place.table_trusted
+    assert s.place.table_note == "tablica nie zgadza sie z chwytem o 5 mm - poprawka z chwytu"
+    assert s._lookup(np.array(TARGET_XY), 0.0511) == "check"
+    fallback = s._corrections("", np.array(TARGET_XY), 0.0511)
+    assert fallback is not None and fallback.source == FROM_PICK and fallback.miss == "check"
+
+
+def test_without_the_pick_correction_a_disagreeing_table_stays(tmp_path):
+    s, world = stack(approach_file=approach_file(tmp_path), pick_shift="off")
+    s.start(run_info(), Observation(t=0.0, step=0, joints=dict(world.joints), command=dict(world.command),
+                                    objects=world.objects()))
+    s._pick_hit, s._first_shifted = np.array([-0.006, 0.004]), np.array([-0.006, 0.004])
+    s._closed_seen, s._detector_xy = True, np.array(PICK_XY)
+    s._closed_aim = np.array(PICK_XY) + np.array([0.004, 0.004])
+    s._check_table()
+
+    assert s._table_trusted and s.place.table_check_m == pytest.approx(0.01)
+
+
+def test_a_table_aimed_pick_neither_applies_nor_saves_the_residual(tmp_path):
+    pytest.importorskip("cv2")
+    residual = tmp_path / "residual.json"
+    residual.write_text(json.dumps({"mean_m": [0.01, 0.01], "runs": 3}))
+    before = residual.read_text()
+    s, world = stack(approach_file=approach_file(tmp_path), wrist_camera="wrist", residual_file=str(residual))
+    world.offset = SEEN_OFF
+    red = world.body("red")
+    s.measure = lambda rgb, joints, ref_xy=None: Measurement(  # type: ignore[method-assign]
+        red.xy.copy(), red.yaw, 0.9, 1000, 1.0, np.zeros(2))
+    actions, _ = run(s, world, frames={"wrist": Frame(np.zeros((48, 64, 3), np.uint8), 0.0)})
+
+    assert actions[-1].success and s._table_aimed and not s._saves_residual
+    assert s._first_shifted == pytest.approx((-0.006, 0.004)) and s.wrist.residual_m == (0.0, 0.0)
+    assert residual.read_text() == before
+
+
+def test_a_target_moved_a_little_at_the_hover_runs_the_leg_again_without_a_replan(tmp_path):
+    s, world = table_stack(tmp_path)
+    nudged: list[bool] = []
+
+    def nudge(world: World, s: PickPlaceStrategy) -> None:
+        if not nudged:
+            nudged.append(True)
+            world.body("blue").xy = world.body("blue").xy + np.array([0.0, 0.003])
+
+    actions, phases = run(s, world, seconds=90.0, on_phase={"carry_over": nudge})
+    red, blue = world.body("red"), world.body("blue")
+
+    assert actions[-1].success and s.place.replans == 0, s.status.stopped_because
+    assert phases[phases.index("carry_over"):] == ["carry_over", "latch", "carry_over", "place", "let_go",
+                                                   "park", "verify"]
+    assert np.linalg.norm(red.xy - blue.xy) < 0.002
+
+
+def test_the_correction_shows_in_the_carry_note(tmp_path):
+    s, world = table_stack(tmp_path)
+    notes: dict[str, str] = {}
+
+    def note(world: World, s: PickPlaceStrategy) -> None:
+        notes[s.status.phase] = s._note()
+
+    run(s, world, on_phase={"carry_over": note})
+
+    assert notes["carry_over"].endswith("; poprawka z tablicy 7 mm (ccw)"), notes["carry_over"]
+
+
+
+def test_after_the_wrist_look_moves_the_aim_the_hand_comes_along_the_leg_again():
+    """The detector sees the red cube 4 mm off; the wrist camera sees where it is. The hand goes back to the
+    start of the leg for the new hover and runs the leg again before it straddles."""
+    pytest.importorskip("cv2")
+    s, world = stack(approach_direction="ccw", wrist_camera="wrist", close_rounds=0)
+    world.offset = (0.004, 0.0)
+    red = world.body("red")
+    s.measure = lambda rgb, joints, ref_xy=None: Measurement(  # type: ignore[method-assign]
+        red.xy.copy(), red.yaw, 0.9, 1000, 1.0, np.zeros(2))
+    path: list[tuple[str, np.ndarray]] = []
+    actions, _ = run(s, world, watch=lambda world, s: leg_points(world, s, path),
+                     frames={"wrist": Frame(np.zeros((48, 64, 3), np.uint8), 0.0)})
+
+    assert actions[-1].success and s.wrist.verdicts == ["centred"] and s.wrist.shift_m > 0.003
+    k = next(i for i, (phase, _) in enumerate(path) if phase == "straddle")
+    opened = [p for phase, p in path[:k] if phase == "open"]
+    assert s.grasp.block_xy is not None
+    d = direction_vector("ccw", s.grasp.block_xy, PAN_XY)
+    start = opened[-1] - np.array([*(0.03 * d), 0.0])
+    j = min(range(len(opened)), key=lambda i: float(np.linalg.norm(opened[i] - start)))
+    assert float(np.linalg.norm(opened[j] - start)) < 5e-4
+    assert on_leg(opened[j:], opened[-1], d, 0.03 - 5e-4)
