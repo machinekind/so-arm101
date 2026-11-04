@@ -29,6 +29,8 @@ RUNS_ENV = "SOARM_CAMPAIGN_RUNS"
 #: Scenario groups in report order, the first word of a scenario's name, with what their attempts and
 #: offsets count.
 GROUPS = {
+    "approach": "attempts are calibrations; the offset is the median distance between the approach table's "
+                "correction and the true one at held-out points",
     "grasp": "attempts are closes until the lift; the offset is the jaw tips' midpoint from the block's "
              "centre as the jaw last starts closing",
     "pick_place": "attempts are picks; the offset is the placed block's centre from its place",
@@ -168,7 +170,7 @@ def _order(scenario: str) -> tuple[int, list[tuple[int, str]]]:
 
 
 def summarise(runs: Iterable[Run]) -> list[Summary]:
-    """One summary per scenario, grasp first, then pick_place, then build."""
+    """One summary per scenario, in `GROUPS` order: approach, grasp, pick_place, build."""
     by: dict[str, list[Run]] = {}
     for run in runs:
         by.setdefault(run.scenario, []).append(run)
