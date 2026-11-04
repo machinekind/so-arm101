@@ -33,8 +33,8 @@ Subclasses can refine the aim through `before_straddle`. With the probe on, `bef
 also refines the aim, and `after_touch` and `after_miss` judge the probe. `before_close` runs at the
 bottom of the straddle with the open jaw around the block, before the jaw closes.
 `after_grasp_failed` handles grasp failures. A subclass that can look again (`_looks_again`) also treats
-a jaw closed far from the block's width as a failed close (`EDGE_GRIP_M`), and retries an empty or
-edge close from the hover within `max_attempts`, with the jaw open on the way up.
+a jaw closed well inside the block's width as a failed close (`EDGE_GRIP_M`, `held_gap_offset_m`), and
+retries an empty or edge close from the hover within `max_attempts`, with the jaw open on the way up.
 Subclasses can extend `carrying` and return `release()` for a handover.
 `candidates` supplies geometry or library grasps. `grasp_verdict` supplies the verdict for logs
 and judges.
@@ -145,7 +145,8 @@ MAX_HAND_TILT_DEG = 45.0
 TILT_RESTARTS = 2
 #: Why no tilted grasp was tried: the block's yaw is unknown.
 NEEDS_YAW = "dlon pochylona potrzebuje obrotu bloku"
-#: A held jaw whose gap differs from the chosen grasp width by more than this grips an edge [m].
+#: A held jaw whose gap is narrower than the chosen grasp width by more than this grips an edge or a
+#: corner [m]. A wider gap is a full grip read through the gripper's calibration (`held_gap_offset_m`).
 EDGE_GRIP_M = 0.006
 #: A straddle that stalls with the measured TCP this close to the grasp target closes there [m].
 CLOSE_NEAR_M = 0.005
@@ -275,6 +276,9 @@ class GraspSettings(TouchSettings):
     #: Largest tilt of the hand from straight down [deg], tried when straight down is out of reach. The
     #: tilted hand needs the block square to the arm. Zero, or `probe: true`, keeps the hand straight down.
     max_tilt_deg: float = 0.0
+    #: How much wider the measured jaw gap reads than a block the jaw fully grips [m]: this stand's gripper
+    #: calibration. An edge grip reads narrower than the block's width plus this.
+    held_gap_offset_m: float = 0.0
 
 
 @dataclass
@@ -1323,13 +1327,15 @@ class GraspStrategy(TouchStrategy):
         return self.hold()
 
     def _edge_grip(self) -> bool:
-        """Whether the held jaw's gap lies more than `EDGE_GRIP_M` from the chosen grasp width.
+        """Whether the held jaw's gap is more than `EDGE_GRIP_M` narrower than the chosen grasp width plus
+        `held_gap_offset_m`.
 
         Checked only where a failed close is retried after another look (`_looks_again`) and attempts
         remain: the last attempt lifts what it holds."""
         if not self._looks_again or self.status.attempt >= self.grasp_settings.max_attempts:
             return False
-        return abs(self.grasp.jaw_gap_m - self._width_m) > EDGE_GRIP_M
+        full = self._width_m + self.grasp_settings.held_gap_offset_m
+        return self.grasp.jaw_gap_m < full - EDGE_GRIP_M
 
     @property
     def _looks_again(self) -> bool:

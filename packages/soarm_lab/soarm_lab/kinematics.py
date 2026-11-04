@@ -288,6 +288,13 @@ class RobotKinematics:
                          for name in names)
         return fixed, moving
 
+    def fingertip_radius(self) -> float:
+        """The larger radius of the two fingertip geoms (`spec.fingertips`) [m]."""
+        names = self.spec.fingertips
+        if not all(names):
+            raise ValueError(f"{self.spec.name}: no `fingertips` in the robot description")
+        return max(float(self.model.geom_size[self.model.geom(self.prefix + name).id][0]) for name in names)
+
     def _jaw_pose(self, gripper: float) -> dict[str, float]:
         """Return the rest pose with the given gripper command [app units].
 

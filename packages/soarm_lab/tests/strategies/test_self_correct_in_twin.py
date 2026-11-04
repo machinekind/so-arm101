@@ -455,3 +455,82 @@ def test_a_cube_taken_from_between_the_closing_jaws_is_found_again_and_lifted():
         assert truth(twin)[2] > 0.04
     finally:
         twin.close()
+
+
+# --------------------------------------------------------------------------- the look between the tips
+def biased_close_look(strategy: WristGraspStrategy, along_m: float) -> None:
+    """The look between the jaw tips always sees the block `along_m` from the tips' midpoint along the
+    closing line, wherever the jaw stands: an error no correction removes. Across it, it sees the truth."""
+    plain = strategy.measure
+
+    def measure(rgb, joints, ref_xy=None):
+        m = plain(rgb, joints, ref_xy)
+        if ref_xy is None or m.problem:
+            return m
+        psi = math.radians(strategy.grasp.heading_deg)
+        u = np.array([math.cos(psi), math.sin(psi)])
+        seen = m.xy - np.asarray(ref_xy, float)
+        xy = np.asarray(ref_xy, float) + along_m * u + (seen - float(seen @ u) * u)
+        return replace(m, xy=xy)
+
+    strategy.measure = measure  # type: ignore[method-assign]
+
+
+def run_close_look(xy: tuple[float, float], *, along_bias_m: float = 0.0, across_push_m: float = 0.0
+                   ) -> tuple[WristGraspStrategy, str, bool, list[tuple[float, float]]]:
+    """A grasp of a cube at `xy` seen where it is, with a biased look between the tips or a push across the
+    closing line once the hover look is done. Returns the strategy, the reason it stopped, whether the
+    cube was lifted, and the truth's offset from the tips' midpoint at each look between the tips [m]."""
+    twin = Twin(Workspace(robot="so101"), clock=VirtualClock(t0=0.0))
+    try:
+        add_cube(twin, xy, 0.0)
+        clock = Clock()
+        strategy = load_strategy("grasp_wrist").create({"carry_s": 1.0})
+        assert isinstance(strategy, WristGraspStrategy)
+        if along_bias_m:
+            biased_close_look(strategy, along_bias_m)
+        runner = StrategyRunner(twin, strategy, objects=coarse(twin, clock, np.zeros(2)), cameras=("wrist",))
+        pushed: list[bool] = []
+        truths: list[tuple[float, float]] = []
+
+        def watch() -> None:
+            straddling = strategy.status.phase == "straddle" and strategy.wrist.verdicts
+            if across_push_m and straddling and not pushed:
+                psi = math.radians(strategy.grasp.heading_deg)
+                nudge(twin, across_push_m * np.array([-math.sin(psi), math.cos(psi)]))
+                pushed.append(True)
+            if len(truths) < len(strategy.wrist.close_looks):
+                psi = math.radians(strategy.grasp.heading_deg)
+                u = np.array([math.cos(psi), math.sin(psi)])
+                error = (truth(twin) - 0.5 * sum(KIN.fingertips(dict(twin.status.measured))))[:2]
+                truths.append((float(error @ u), float(error @ np.array([-u[1], u[0]]))))
+
+        runner.start(threaded=False)
+        drive(twin, runner, 60.0, clock, strategy.hz, watch=watch)
+        lifted = runner.status.stopped_because == "zadanie wykonane" and float(truth(twin)[2]) > 0.04
+        return strategy, runner.status.stopped_because, lifted, truths
+    finally:
+        twin.close()
+
+
+@pytest.mark.render
+@pytest.mark.parametrize("along_bias_m", [-0.005, -0.009], ids=["between the pads", "beyond the pads"])
+def test_a_look_between_the_tips_biased_along_the_jaws_still_closes_and_lifts(along_bias_m: float):
+    """A camera that always puts the block off along the closing line, as the stand's at the grasp height:
+    the jaw closes on the first attempt instead of spending corrections and starting over."""
+    strategy, reason, lifted, _ = run_close_look((0.21, 0.02), along_bias_m=along_bias_m)
+
+    looks = [(c.round, c.verdict) for c in strategy.wrist.close_looks]
+    assert reason == "zadanie wykonane" and lifted, (reason, looks)
+    assert strategy.status.attempt == 1 and not any(v == "off" for _, v in looks), looks
+    assert sum(v == "moved" for _, v in looks) <= 1, looks
+
+
+@pytest.mark.render
+def test_a_block_pushed_across_the_jaws_after_the_hover_look_is_still_corrected():
+    strategy, reason, lifted, truths = run_close_look((0.21, 0.02), across_push_m=0.005)
+
+    looks = [(c.round, c.verdict, round(c.across_m * 1000)) for c in strategy.wrist.close_looks]
+    assert reason == "zadanie wykonane" and lifted, (reason, looks)
+    assert looks[0][1] == "moved" and abs(looks[0][2]) >= 3, looks
+    assert looks[-1][1] == "centred" and abs(truths[-1][1]) <= 0.0025, (looks, truths)

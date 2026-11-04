@@ -117,6 +117,7 @@ grasp:
   grasp_depth: 0.5
   straddle_push_m: 0.004   # how far the straddle pushes past a light touch
   close_on_stall_m: 0.003  # a stall with both tips this far below the top closes there; 0: off
+  held_gap_offset_m: 0.0   # how much wider the jaw reads than a block it fully grips (this stand)
   lift_m: 0.04
   sag_m: 0.02              # a still arm this far below a lift or hover point counts as there
   stall_s: 2.0             # a still arm short of its point this long ends the run
@@ -132,11 +133,12 @@ grasp_jev:
 grasp_wrist:
   block: cuboid
   wrist_camera: wrist
-  hue_deg: -1.0
+  hue_deg: -1.0             # a colour word in the label wins; this is for labels without one
+  label_hues: ""             # e.g. "light blue: 192, orange: 20" adds to or replaces the built-in hues
   centre_tol_m: 0.003
   look_before_straddle: true
   close_rounds: 3            # 0: close without the look between the jaw tips
-  close_tol_m: 0.0025
+  close_tol_m: 0.0025        # across the closing line; along it the block only has to sit between the pads
   correction_gain: 1.0
   residual_file: ""          # e.g. a file in the stand folder
 pick_place:
@@ -394,9 +396,13 @@ renders the arm camera. On hardware, it serves the workspace camera with the sam
 Arm cameras are excluded from triangulation. Until the calibration wave skips them too,
 disable the physical `wrist` record during the wave.
 
-Set `hue_deg`, `hue_window_deg`, `min_saturation` and `min_value` for the block and lighting.
-The default `hue_deg: -1` samples the first usable frame inside the expected visible silhouette
-at the aim. It selects the hue window with the most pixels above `min_saturation` and `min_value`.
+A colour word in the block's label sets the hue the look searches: red (356°), yellow (50°), green
+(143°) and light blue (190°), as this wrist camera sees them. `label_hues` adds words or replaces
+these hues per stand. A `hue_deg` within `hue_window_deg` of the label's colour fine-tunes it; one of
+another colour is not used for that label, so a stand-wide `hue_deg` cannot hide a block of another
+colour. For a label without a colour word (bare wood among them), set `hue_deg`, `hue_window_deg`,
+`min_saturation` and `min_value` for the block and lighting. The default `hue_deg: -1` samples the
+first usable frame inside the expected visible silhouette at the aim. It selects the hue window with the most pixels above `min_saturation` and `min_value`.
 The window spans ±`hue_window_deg`, or ±20° by default, and must cover at least 30% of that region.
 The status reports `hue_deg` and `hue_share`. Bare wood falls below `min_saturation`, so the look
 is skipped and the grasp continues from the detector's aim.
@@ -427,14 +433,24 @@ the same measured joints, so most of an error in where the arm thinks it is canc
 `focal_px` only changes how far each correction goes. The tip pixel still matters: it sets where the
 tips are in the frame.
 
-When the block lies more than `close_tol_m` off, the jaw first slides along the closing line to centre
-on the block, so neither tip drags it. The arm then rises with the jaw open, moves the aim by
-`correction_gain` times the offset, straddles again without the hover look and looks again. This
-repeats up to `close_rounds` times per attempt. A block still off after the last round counts as a
-failed attempt; the last attempt closes anyway. `close_rounds: 0` closes without this look.
+The jaw closes when the block lies within `close_tol_m` of the tips' midpoint across the closing line
+and sits between the open pads along it: the moving jaw then pushes it against the fixed one. That
+room along the line comes from the opening, the block's width and the fingertip radius: about 7 mm on
+each side at the default `open_margin_m`. Otherwise the jaw first slides along the closing line, so
+neither tip drags the block, and the arm rises with the jaw open, moves the aim by `correction_gain`
+times the part of the offset outside those bounds (along the line no farther than the pads allow),
+straddles again without the hover look and looks again, up to `close_rounds` times per attempt. An
+offset that a correction leaves within 1 mm is the camera's error, not the block's: the jaw closes.
+After the last round the jaw closes if the block lies within the middle third of the gripped face
+across the closing line, and the close and lift checks judge the grip. A block still farther off
+counts as a failed attempt; the last attempt closes anyway. `close_rounds: 0` closes without this
+look.
 
 With a camera, a failed close is retried instead of ending the run: an empty close, or a jaw that
-stops more than 6 mm from the block's width (an edge grip; the jaw opens first). The arm rises with
+stops more than 6 mm narrower than the block's width plus `held_gap_offset_m` (an edge or corner grip;
+the jaw opens first). A jaw that holds wider than the block is a full grip read through the gripper's
+calibration: the success note shows the held gap, and `held_gap_offset_m` is that gap minus the
+block's width. The arm rises with
 the jaw open and comes back to the hover, where the hover look finds the block again. This repeats up
 to `max_attempts`, and the last attempt lifts what it holds. Plain `grasp` keeps its old behaviour.
 
