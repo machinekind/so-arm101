@@ -440,6 +440,7 @@ class CalibrateApproachStrategy(TouchStrategy):
         self._moving = False
         self._safe_q: np.ndarray | None = None
         self._hub_q: list[np.ndarray] | None = None
+        self._park_route: list[np.ndarray] | None = None
         self._escape_q: np.ndarray | None = None
         self._relooks = 0
         self._rolls_tried: list[float] = []
@@ -1319,8 +1320,11 @@ class CalibrateApproachStrategy(TouchStrategy):
                                     "reproj_px": math.nan if view is None else view.reproj_px})
             return
         if planned.kind == CHECK:
+            # What the corrected command still lacked; a look again after a turn of the wrist moved the
+            # commanded TCP round the roll axis, so that move counts too.
             bias = self._bias.get(planned.level, np.zeros(2))
-            left = charuco.remove_bias(np.asarray(raw, float)[:2], psi, bias)
+            missing = np.asarray(raw, float)[:2] + self.tcp_cmd[:2] - planned.xy
+            left = charuco.remove_bias(missing, psi, bias)
             error = float(np.linalg.norm(left))
             self._verify.append({"corner": planned.corner, "level": planned.level,
                                  "direction": planned.direction, "xy_m": planned.xy, "error_m": error,
@@ -1507,23 +1511,47 @@ class CalibrateApproachStrategy(TouchStrategy):
         self.calibration.phase = PARK
         here = self.tcp_cmd
         top = max((carry for _, _, carry, _ in self._levels), default=float(here[2]))
+        up = self.kin.tcp(self.kin.from_q(self.q_cmd))[:3, :3].copy()
         self._path = [Waypoint(np.array([*here[:2], max(here[2] + PARK_RISE_M, top)]), self.approach_step_m,
-                               None)]
+                               None, rotation=up)]
         self._wp, self._wp_t0 = 0, self._t
         self._joint_goal = None
+        self._park_route: list[np.ndarray] | None = None
         self._planned = None
         return None
 
     def _park(self, obs: Observation) -> Action | None:
-        if self._joint_goal is None:
+        if self._park_route is None:
             wp = self._path[0]
-            if self._arrived(wp.point) or self._t - self._wp_t0 > self.calib.move_timeout_s:
-                self._joint_goal = np.clip(self.kin.to_q(self._start_joints), *self.limits)
-            else:
-                return self._drive(wp.point, wp.step_m)
-        action = self._joint_move(obs)
-        if action is not None:
-            return action
+            if not (self._arrived(wp.point) or self._t - self._wp_t0 > self.calib.move_timeout_s):
+                self._moving = True
+                try:
+                    action = self._drive(wp.point, wp.step_m, rotation=wp.rotation)
+                finally:
+                    self._moving = False
+                if self._hit is None:
+                    return action
+                # Up would bring the arm onto itself: on to the joint move from here.
+                self._hit = None
+            start = np.clip(self.kin.to_q(self._start_joints), *self.limits)
+            # A way back that would touch the arm's own body is not taken: the arm stays up.
+            self._park_route = self._joint_route(self.q_cmd, start) or []
+            if not self._park_route:
+                self.calibration.note += " (bez powrotu do pozycji startowej)"
+        while self._park_route or self._joint_goal is not None:
+            if self._joint_goal is None:
+                self._joint_goal = self._park_route.pop(0)
+            self._moving = True
+            try:
+                action = self._joint_move(obs)
+            finally:
+                self._moving = False
+            if self._hit is not None:
+                self._hit, self._joint_goal, self._park_route = None, None, []
+                self.calibration.note += " (bez powrotu do pozycji startowej)"
+                break
+            if action is not None:
+                return action
         if self._failed:
             return self._halt(self._failed, self.kin.from_q(self.q_cmd))
         if self._probe_mode:

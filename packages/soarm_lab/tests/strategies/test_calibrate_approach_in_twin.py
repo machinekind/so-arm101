@@ -16,9 +16,7 @@ each stand's table under `tables/`.
 from __future__ import annotations
 
 import math
-import time
-from collections.abc import Callable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -31,13 +29,12 @@ pytest.importorskip("machinekind_twin")
 cv2 = pytest.importorskip("cv2")
 
 from machinekind_twin.strategy import StrategyRunner  # noqa: E402
-from twin_stand import THICKNESS_M, Clock, Stand, TableTouch, drive, truth_tcp  # noqa: E402
+from twin_stand import THICKNESS_M, Clock, Stand, calibrate, drive, truth_tcp  # noqa: E402
 
 from soarm_lab.approach_table import ApproachTable, Hit  # noqa: E402
 from soarm_lab.campaign import Run, record, runs_per_scenario  # noqa: E402
 from soarm_lab.stand_errors import Backlash  # noqa: E402
 from soarm_lab.strategies.calibrate_approach import (  # noqa: E402
-    CORNERS,
     CalibrateApproachSettings,
     CalibrateApproachStrategy,
     Planned,
@@ -55,8 +52,7 @@ BAR_P90_M = 0.0025
 #: Stands per campaign without `SOARM_CAMPAIGN_RUNS`.
 RUNS = 20
 SCENARIO = "approach: table, play 6 mm, camera tilted 10 mm, mount 2-3 mm"
-#: A run's simulated time limit [s].
-CALIBRATION_S = 3600.0
+#: The held-out approaches' simulated time limit [s].
 PROBE_S = 1800.0
 
 
@@ -64,65 +60,6 @@ def settings(table: Path | None, **extra: Any) -> CalibrateApproachSettings:
     base: dict[str, Any] = {"table_file": "" if table is None else str(table), "merge": False,
                             "thickness_m": THICKNESS_M}
     return CalibrateApproachSettings(**{**base, **extra})
-
-
-# --------------------------------------------------------------------------- one calibration
-@dataclass
-class Calibration:
-    """A calibration run and what the simulation's truth says about its samples."""
-
-    strategy: CalibrateApproachStrategy
-    reason: str
-    sim_s: float
-    wall_s: float
-    artefacts: list[str]
-    #: Per sample (kind, corner, level, direction, repeat): the true correction [m, x and y].
-    truth: dict[tuple[str, int, int, str, int], np.ndarray] = field(default_factory=dict)
-
-    @property
-    def table(self) -> ApproachTable | None:
-        return self.strategy.table
-
-    def sample_errors(self) -> list[float]:
-        """How far each sample's correction lies from the truth [m]."""
-        out = []
-        for s in self.strategy.samples:
-            key = ("sample", int(s["corner"]), int(s["level"]), str(s["direction"]), int(s["repeat"]))
-            if key in self.truth:
-                out.append(float(np.linalg.norm(np.asarray(s["delta_m"], float)[:2] - self.truth[key])))
-        return out
-
-
-def truth_of(stand: Stand, twin, corners: np.ndarray) -> Callable[..., None]:
-    """An `on_still` hook that keeps the true correction of each approach to a corner."""
-    def on_still(strategy: CalibrateApproachStrategy, obs, planned: Planned, out: dict) -> None:
-        if planned.corner < 0:
-            return
-        actual = truth_tcp(twin)[:2]
-        missing = corners[planned.corner][:2] - actual + (strategy.tcp_cmd[:2] - planned.xy)
-        out[(planned.kind, planned.corner, planned.level, planned.direction, planned.repeat)] = missing
-    return on_still
-
-
-def calibrate(stand: Stand, twin, clock: Clock, table: Path, **extra: Any) -> Calibration:
-    """Run `calibrate_approach` on the stand's twin to its end."""
-    perception, detector = stand.perception(twin, clock)
-    truth: dict[tuple[str, int, int, str, int], np.ndarray] = {}
-    hook = truth_of(stand, twin, stand.corners())
-    strategy = CalibrateApproachStrategy(settings(table, **extra),
-                                         on_still=lambda s, obs, p: hook(s, obs, p, truth))
-    driven = Backlash(strategy, stand.play()) if stand.play_m else strategy
-    runner = StrategyRunner(twin, driven, objects=perception.objects, cameras=("wrist",))
-    touch = TableTouch(twin)
-    started, t0 = time.monotonic(), clock.t
-    runner.start(threaded=False)
-    drive(twin, runner, CALIBRATION_S, clock, detector=detector,
-          detect_while=lambda: not strategy.started or strategy.status.phase == CORNERS)
-    if runner.status.running:
-        runner.stop()
-    perception.stop_all("koniec")
-    reason = strategy.status.stopped_because or runner.status.stopped_because
-    return Calibration(strategy, reason, clock.t - t0, time.monotonic() - started, touch.artefacts(), truth)
 
 
 # --------------------------------------------------------------------------- held-out points

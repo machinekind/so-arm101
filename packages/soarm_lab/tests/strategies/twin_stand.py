@@ -14,17 +14,22 @@ the arm's joints have:
   camera model is off by that much;
 - `play()` is `stand_errors.play_for(play_m)`, for `Backlash`.
 
-`perception()` runs the real `charuco` detector through the twin's `Perception`, stepped by `drive`. Only
-tests marked `twin` import this module.
+`perception()` runs the real `charuco` detector through the twin's `Perception`, stepped by `drive`.
+`calibrate()` runs `calibrate_approach` on a stand's twin, the strategy wrapped in `Backlash` when the stand
+has play, and keeps the simulation's truth for every approach to a corner. `Stand.table()` gives the stand's
+approach table, calibrated once in a twin of its own and kept as a file. Only tests marked `twin` import this
+module.
 """
 
 from __future__ import annotations
 
+import functools
 import math
 import os
 import tempfile
+import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -39,9 +44,16 @@ from machinekind_twin.runtime import Twin
 from machinekind_twin.strategy import StrategyRunner
 from machinekind_twin.workspace import CameraRecord, Workspace
 
+from soarm_lab.approach_table import ApproachTable
 from soarm_lab.charuco import BoardSpec
 from soarm_lab.kinematics import pose
-from soarm_lab.stand_errors import CameraPoseError, play_for, tilted, uniform
+from soarm_lab.stand_errors import Backlash, CameraPoseError, play_for, tilted, uniform
+from soarm_lab.strategies.calibrate_approach import (
+    CORNERS,
+    CalibrateApproachSettings,
+    CalibrateApproachStrategy,
+    Planned,
+)
 
 CAMERA = "kamera1"
 SIZE = (1280, 720)
@@ -66,6 +78,8 @@ TWIN_PERIOD = 0.02
 DETECT_EVERY_S = 0.5
 #: Tables the campaign keeps, under `SOARM_CAMPAIGN_DIR`.
 TABLES = "tables"
+#: A calibration's simulated time limit [s].
+CALIBRATION_S = 3600.0
 
 
 @dataclass
@@ -189,10 +203,39 @@ class Stand:
         return perception, runner
 
     def table_path(self, fallback: Path | None = None, name: str = "") -> Path:
-        """Where this stand's table is kept: under the campaign folder, else `fallback` or a temporary one."""
+        """Where this stand's table is kept: under the campaign folder, else `fallback`, else a temporary
+        folder that lasts as long as the process."""
         root = os.environ.get("SOARM_CAMPAIGN_DIR", "").strip()
-        base = Path(root) / TABLES if root else (fallback or Path(tempfile.mkdtemp(prefix="approach-")))
+        base = Path(root) / TABLES if root else (fallback or _scratch())
         return base / f"stand-{self.seed:04d}{name}.json"
+
+    @property
+    def name(self) -> str:
+        """The stand's errors in a file name: the same seed with other errors is another stand."""
+        return (f"-{self.camera_kind}-{self.camera_m * 1000:.0f}mm-play-{self.play_m * 1000:.0f}mm"
+                f"-mount-{self.mount_m * 1000:.1f}mm")
+
+    def table(self, fallback: Path | None = None, **settings: Any) -> ApproachTable:
+        """This stand's approach table: the kept file when there is one, else a calibration in a twin of its
+        own, kept under `table_path`. Raises when the calibration does not finish."""
+        path = self.table_path(fallback, self.name)
+        if path.exists():
+            table = ApproachTable.load(path)
+            if table.data.get("complete"):
+                return table
+        twin = self.twin()
+        try:
+            cal = calibrate(self, twin, Clock(), path, **settings)
+        finally:
+            twin.close()
+        if cal.table is None or not cal.strategy.status.success:
+            raise RuntimeError(f"stand {self.seed}: the calibration did not finish: {cal.reason}")
+        return ApproachTable.load(path)
+
+
+@functools.lru_cache(maxsize=1)
+def _scratch() -> Path:
+    return Path(tempfile.mkdtemp(prefix="approach-tables-"))
 
 
 def truth_tcp(twin: Twin) -> np.ndarray:
@@ -259,3 +302,62 @@ def drive(twin: Twin, runner: StrategyRunner, seconds: float, clock: Clock,
             runner.step_once(clock.t)
         if not runner.status.running:
             break
+
+
+# --------------------------------------------------------------------------- a calibration on the stand
+@dataclass
+class Calibration:
+    """A calibration run and what the simulation's truth says about its samples."""
+
+    strategy: CalibrateApproachStrategy
+    reason: str
+    sim_s: float
+    wall_s: float
+    artefacts: list[str]
+    #: Per approach to a corner (kind, corner, level, direction, repeat): the true correction [m, x and y].
+    truth: dict[tuple[str, int, int, str, int], np.ndarray] = field(default_factory=dict)
+
+    @property
+    def table(self) -> ApproachTable | None:
+        return self.strategy.table
+
+    def sample_errors(self) -> list[float]:
+        """How far each sample's correction lies from the truth [m]."""
+        out = []
+        for s in self.strategy.samples:
+            key = ("sample", int(s["corner"]), int(s["level"]), str(s["direction"]), int(s["repeat"]))
+            if key in self.truth:
+                out.append(float(np.linalg.norm(np.asarray(s["delta_m"], float)[:2] - self.truth[key])))
+        return out
+
+
+def calibrate(stand: Stand, twin: Twin, clock: Clock, table: Path, **settings: Any) -> Calibration:
+    """Run `calibrate_approach` on the stand's twin to its end, its table going to `table`.
+
+    The true correction of each approach to a corner is the true corner minus where the TCP really is, plus
+    what the TCP lacked of its command."""
+    perception, detector = stand.perception(twin, clock)
+    truth: dict[tuple[str, int, int, str, int], np.ndarray] = {}
+    corners = stand.corners()
+
+    def on_still(strategy: CalibrateApproachStrategy, obs: Any, planned: Planned) -> None:
+        if planned.corner < 0:
+            return
+        missing = corners[planned.corner][:2] - truth_tcp(twin)[:2] + (strategy.tcp_cmd[:2] - planned.xy)
+        truth[(planned.kind, planned.corner, planned.level, planned.direction, planned.repeat)] = missing
+
+    cfg = CalibrateApproachSettings(**{"table_file": str(table), "merge": False,
+                                       "thickness_m": stand.board.thickness_m, **settings})
+    strategy = CalibrateApproachStrategy(cfg, on_still=on_still)
+    driven = Backlash(strategy, stand.play()) if stand.play_m else strategy
+    runner = StrategyRunner(twin, driven, objects=perception.objects, cameras=("wrist",))
+    touch = TableTouch(twin)
+    started, t0 = time.monotonic(), clock.t
+    runner.start(threaded=False)
+    drive(twin, runner, CALIBRATION_S, clock, detector=detector,
+          detect_while=lambda: not strategy.started or strategy.status.phase == CORNERS)
+    if runner.status.running:
+        runner.stop()
+    perception.stop_all("koniec")
+    reason = strategy.status.stopped_because or runner.status.stopped_because
+    return Calibration(strategy, reason, clock.t - t0, time.monotonic() - started, touch.artefacts(), truth)
