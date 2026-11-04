@@ -54,6 +54,7 @@ grasp = "soarm_lab.strategies.grasp:GraspStrategy"
 grasp_jev = "soarm_lab.strategies.grasp_jev:GraspJevStrategy"
 grasp_wrist = "soarm_lab.strategies.wrist:WristGraspStrategy"
 pick_place = "soarm_lab.strategies.pick_place:PickPlaceStrategy"
+build = "soarm_lab.strategies.build:BuildStrategy"
 
 [project.scripts]
 soarm-lab = "soarm_lab.cli:main"
