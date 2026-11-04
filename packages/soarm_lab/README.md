@@ -438,9 +438,10 @@ and sits between the open pads along it: the moving jaw then pushes it against t
 room along the line comes from the opening, the block's width and the fingertip radius: about 7 mm on
 each side at the default `open_margin_m`. Otherwise the jaw first slides along the closing line, so
 neither tip drags the block, and the arm rises with the jaw open, moves the aim by `correction_gain`
-times the part of the offset outside those bounds (along the line no farther than the pads allow),
-straddles again without the hover look and looks again, up to `close_rounds` times per attempt. An
-offset that a correction leaves within 1 mm is the camera's error, not the block's: the jaw closes.
+times the part of the offset outside those bounds (along the line no farther in an attempt than the
+pads allow), straddles again without the hover look and looks again, up to `close_rounds` times per
+attempt. A part of the offset, along or across, that a correction moved but the next look still sees
+within 1 mm of before is the camera's error, not the block's: it no longer counts in that attempt.
 After the last round the jaw closes if the block lies within the middle third of the gripped face
 across the closing line, and the close and lift checks judge the grip. A block still farther off
 counts as a failed attempt; the last attempt closes anyway. `close_rounds: 0` closes without this

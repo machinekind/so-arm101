@@ -831,7 +831,10 @@ def test_the_wrist_look_and_jev_pick_a_cube_and_place_it_on_another(twin):
 
 
 @pytest.mark.render
-def test_a_cube_pushed_after_the_wrist_look_is_centred_between_the_jaw_tips_and_still_placed(twin):
+@pytest.mark.parametrize("across", [False, True], ids=["along the jaws", "across the jaws"])
+def test_a_cube_pushed_after_the_wrist_look_is_still_gripped_and_placed(twin, across: bool):
+    """A push along the jaws leaves the cube between the open pads: the jaw closes at once. A push across them
+    is corrected first."""
     sinking = add_blocks(twin, Placed("red", "cube", (0.205, -0.05), 25.0, RED),
                          Placed("blue", "cube", TARGET_XY, 10.0, BLUE))
     clock = Clock()
@@ -842,9 +845,10 @@ def test_a_cube_pushed_after_the_wrist_look_is_centred_between_the_jaw_tips_and_
 
     def watch() -> None:
         if strategy.status.phase == "straddle" and strategy.wrist.verdicts and not pushed:
-            # Toward the fixed jaw, after the hover look and before the jaw goes down.
+            # Toward the fixed jaw, or across the jaws, after the hover look and before the jaw goes down.
             psi = math.radians(strategy.grasp.heading_deg)
-            push = -0.005 * np.array([math.cos(psi), math.sin(psi)])
+            u = np.array([math.cos(psi), math.sin(psi)])
+            push = -0.005 * (np.array([-u[1], u[0]]) if across else u)
             move(twin, "red", tuple(truth(twin, "red")[0][:2] + push), truth(twin, "red")[0][2])
             pushed.append(push)
 
@@ -852,8 +856,13 @@ def test_a_cube_pushed_after_the_wrist_look_is_centred_between_the_jaw_tips_and_
     drive(twin, runner, 120.0, clock, watch=watch)
 
     assert runner.status.stopped_because == "zadanie wykonane", (strategy.place, strategy.wrist)
-    looks = [(c.verdict, round(c.along_m * 1000)) for c in strategy.wrist.close_looks]
-    assert looks[0] == ("moved", -5) and looks[-1][0] == "centred" and strategy.status.attempt == 1
+    looks = [(c.verdict, round(c.along_m * 1000), round(c.across_m * 1000))
+             for c in strategy.wrist.close_looks]
+    if across:
+        assert looks[0][0] == "moved" and -7 <= looks[0][2] <= -4 and looks[-1][0] == "centred", looks
+    else:
+        assert looks == [("centred", -5, 0)], looks
+    assert strategy.status.attempt == 1
     settle(twin)
     red, red_rot = truth(twin, "red")
     blue, _ = truth(twin, "blue")

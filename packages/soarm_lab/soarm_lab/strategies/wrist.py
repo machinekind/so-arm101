@@ -42,12 +42,13 @@ scales a correction. A height error between the jaw and the block still reads pa
 across the jaw, since the camera sees the block from the side. The jaw closes once the offset across
 the closing line is within `close_tol_m` and the block sits between the open pads along it. Otherwise
 the aim moves by `correction_gain` times the offset outside those bounds, along the closing line no
-farther than keeps the block between the pads: the jaw first slides along the closing line, the arm
-rises with the jaw open, straddles again at the new aim without the hover look, and looks again, up to
-`close_rounds` times per attempt. An offset that a correction leaves within `SAME_OFFSET_M` is the
-camera's error, not the block's: the jaw closes. After the last round the jaw closes if the offset
-across lies within `LAST_ACROSS_SHARE` of the gripped face's half length; a block still farther off is
-a failed attempt, and the last attempt closes anyway. An empty or edge close also retries from the
+farther in an attempt than keeps the block between the pads: the jaw first slides along the closing
+line, the arm rises with the jaw open, straddles again at the new aim without the hover look, and looks
+again, up to `close_rounds` times per attempt. A part of the offset that a correction moved but that the
+next look measures within `SAME_OFFSET_M` of before is the camera's error, not the block's: it no longer
+counts in that attempt. After the last round the jaw closes if the offset across lies within
+`LAST_ACROSS_SHARE` of the gripped face's half length; a block still farther off is a failed attempt,
+and the last attempt closes anyway. An empty or edge close also retries from the
 hover with a new look, within `max_attempts`. Skipped looks close as before.
 
 With `residual_file` set, a successful lift adds the camera-corrected aim at the close minus the
@@ -128,8 +129,8 @@ MAX_CORRECTION_GAIN = 2.0
 #: Block hues by the colour word in the block's label [deg, 0..360), as the wrist camera sees them. Bare wood
 #: has too little saturation for a hue window, so "wooden" is not here.
 LABEL_HUES = {"red": 356.0, "yellow": 50.0, "green": 143.0, "light blue": 190.0}
-#: A look between the jaw tips that measures the offset of the look before a correction within this is the
-#: camera's error, and the jaw closes [m].
+#: A part of the offset (along or across the closing line) that a correction moved but that the next look
+#: between the jaw tips measures within this of before is the camera's error [m].
 SAME_OFFSET_M = 0.001
 #: After the last correction the jaw closes with the block off across the closing line by at most this
 #: share of the gripped face's half length: the pads then grip the face's middle third.
@@ -707,8 +708,12 @@ class WristGraspStrategy(GraspStrategy):
         self._jaw_look: _CloseState | None = None
         self._close_attempt = -1
         self._close_round = 0
-        #: The offset the last look between the tips measured in this attempt [m, base frame], or None.
-        self._close_error: np.ndarray | None = None
+        #: In this attempt: the last look's offset and the last correction, along and across the closing line
+        #: [m]; which of the two parts are the camera's error; and the corrections along it so far [m].
+        self._close_last: tuple[float, float] | None = None
+        self._close_fix = (0.0, 0.0)
+        self._close_bias = [False, False]
+        self._close_shift = 0.0
         #: The next look before the straddle is skipped: the arm comes back from a correction.
         self._skip_hover_look = False
         #: The detector's first aim, and the aim when the jaw last started closing [m, base frame].
@@ -930,7 +935,9 @@ class WristGraspStrategy(GraspStrategy):
         look = self._jaw_look
         if look is None:
             if self._close_attempt != self.status.attempt:
-                self._close_attempt, self._close_round, self._close_error = self.status.attempt, 0, None
+                self._close_attempt, self._close_round = self.status.attempt, 0
+                self._close_last, self._close_fix, self._close_bias = None, (0.0, 0.0), [False, False]
+                self._close_shift = 0.0
             look = self._jaw_look = _CloseState(self._t)
         if look.done:
             self._jaw_look = None
@@ -972,17 +979,25 @@ class WristGraspStrategy(GraspStrategy):
                                         along, across)
         self.wrist.final_offset_m = (along, across)
         room = self._between_pads_m()
-        if abs(across) <= cfg.close_tol_m and abs(along) <= room:
+        if self._close_last is not None:
+            # A part a correction moved but the camera still sees where it was is the camera's error.
+            for k, (now, before) in enumerate(zip((along, across), self._close_last, strict=True)):
+                self._close_bias[k] |= bool(self._close_fix[k]) and abs(now - before) <= SAME_OFFSET_M
+        self._close_last = (along, across)
+        along_ok = abs(along) <= room or self._close_bias[0]
+        across_ok = abs(across) <= cfg.close_tol_m or self._close_bias[1]
+        if along_ok and across_ok:
+            if any(self._close_bias):
+                return self._end_close_look("bias", f"kamera w szczekach: blok {where} jak przed poprawka - "
+                                            "blad kamery, zamykam", along, across)
             return self._end_close_look("centred", f"kamera w szczekach: blok na srodku, {where}", along,
                                         across)
-        last, self._close_error = self._close_error, error.copy()
-        if self._close_round and last is not None and float(np.linalg.norm(error - last)) <= SAME_OFFSET_M:
-            return self._end_close_look("bias", f"kamera w szczekach: blok {where} jak przed poprawka - blad "
-                                        "kamery, zamykam", along, across)
         if self._close_round < cfg.close_rounds:
-            # Only what lies outside its bound, and along the closing line no farther than the pads allow.
-            fix_along = 0.0 if abs(along) <= room else float(np.clip(along, -room, room))
-            fix_across = 0.0 if abs(across) <= cfg.close_tol_m else across
+            # Only what lies outside its bound; along the closing line, no farther in all than the pads allow.
+            shift = self._close_shift
+            fix_along = 0.0 if along_ok else float(np.clip(along, -room - shift, room - shift))
+            fix_across = 0.0 if across_ok else across
+            self._close_fix, self._close_shift = (fix_along, fix_across), self._close_shift + fix_along
             fix = fix_along * u + fix_across * np.array([-u[1], u[0]])
             return self._correct(fix, fix_along, along, across, f"kamera w szczekach: blok {where} od srodka")
         why = f"blok {where} od srodka po {self._close_round} poprawkach"
