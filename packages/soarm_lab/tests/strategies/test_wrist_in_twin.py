@@ -38,13 +38,15 @@ from soarm_lab.strategies.wrist import WristGraspSettings, WristGraspStrategy, f
 NAME = "grasp_wrist"
 TOUCH_FIELDS = ["label", "touch_z", "hover_m", "wait_for_pose_s", "max_pose_age_s", "close_jaw",
                 "need_contact", "hz", "speed_mps", "descend_speed_mps", "contact_gap_m", "contact_band_m",
-                "max_tracking_deg", "time_limit_s"]
-GRASP_FIELDS = TOUCH_FIELDS + ["block", "probe", "open_margin_m", "squeeze_m", "grasp_depth", "lift_m",
+                "max_tracking_deg", "sag_m", "stall_s", "time_limit_s"]
+GRASP_FIELDS = TOUCH_FIELDS + ["block", "probe", "open_margin_m", "squeeze_m", "grasp_depth",
+                               "straddle_push_m", "close_on_stall_m", "lift_m",
                                "hold_s", "max_attempts", "carry_s", "release", "wait_s", "recover_m",
-                               "grasp_source", "library_dir", "min_score", "max_tilt_deg"]
+                               "grasp_source", "library_dir", "min_score", "max_tilt_deg",
+                               "jaw_gap_offset_m", "jaw_file"]
 GRASP_WRIST_FIELDS = GRASP_FIELDS + ["wrist_camera", "max_frame_age_s", "frame_wait_s", "hue_deg",
-                                     "hue_window_deg", "min_saturation", "min_value", "focal_px",
-                                     "tip_pixel_x", "tip_pixel_y", "rotate_180", "centre_tol_m",
+                                     "label_hues", "hue_window_deg", "min_saturation", "min_value",
+                                     "focal_px", "tip_pixel_x", "tip_pixel_y", "rotate_180", "centre_tol_m",
                                      "max_shift_m", "rounds", "min_fit_iou", "look_before_straddle",
                                      "close_rounds", "close_tol_m", "correction_gain", "residual_file"]
 #: The simulated clock's step, and the twin loop's period [s].
@@ -200,7 +202,8 @@ def test_its_settings_become_the_panel_form():
     assert fields["hue_deg"].default == -1.0 and fields["centre_tol_m"].default == 0.003
     floats = GRASP_WRIST_FIELDS[GRASP_WRIST_FIELDS.index("max_frame_age_s"):]
     floats = [name for name in floats if name not in ("rounds", "rotate_180", "look_before_straddle",
-                                                      "close_rounds", "residual_file")]
+                                                      "close_rounds", "residual_file", "label_hues")]
+    assert fields["label_hues"].kind is str and fields["label_hues"].default == ""
     assert fields["close_rounds"].kind is int and fields["close_rounds"].default == 3
     assert fields["residual_file"].kind is str and fields["residual_file"].default == ""
     assert all(fields[name].kind is float for name in floats)

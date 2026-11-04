@@ -49,7 +49,7 @@ from soarm_lab.strategies.touch_jev import CORRECTIONS, VERDICTS, JevTouchSettin
 NAME = "touch"
 TOUCH_FIELDS = ["label", "touch_z", "hover_m", "wait_for_pose_s", "max_pose_age_s", "close_jaw",
                 "need_contact", "hz", "speed_mps", "descend_speed_mps", "contact_gap_m", "contact_band_m",
-                "max_tracking_deg", "time_limit_s"]
+                "max_tracking_deg", "sag_m", "stall_s", "time_limit_s"]
 #: The simulated clock's step, and the twin loop's period [s].
 CLOCK_STEP = 0.01
 TWIN_PERIOD = 0.02

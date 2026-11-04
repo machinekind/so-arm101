@@ -201,13 +201,16 @@ def follow(s: GraspStrategy, joints: dict[str, float], objects: Mapping[str, Obj
            t0: float = 0.0, block: Block | None = None, cap_deg_s: float | None = None,
            frames: Frames | None = None, measured: list[dict[str, float]] | None = None,
            on_tick: Callable[[float], None] | None = None, until: Callable[[], bool] | None = None,
+           gripper_offset_m: float = 0.0,
            ) -> tuple[list[Action], list[str], dict[str, float], float]:
     """Run up to `ticks` ticks, stopping on `done`.
 
     The arm follows the supervisor command at once, stalling at `block`. The jaw closes to
     block width when the tips straddle it, then the block follows the fingertips. `frames`
     supplies wrist frames from measured joints. `on_tick` runs after each tick, and `until`
-    can end the loop. Return actions, phases, final joints and final time.
+    can end the loop. With `gripper_offset_m`, the gripper's readings and commands put the jaw that much
+    wider than it really is, as a stand's calibration may. Return actions, phases, final joints and final
+    time.
     """
     answers, phases = [], []
     command = dict(joints)
@@ -218,7 +221,8 @@ def follow(s: GraspStrategy, joints: dict[str, float], objects: Mapping[str, Obj
         if measured is not None:
             measured.append(joints)
         seen_now = frames(joints) if frames is not None else None
-        answers.append(a := s.act(obs(joints, t=t, objects=objects, command=command, frames=seen_now)))
+        read = dict(joints, **{g: regrip(joints[g], gripper_offset_m)}) if gripper_offset_m else joints
+        answers.append(a := s.act(obs(read, t=t, objects=objects, command=command, frames=seen_now)))
         phases.append(s.status.phase)
         if on_tick is not None:
             on_tick(t)
@@ -226,15 +230,17 @@ def follow(s: GraspStrategy, joints: dict[str, float], objects: Mapping[str, Obj
         command = supervised(command, a.target, None if cap_deg_s is None else cap_deg_s / s.hz)
         arm = dict(command)
         arm[g] = joints[g]
+        # Where the jaw really goes for the gripper's command.
+        sent = regrip(command[g], -gripper_offset_m) if gripper_offset_m else command[g]
         between = block is not None and block.between(arm)
-        grip = max(command[g], block.units(arm)) if block is not None and between else command[g]
+        grip = max(sent, block.units(arm)) if block is not None and between else sent
         arm[g] = grip
         if block is not None:
             units = block.units(arm) if between else NAN
-            if block.gripped and command[g] > units + 0.5:
+            if block.gripped and sent > units + 0.5:
                 block.gripped = False
-                arm[g] = command[g]
-            elif between and not block.gripped and abs(grip - units) < 0.5 and command[g] < units - 0.5:
+                arm[g] = sent
+            elif between and not block.gripped and abs(grip - units) < 0.5 and sent < units - 0.5:
                 block.gripped = True
             if block.stalls(arm):
                 arm = dict(joints, **{g: arm[g]})
@@ -245,6 +251,12 @@ def follow(s: GraspStrategy, joints: dict[str, float], objects: Mapping[str, Obj
         if a.done or (until is not None and until()):
             break
     return answers, phases, joints, t
+
+
+def regrip(gripper: float, wider_m: float) -> float:
+    """The gripper value whose jaw gap is `wider_m` [m] wider than at `gripper` [app units]."""
+    lo, hi = KIN.jaw_gap(0.0), KIN.jaw_gap(100.0)
+    return KIN.gripper_for_gap(min(max(KIN.jaw_gap(gripper) + wider_m, lo), hi))
 
 
 # ------------------------------------------------------------ the synthetic wrist camera
@@ -306,21 +318,22 @@ def camera_of(block: Block, **kwargs) -> Frames:
 
 
 def hover_of(kind: str = "cube", xy: tuple[float, float] = XY, straddle: bool = False,
-             yaw_deg: float | None = None, hue_deg: float | None = None
+             yaw_deg: float | None = None, hue_deg: float | None = None, label: str = "", **settings
              ) -> tuple[WristGraspStrategy, dict[str, float]]:
     """Return a started strategy and measured joints at the probe or open-jaw straddle hover.
 
-    The hover is reached without looking. `hue_deg` defaults to the hue of the block's `PAINT`.
+    The hover is reached without looking. `hue_deg` defaults to the hue of the block's `PAINT`. `label`
+    defaults to the block's kind.
     """
     hue = hue_of(PAINT[kind]) if hue_deg is None else hue_deg
-    s = started(seen(xy, kind, yaw_deg=yaw_deg), block=kind, probe=True, look_before_straddle=False,
-                need_contact=False, hue_deg=hue)
+    s = started(seen(xy, label or kind, yaw_deg=yaw_deg), block=kind, probe=True, look_before_straddle=False,
+                need_contact=False, hue_deg=hue, label=label, **settings)
     measured: list[dict[str, float]] = []
     phase = "straddle" if straddle else "descend"
     # Skip the probe look without frames and reach straddle with contact detection off.
     s.wrist_settings.frame_wait_s = 0.0
-    _, phases, *_ = follow(s, dict(SPEC.home), seen(xy, kind, yaw_deg=yaw_deg), 2000, measured=measured,
-                           until=lambda: s.status.phase == phase)
+    _, phases, *_ = follow(s, dict(SPEC.home), seen(xy, label or kind, yaw_deg=yaw_deg), 2000,
+                           measured=measured, until=lambda: s.status.phase == phase)
     assert phases[-1] == phase
     s.wrist_settings.frame_wait_s = 1.0
     return s, measured[-1]
@@ -695,6 +708,53 @@ def test_bare_wood_gives_no_hue_and_the_look_is_skipped():
     # A later frame can still give the hue.
     m = s.measure(synthetic_frame(joints, "cube", XY, 0.0).image, joints)
     assert m.problem == "" and s.wrist.hue_deg == pytest.approx(hue_of(PAINT["cube"]), abs=2.0)
+
+
+#: Paints at the hues `LABEL_HUES` gives "light blue" and "green" [0..1].
+LIGHT_BLUE = tuple(__import__("colorsys").hsv_to_rgb(190 / 360, 0.99, 0.8))
+GREEN = tuple(__import__("colorsys").hsv_to_rgb(143 / 360, 0.7, 0.6))
+
+
+@pytest.mark.parametrize("label, colour", [("light blue cube", LIGHT_BLUE), ("red cube 2", PALETTE[0][0]),
+                                           ("green cube", GREEN)], ids=["light blue", "red", "green"])
+@pytest.mark.parametrize("hue_deg", [-1.0, 146.0, 50.0], ids=["no hue set", "green set", "yellow set"])
+def test_a_colour_word_in_the_label_finds_the_block_of_that_colour(label: str, colour, hue_deg: float):
+    """The label's colour sets the hue; a set hue of another colour does not replace it."""
+    cv2_or_skip()
+    s, joints = hover_of("cube", hue_deg=hue_deg, label=label)
+    m = s.measure(synthetic_frame(joints, "cube", XY, 0.0, colour=colour).image, joints)
+
+    assert m.problem == "" and m.xy == pytest.approx(XY, abs=1e-3)
+    assert s.wrist.hue_source == ("setting" if label == "green cube" and hue_deg == 146.0 else "label")
+    other = LIGHT_BLUE if colour is not LIGHT_BLUE else PALETTE[0][0]
+    m = s.measure(synthetic_frame(joints, "cube", XY, 0.0, colour=other).image, joints)
+    assert m.problem == "brak bloku w kamerze"
+
+
+def test_a_set_hue_near_the_labels_colour_fine_tunes_it():
+    cv2_or_skip()
+    s, _ = hover_of("cube", hue_deg=196.0, label="light blue cube")
+    assert s.wrist.hue_source == "setting" and s.wrist.hue_deg == 196.0
+
+
+def test_a_label_without_a_colour_word_takes_the_set_hue_or_samples_it():
+    cv2_or_skip()
+    s, _ = hover_of("cube", hue_deg=-1.0, label="cube 2")
+    assert s.wrist.hue_source == "sampled" and math.isnan(s.wrist.hue_deg)
+    s, _ = hover_of("cube", hue_deg=146.0, label="wooden cube")
+    assert s.wrist.hue_source == "setting" and s.wrist.hue_deg == 146.0
+
+
+def test_label_hues_add_and_replace_colour_words():
+    cv2_or_skip()
+    hues = wrist.colour_hues(" Light  Blue: 200, orange:20 ")
+    assert hues["light blue"] == 200.0 and hues["orange"] == 20.0 and hues["red"] == wrist.LABEL_HUES["red"]
+    assert next(iter(hues)) == "light blue"
+    s, _ = hover_of("cube", hue_deg=-1.0, label="orange cube", label_hues="orange: 20")
+    assert s.wrist.hue_source == "label" and s.wrist.hue_deg == 20.0
+    for text in ("blue", "blue: 400", ": 20", "blue: x"):
+        with pytest.raises(ValueError, match="grasp_wrist: label_hues"):
+            WristGraspStrategy(WristGraspSettings(label_hues=text))
 
 
 def test_a_set_hue_is_used_as_given():
@@ -1152,11 +1212,14 @@ def push_after_hover_look(s: WristGraspStrategy, block: Block, along_m: float, a
     return on_tick
 
 
-def off_centre_at_close(phases: list[str], measured: list[dict[str, float]], where: list[np.ndarray]
-                        ) -> float:
-    """How far the open tips' midpoint lay from the block when the jaw last started closing [m]."""
+def offset_at_close(s: WristGraspStrategy, phases: list[str], measured: list[dict[str, float]],
+                    where: list[np.ndarray]) -> tuple[float, float]:
+    """The block minus the open tips' midpoint when the jaw last started closing, along the closing line
+    and across it [m]."""
     k = max(i for i, p in enumerate(phases) if p == "close" and phases[i - 1] != "close")
-    return float(np.linalg.norm(np.mean(KIN.fingertips(measured[k]), axis=0)[:2] - where[k]))
+    d = where[k] - np.mean(KIN.fingertips(measured[k]), axis=0)[:2]
+    u = closing_u(s)
+    return float(d @ u), float(d @ np.array([-u[1], u[0]]))
 
 
 def test_the_look_between_the_jaw_tips_catches_a_push_after_the_hover_look():
@@ -1186,9 +1249,11 @@ def test_the_look_between_the_jaw_tips_catches_a_push_after_the_hover_look():
     assert all(a.target["gripper"] == pytest.approx(s.cmd_open) for a in rising)
     assert any(a.note.startswith("kamera w szczekach: blok 5 mm (wzdluz -4, w poprzek +3 mm) od srodka - "
                                  "poprawka 1 z 3") for a in answers)
-    assert off_centre_at_close(phases, measured, where) < 0.001
-    assert s.wrist.final_offset_m == pytest.approx((0.0, 0.0), abs=1e-3)
-    assert re.search(r"; proby 1, kamera w szczekach [01] mm$", answers[-1].note)
+    # Only the offset across the closing line is corrected: along it the block sits between the pads.
+    along, across = offset_at_close(s, phases, measured, where)
+    assert abs(across) < 0.001 and along == pytest.approx(-0.004, abs=1e-3)
+    assert s.wrist.final_offset_m == pytest.approx((-0.004, 0.0), abs=1e-3)
+    assert re.search(r"; proby 1, kamera w szczekach [45] mm$", answers[-1].note)
 
 
 def test_without_close_rounds_the_jaw_closes_where_the_hover_look_aimed():
@@ -1202,25 +1267,32 @@ def test_without_close_rounds_the_jaw_closes_where_the_hover_look_aimed():
     assert s.grasp.block_xy == pytest.approx(XY, abs=1e-3)
 
 
-def biased_measure(s: WristGraspStrategy, offset: np.ndarray) -> None:
-    """The look between the tips always sees the block `offset` [m] from the jaws' midpoint."""
+def biased_measure(s: WristGraspStrategy, *offsets: tuple[float, float]) -> None:
+    """The looks between the tips see the block at `offsets` from the jaws' midpoint in turn, along the
+    closing line and across it [m]."""
     plain = s.measure
+    calls: list[int] = []
 
     def measure(rgb, joints, ref_xy=None):
         if ref_xy is None:
             return plain(rgb, joints)
         m = plain(rgb, joints, ref_xy)
-        xy = np.asarray(ref_xy, float) + offset
+        along, across = offsets[len(calls) % len(offsets)]
+        calls.append(1)
+        u = closing_u(s)
+        xy = np.asarray(ref_xy, float) + along * u + across * np.array([-u[1], u[0]])
         return wrist.Measurement(xy, m.yaw, m.iou, m.area_px, m.ratio, m.pixel)
 
     s.measure = measure  # type: ignore[method-assign]
 
 
 def test_a_block_still_off_after_the_last_round_is_another_attempt_and_the_last_attempt_closes():
+    """Off across the closing line by more than the face's middle third, and not the same after each
+    correction: another attempt, and the last attempt closes."""
     cv2_or_skip()
     block = block_at(XY, "cube")
     s = started(seen(XY), close_rounds=1, max_attempts=2)
-    biased_measure(s, np.array([0.004, 0.0]))
+    biased_measure(s, (0.0, 0.006), (0.0, -0.006))
     answers, phases, *_ = follow(s, dict(SPEC.home), seen(XY), 4000, block=block, frames=camera_of(block))
 
     assert answers[-1].success, answers[-1].note
@@ -1229,8 +1301,65 @@ def test_a_block_still_off_after_the_last_round_is_another_attempt_and_the_last_
     assert s.status.attempt == 2 and s.wrist.looks == 2
     notes = [a.note for a in answers]
     assert any(n.startswith("kamera widzi blok poza srodkiem szczek - w gore, proba 2") for n in notes)
-    assert any(n.startswith("kamera w szczekach: blok 4 mm (wzdluz +4, w poprzek +0 mm) od srodka po 1 "
+    assert any(n.startswith("kamera w szczekach: blok 6 mm (wzdluz +0, w poprzek -6 mm) od srodka po 1 "
                             "poprawkach - zamykam w ostatniej probie") for n in notes)
+
+
+def test_a_block_off_along_the_closing_line_but_between_the_pads_closes_at_once():
+    cv2_or_skip()
+    block = block_at(XY, "cube")
+    s = started(seen(XY))
+    biased_measure(s, (-0.006, 0.001))
+    answers, phases, *_ = follow(s, dict(SPEC.home), seen(XY), 4000, block=block, frames=camera_of(block))
+
+    assert answers[-1].success, answers[-1].note
+    assert [c.verdict for c in s.wrist.close_looks] == ["centred"] and "rise" not in phases
+
+
+def test_an_offset_along_the_closing_line_beyond_the_pads_is_corrected_only_as_far_as_the_pads_allow():
+    cv2_or_skip()
+    block = block_at(XY, "cube")
+    s = started(seen(XY))
+    biased_measure(s, (0.012, 0.0), (0.0, 0.0))
+    room = (s.gap_open_m - 2 * CUBE[1]) / 2 - KIN.fingertip_radius()
+    aims: list[np.ndarray] = []
+
+    def on_tick(t: float) -> None:
+        if s.grasp.block_xy is not None and (not aims or not np.allclose(aims[-1], s.grasp.block_xy)):
+            aims.append(np.asarray(s.grasp.block_xy, float).copy())
+
+    answers, *_ = follow(s, dict(SPEC.home), seen(XY), 4000, block=block, frames=camera_of(block),
+                         on_tick=on_tick)
+
+    assert answers[-1].success, answers[-1].note
+    assert [c.verdict for c in s.wrist.close_looks] == ["moved", "centred"]
+    assert float((aims[-1] - aims[-2]) @ closing_u(s)) == pytest.approx(room, abs=1e-6)
+
+
+def test_an_offset_a_correction_leaves_unchanged_is_the_cameras_error_and_the_jaw_closes():
+    cv2_or_skip()
+    block = block_at(XY, "cube")
+    s = started(seen(XY))
+    biased_measure(s, (0.0, 0.004), (0.0005, 0.0045))
+    answers, phases, *_ = follow(s, dict(SPEC.home), seen(XY), 4000, block=block, frames=camera_of(block))
+
+    assert answers[-1].success, answers[-1].note
+    assert [(c.round, c.verdict) for c in s.wrist.close_looks] == [(0, "moved"), (1, "bias")]
+    assert s.status.attempt == 1
+    assert any(a.note.endswith("jak przed poprawka - blad kamery, zamykam") for a in answers)
+
+
+def test_after_the_last_correction_a_block_off_across_within_the_faces_middle_third_closes():
+    cv2_or_skip()
+    block = block_at(XY, "cube")
+    s = started(seen(XY), close_rounds=1)
+    biased_measure(s, (0.0, 0.0035), (0.0, -0.0035))
+    answers, *_ = follow(s, dict(SPEC.home), seen(XY), 4000, block=block, frames=camera_of(block))
+
+    assert answers[-1].success, answers[-1].note
+    assert [(c.round, c.verdict) for c in s.wrist.close_looks] == [(0, "moved"), (1, "off")]
+    assert s.status.attempt == 1
+    assert any(a.note.endswith("od srodka po 1 poprawkach - zamykam") for a in answers)
 
 
 def test_an_empty_close_looks_again_and_lifts_on_the_next_attempt():
@@ -1259,11 +1388,12 @@ def test_an_empty_close_looks_again_and_lifts_on_the_next_attempt():
 def test_with_the_probe_a_retry_closes_the_jaw_before_it_probes_again(why: str):
     cv2_or_skip()
     if why == "edge":
-        # The jaw stops 8 mm wider than the cube it was sized for.
-        block = Block(np.array(XY, float), (CUBE[0] + 0.004, CUBE[1] + 0.004, CUBE[2]), 0.0, "cube")
+        # The jaw stops 8 mm narrower than the cube it was sized for.
+        block = Block(np.array(XY, float), (CUBE[0] - 0.004, CUBE[1] - 0.004, CUBE[2]), 0.0, "cube")
     else:
         block = block_at(XY, "cube")
-    s = started(seen(XY), probe=True, max_attempts=2)
+    # The edge case squeezes deeper, so the jaw still squeezes the narrower block.
+    s = started(seen(XY), probe=True, max_attempts=2, squeeze_m=0.012 if why == "edge" else 0.008)
     moved: list[bool] = []
 
     def on_tick(t: float) -> None:
@@ -1309,9 +1439,9 @@ def test_an_empty_close_on_the_last_attempt_ends_the_run():
 
 def test_an_edge_grip_opens_the_jaw_and_tries_again_and_the_last_attempt_lifts():
     cv2_or_skip()
-    # The jaw stops 8 mm wider than the cube it was sized for.
-    block = Block(np.array(XY, float), (CUBE[0] + 0.004, CUBE[1] + 0.004, CUBE[2]), 0.0, "cube")
-    s = started(seen(XY), max_attempts=2)
+    # The jaw stops 8 mm narrower than the cube it was sized for.
+    block = Block(np.array(XY, float), (CUBE[0] - 0.004, CUBE[1] - 0.004, CUBE[2]), 0.0, "cube")
+    s = started(seen(XY), max_attempts=2, squeeze_m=0.012)
     answers, phases, *_ = follow(s, dict(SPEC.home), seen(XY), 4000, block=block, frames=camera_of(block))
 
     assert answers[-1].success, answers[-1].note
@@ -1321,6 +1451,57 @@ def test_an_edge_grip_opens_the_jaw_and_tries_again_and_the_last_attempt_lifts()
     assert any(n.startswith("szczeka chwycila blok za krawedz - otwieram szczeke, proba 2") for n in notes)
     reopen = [answers[k] for k, p in enumerate(phases) if p == "reopen"]
     assert reopen[-1].target["gripper"] == pytest.approx(s.cmd_open)
+
+
+def test_a_gripper_that_reads_10_mm_wide_without_its_calibration_still_grips_and_lifts():
+    """Uncalibrated, the held jaw reads 10 mm wider than the cube: a full grip, not an edge. The wider
+    opening leaves the narrower real jaw room around the cube."""
+    cv2_or_skip()
+    block = block_at(XY, "cube")
+    s = started(seen(XY), max_attempts=2, open_margin_m=0.014)
+    answers, phases, *_ = follow(s, dict(SPEC.home), seen(XY), 4000, block=block, frames=camera_of(block),
+                                 gripper_offset_m=0.010)
+
+    assert answers[-1].success, answers[-1].note
+    assert s.grasp.edge_closes == 0 and s.status.attempt == 1 and "reopen" not in phases
+    assert s.grasp.jaw_gap_m == pytest.approx(2 * CUBE[1] + 0.010, abs=0.001)
+
+
+@pytest.mark.parametrize("narrow", [False, True], ids=["full grip", "edge grip"])
+def test_with_the_jaw_calibrated_the_held_gap_is_the_blocks_and_a_narrow_grip_is_an_edge(narrow: bool):
+    """`jaw_gap_offset_m` matches the gripper: the held jaw reads the cube's width, the open jaw clears it
+    by `open_margin_m`, the release opens past it, and a jaw 8 mm narrower than the cube is an edge grip."""
+    cv2_or_skip()
+    half = (CUBE[0] - 0.004, CUBE[1] - 0.004, CUBE[2]) if narrow else CUBE
+    block = Block(np.array(XY, float), half, 0.0, "cube")
+    s = started(seen(XY), max_attempts=2, jaw_gap_offset_m=0.010, squeeze_m=0.012, release=True)
+    measured: list[dict[str, float]] = []
+    answers, phases, *_ = follow(s, dict(SPEC.home), seen(XY), 4000, block=block, frames=camera_of(block),
+                                 gripper_offset_m=0.010, measured=measured)
+
+    assert answers[-1].success and answers[-1].note.startswith("blok oddany"), answers[-1].note
+    assert s.grasp.edge_closes == (1 if narrow else 0) and s.status.attempt == (2 if narrow else 1)
+    assert s.grasp.jaw_offset_m == 0.010
+    # The open jaw really clears the cube by `open_margin_m` on each side.
+    k = phases.index("straddle")
+    assert KIN.jaw_gap(measured[k]["gripper"]) == pytest.approx(2 * CUBE[1] + 2 * 0.008, abs=0.001)
+    assert not block.gripped
+
+
+def test_a_jaw_file_learns_the_calibration_from_a_lift_and_the_next_run_uses_it(tmp_path):
+    path = tmp_path / "jaw.json"
+    path.write_text("not json")
+    for run in (1, 2):
+        block = block_at(XY, "cube")
+        s = started(seen(XY), strategy=GraspStrategy, jaw_file=str(path), open_margin_m=0.014)
+        answers, *_ = follow(s, dict(SPEC.home), seen(XY), 4000, block=block, gripper_offset_m=0.010)
+
+        assert answers[-1].success, answers[-1].note
+        data = json.loads(path.read_text())
+        assert data["runs"] == run and data["jaw_gap_offset_m"] == pytest.approx(0.010, abs=0.001)
+    # The second run read the first run's calibration: the held jaw reads the cube's width.
+    assert s.grasp.jaw_runs == 1 and s.grasp.jaw_offset_m == pytest.approx(0.010, abs=0.001)
+    assert s.grasp.jaw_gap_m == pytest.approx(2 * CUBE[1], abs=0.001)
 
 
 def test_plain_grasp_still_ends_the_run_on_an_empty_close():

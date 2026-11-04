@@ -3,8 +3,9 @@
 Each run puts a cube at a seeded place and yaw, gives the strategy one coarse detector pose off by
 `DETECTOR_M` in a seeded direction, and renders the wrist camera. `Backlash` adds hidden play to the
 arm's joints. A nudge moves the cube once the hover look is done. Truth poses judge the run: the cube is
-lifted and held, the jaw tips' midpoint lay within `BAR_M` of the cube's centre when the jaw last started
-closing, and it took at most `MAX_ATTEMPTS` attempts, in at least `BAR_SHARE` of the runs. In every run the
+lifted and held, the jaw tips' midpoint lay within `BAR_M` of the cube's centre across the closing line
+when the jaw last started closing, with the cube between the open pads along it, and it took at most
+`MAX_ATTEMPTS` attempts, in at least `BAR_SHARE` of the runs. In every run the
 cube stays where it lies until the jaw closes on it, neither pushed by the corrections nor sinking.
 
 `SOARM_CAMPAIGN_RUNS` scales the runs per campaign (default `RUNS`, half for the nudge);
@@ -54,7 +55,8 @@ PLAY_JOINTS = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex")
 DETECTOR_M = 0.015
 NUDGE_M = 0.005
 PLAY_M = 0.006
-#: The bar: the share of runs lifted with the jaw centred within `BAR_M` in at most `MAX_ATTEMPTS`.
+#: The bar: the share of runs lifted with the jaw centred within `BAR_M` across the closing line, in at most
+#: `MAX_ATTEMPTS`.
 BAR_M = 0.003
 MAX_ATTEMPTS = 3
 BAR_SHARE = 0.9
@@ -217,8 +219,11 @@ class Outcome:
     yaw_deg: float
     lifted: bool
     attempts: int
-    #: The jaw tips' midpoint minus the cube's centre when the jaw started closing [m], each close.
+    #: The cube's centre minus the jaw tips' midpoint when the jaw started closing, across the closing line
+    #: (its size) and along it [m], each close; and how far along it the cube may lie between the pads [m].
     close_errors_m: list[float] = field(default_factory=list)
+    close_along_m: list[float] = field(default_factory=list)
+    room_m: float = math.inf
     #: The look between the tips: (attempt, round, along mm, across mm, verdict) for each look, and the
     #: truth's along and across [mm] when it looked.
     looks: list[tuple[int, int, float, float, str]] = field(default_factory=list)
@@ -240,8 +245,13 @@ class Outcome:
         return self.close_errors_m[-1] if self.close_errors_m else math.inf
 
     @property
+    def between_pads(self) -> bool:
+        return bool(self.close_along_m) and abs(self.close_along_m[-1]) <= self.room_m
+
+    @property
     def passed(self) -> bool:
-        return self.lifted and self.final_error_m <= BAR_M and self.attempts <= MAX_ATTEMPTS
+        return (self.lifted and self.final_error_m <= BAR_M and self.between_pads
+                and self.attempts <= MAX_ATTEMPTS)
 
 
 def one_run(seed: int, *, play_m: float = 0.0, nudge_m: float = 0.0, detector_m: float = DETECTOR_M,
@@ -289,8 +299,12 @@ def one_run(seed: int, *, play_m: float = 0.0, nudge_m: float = 0.0, detector_m:
                                            round(float(error @ np.array([-u[1], u[0]])) * 1000, 2)))
             if phase == "close" and last["phase"] != "close":
                 tips = KIN.fingertips(dict(twin.status.measured))
-                mid = 0.5 * (tips[0] + tips[1])
-                out.close_errors_m.append(float(np.linalg.norm((mid - truth(twin))[:2])))
+                u = (tips[1] - tips[0])[:2] / np.linalg.norm((tips[1] - tips[0])[:2])
+                error = (truth(twin) - 0.5 * (tips[0] + tips[1]))[:2]
+                out.close_errors_m.append(abs(float(error @ np.array([-u[1], u[0]]))))
+                out.close_along_m.append(float(error @ u))
+                width = 2 * block("cube").half_size[1]
+                out.room_m = (strategy.gap_open_m - width) / 2 - KIN.fingertip_radius()
             if nudge_m and phase == "straddle" and strategy.wrist.verdicts and "nudged" not in last:
                 nudge(twin, push)
                 last["nudged"] = "yes"
@@ -332,7 +346,9 @@ def as_run(name: str, o: Outcome, settings: Mapping[str, Any]) -> Run:
     if not o.lifted:
         reason = "not lifted"
     elif o.final_error_m > BAR_M:
-        reason = f"jaw centre more than {BAR_M * 1000:.0f} mm off"
+        reason = f"jaw centre more than {BAR_M * 1000:.0f} mm off across the jaws"
+    elif not o.between_pads:
+        reason = "cube not between the open pads"
     elif o.attempts > MAX_ATTEMPTS:
         reason = f"more than {MAX_ATTEMPTS} attempts"
     else:
@@ -353,7 +369,8 @@ def campaign(name: str, seeds: range, **kwargs: Any) -> list[Outcome]:
 
 def summary(outcomes: list[Outcome]) -> str:
     rows = [f"seed {o.seed}: {'ok' if o.passed else 'MISS'} lifted={o.lifted} attempts={o.attempts} "
-            f"errors={[round(e * 1000, 1) for e in o.close_errors_m]} mm looks={o.looks} ({o.reason})"
+            f"across={[round(e * 1000, 1) for e in o.close_errors_m]} "
+            f"along={[round(e * 1000, 1) for e in o.close_along_m]} mm looks={o.looks} ({o.reason})"
             for o in outcomes]
     return "\n".join(rows)
 
@@ -455,3 +472,82 @@ def test_a_cube_taken_from_between_the_closing_jaws_is_found_again_and_lifted():
         assert truth(twin)[2] > 0.04
     finally:
         twin.close()
+
+
+# --------------------------------------------------------------------------- the look between the tips
+def biased_close_look(strategy: WristGraspStrategy, along_m: float) -> None:
+    """The look between the jaw tips always sees the block `along_m` from the tips' midpoint along the
+    closing line, wherever the jaw stands: an error no correction removes. Across it, it sees the truth."""
+    plain = strategy.measure
+
+    def measure(rgb, joints, ref_xy=None):
+        m = plain(rgb, joints, ref_xy)
+        if ref_xy is None or m.problem:
+            return m
+        psi = math.radians(strategy.grasp.heading_deg)
+        u = np.array([math.cos(psi), math.sin(psi)])
+        seen = m.xy - np.asarray(ref_xy, float)
+        xy = np.asarray(ref_xy, float) + along_m * u + (seen - float(seen @ u) * u)
+        return replace(m, xy=xy)
+
+    strategy.measure = measure  # type: ignore[method-assign]
+
+
+def run_close_look(xy: tuple[float, float], *, along_bias_m: float = 0.0, across_push_m: float = 0.0
+                   ) -> tuple[WristGraspStrategy, str, bool, list[tuple[float, float]]]:
+    """A grasp of a cube at `xy` seen where it is, with a biased look between the tips or a push across the
+    closing line once the hover look is done. Returns the strategy, the reason it stopped, whether the
+    cube was lifted, and the truth's offset from the tips' midpoint at each look between the tips [m]."""
+    twin = Twin(Workspace(robot="so101"), clock=VirtualClock(t0=0.0))
+    try:
+        add_cube(twin, xy, 0.0)
+        clock = Clock()
+        strategy = load_strategy("grasp_wrist").create({"carry_s": 1.0})
+        assert isinstance(strategy, WristGraspStrategy)
+        if along_bias_m:
+            biased_close_look(strategy, along_bias_m)
+        runner = StrategyRunner(twin, strategy, objects=coarse(twin, clock, np.zeros(2)), cameras=("wrist",))
+        pushed: list[bool] = []
+        truths: list[tuple[float, float]] = []
+
+        def watch() -> None:
+            straddling = strategy.status.phase == "straddle" and strategy.wrist.verdicts
+            if across_push_m and straddling and not pushed:
+                psi = math.radians(strategy.grasp.heading_deg)
+                nudge(twin, across_push_m * np.array([-math.sin(psi), math.cos(psi)]))
+                pushed.append(True)
+            if len(truths) < len(strategy.wrist.close_looks):
+                psi = math.radians(strategy.grasp.heading_deg)
+                u = np.array([math.cos(psi), math.sin(psi)])
+                error = (truth(twin) - 0.5 * sum(KIN.fingertips(dict(twin.status.measured))))[:2]
+                truths.append((float(error @ u), float(error @ np.array([-u[1], u[0]]))))
+
+        runner.start(threaded=False)
+        drive(twin, runner, 60.0, clock, strategy.hz, watch=watch)
+        lifted = runner.status.stopped_because == "zadanie wykonane" and float(truth(twin)[2]) > 0.04
+        return strategy, runner.status.stopped_because, lifted, truths
+    finally:
+        twin.close()
+
+
+@pytest.mark.render
+@pytest.mark.parametrize("along_bias_m", [-0.005, -0.009], ids=["between the pads", "beyond the pads"])
+def test_a_look_between_the_tips_biased_along_the_jaws_still_closes_and_lifts(along_bias_m: float):
+    """A camera that always puts the block off along the closing line, as the stand's at the grasp height:
+    the jaw closes on the first attempt instead of spending corrections and starting over."""
+    strategy, reason, lifted, _ = run_close_look((0.21, 0.02), along_bias_m=along_bias_m)
+
+    looks = [(c.round, c.verdict) for c in strategy.wrist.close_looks]
+    assert reason == "zadanie wykonane" and lifted, (reason, looks)
+    assert strategy.status.attempt == 1 and not any(v == "off" for _, v in looks), looks
+    assert sum(v == "moved" for _, v in looks) <= 1, looks
+
+
+@pytest.mark.render
+def test_a_block_pushed_across_the_jaws_after_the_hover_look_is_still_corrected():
+    strategy, reason, lifted, truths = run_close_look((0.21, 0.02), across_push_m=0.005)
+
+    looks = [(c.round, c.verdict, round(c.across_m * 1000)) for c in strategy.wrist.close_looks]
+    assert reason == "zadanie wykonane" and lifted, (reason, looks)
+    assert looks[0][1] == "moved" and abs(looks[0][2]) >= 3, looks
+    assert looks[-1][1] == "centred" and abs(truths[-1][1]) <= 0.0025, (looks, truths)

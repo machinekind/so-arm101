@@ -93,7 +93,7 @@ from .grasp import (
     ik_restarts,
     wrap,
 )
-from .grasp_jev import LET_GO, GraspJevSettings, GraspJevStrategy
+from .grasp_jev import JEV_PHASE_NAMES, LET_GO, GraspJevSettings, GraspJevStrategy
 from .jaw import JawReading
 from .judges import Judge, JudgeError, Questions, Reply
 from .touch import DONE, SETTLE_S, TURN_DEG_S, WAIT, TouchStrategy, normalised
@@ -127,6 +127,10 @@ LATCH = "latch"
 PLACE = "place"
 PARK = "park"
 VERIFY = "verify"
+#: The phases' names in the panel's notes.
+PLACE_PHASE_NAMES = {**JEV_PHASE_NAMES, TARGET: "planuje odlozenie", CARRY_UP: "unosze blok do przeniesienia",
+                     CARRY_OVER: "niose blok nad cel", LATCH: "sprawdzam cel w kamerach",
+                     PLACE: "opuszczam blok", PARK: "odsuwam ramie od bloku", VERIFY: "sprawdzam odlozenie"}
 
 #: Hover re-plans after the latched target moved, before the block goes back.
 MAX_REPLANS = 2
@@ -325,6 +329,7 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
     """Picks a block and places it on another block or at a pose, then checks the result in the cameras."""
 
     settings = PickPlaceSettings
+    phase_names = PLACE_PHASE_NAMES
     camera_required = False
 
     def __init__(self, settings: PickPlaceSettings | None = None, *, judge: Judge | None = None,
@@ -870,7 +875,7 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         centre = aim + float((mid - aim) @ u) * u
         T = kin.tcp(measured)
         self._hand_xy = rot2(-heading(kin, measured)) @ (centre - T[:2, 3])
-        self._hang = self._grasp_z - self._bottom()
+        self._hang = float(self._close_at[2]) - self._bottom()
         self._pick_xy, self._pick_aim = centre, aim.copy()
         yaw = known_yaw(self.block_rotation)
         # Squeezed faces lie flat on the pads, so the block sits a whole quarter turn from the heading.
@@ -943,7 +948,7 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         plan = self._place_plan
         assert plan is not None
         point = np.array([*plan.from_xy, plan.carry_z])
-        if self._arrived(point):
+        if self._arrived(point, sag=True):
             self._set_heading(plan.psi, plan.tcp_xy)
             self._move(CARRY_OVER, plan.hover, plan.turn)
             return None
@@ -961,9 +966,9 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         self._note_target(obs)
         plan = self._place_plan
         assert plan is not None
-        if self._settled(plan.hover) and self._vertical():
+        if self._settled(plan.hover, sag=True) and self._vertical():
             # The descent's stall reference.
-            self._bias_z, self._hover_z = self._offset_z, float(self._tcp_measured[2])
+            self._take_reference()
             self._slow = False
             latch = (self.target_label or self.rest_on) and not self._putting_back
             self._enter(LATCH if latch else PLACE)
@@ -1082,9 +1087,9 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
             if not self._settled(above):
                 return self._drive(above, self.approach_step_m)
             self._slow = True
-            self._bias_z = self._offset_z
+            self._take_reference()
         st = self.status
-        st.rise_m = self._offset_z - self._bias_z
+        st.rise_m = self._contact_rise()
         if st.rise_m > self.config.contact_gap_m:
             # Stop pressing once the block meets the target.
             self._hold_measured()
@@ -1103,9 +1108,11 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
     # ------------------------------------------------------------------ the release
     @property
     def _place_open_cmd(self) -> float:
-        """The jaw command that opens `release_margin_m` past the held block on each side [app units]."""
-        gap = min(self._width_m + 2 * self.place_settings.release_margin_m, self.kin.jaw_gap(FULL_OPEN))
-        return self.kin.gripper_for_gap(gap)
+        """The jaw command that opens `release_margin_m` past the held block on each side, and past the held
+        jaw once a release began [app units]."""
+        held = self._held_gap_m if math.isfinite(self._held_gap_m) else self._width_m
+        gap = max(self._width_m, held) + 2 * self.place_settings.release_margin_m
+        return self.kin.gripper_for_gap(min(gap, self.kin.jaw_gap(FULL_OPEN)))
 
     @property
     def release_cmd(self) -> float:
@@ -1175,7 +1182,8 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
             elif self._t - self._phase_t0 >= JAW_WAIT_S:
                 return self._finish(STOPPED, f"szczeka nie otworzyla sie w {JAW_WAIT_S:.0f} s przed odjazdem")
             return self.hold()
-        if self._arrived(self._park_point) or self._t - self._phase_t0 >= self._park_s:
+        # The move ends on its own time limit, so a still arm short of the point is no stall here.
+        if self._arrived(self._park_point, sag=True, watch=False) or self._t - self._phase_t0 >= self._park_s:
             if self._putting_back:
                 return self._finish(self._put_back_outcome,
                                     f"{self._put_back_why} - blok odlozony z powrotem")

@@ -43,6 +43,7 @@ from machinekind_twin_api.strategy import Action, Frame, Observation, RunInfo
 from .grasp import (
     CARRY,
     CHECK,
+    GRASP_PHASE_NAMES,
     JAW_WAIT_S,
     LIFT_OFF,
     OPEN,
@@ -96,6 +97,9 @@ FRAME_MAX_AGE_S = 1.0
 JUDGE = "judge"
 LOWER = "lower"
 LET_GO = "let_go"
+#: The phases' names in the panel's notes.
+JEV_PHASE_NAMES = {**GRASP_PHASE_NAMES, JUDGE: "ocena chwytu", LOWER: "odkladam blok na stol",
+                   LET_GO: "puszczam blok"}
 
 #: Decision points stored in each record's `state.point`.
 POINT_PROBE = "probe"
@@ -427,6 +431,7 @@ class GraspJevStrategy(GraspStrategy):
     """Grasps a block as `grasp` does; Jev judges each close and lift and picks the next step."""
 
     settings = GraspJevSettings
+    phase_names = JEV_PHASE_NAMES
     #: Refuse an empty `wrist_camera`. Subclasses with an optional camera turn this off.
     camera_required = True
 
@@ -489,6 +494,8 @@ class GraspJevStrategy(GraspStrategy):
         self._turn_rad = 0.0
         # Release progress, ease-off and rise targets, and next aim before regrasping.
         self._released = False
+        #: The held jaw's gap when the release began [m]; NaN before a release.
+        self._held_gap_m = float("nan")
         self._eased = False
         self._ease_point = np.zeros(3)
         self._release_point = np.zeros(3)
@@ -506,6 +513,7 @@ class GraspJevStrategy(GraspStrategy):
         """
         self.judge.check()
         self.gap_open_m = self.short_m + 2 * self.grasp_settings.open_margin_m
+        self._held_gap_m = float("nan")
         super().start(run, obs)
         self._reset_judging()
         spec = self.kin.spec
@@ -854,14 +862,28 @@ class GraspJevStrategy(GraspStrategy):
             if not self._arrived(self._ease_point):
                 return self._drive(self._ease_point, self.descend_step_m)
             self._eased = True
-        if self._arrived(self._release_point):
+        if self._arrived(self._release_point, sag=True):
             return self._after_let_go()
         return self._drive(self._release_point, self.approach_step_m)
 
     @property
     def release_cmd(self) -> float:
-        """Return the gripper command that releases a held block [app units]."""
-        return self.cmd_open
+        """Return the gripper command that releases a held block [app units]: the open jaw, and at least
+        `open_margin_m` past the held jaw on each side."""
+        return max(self.cmd_open, self._past_held(self.grasp_settings.open_margin_m))
+
+    def _past_held(self, margin_m: float) -> float:
+        """The gripper command `margin_m` [m] past the held jaw on each side [app units]; 0 before a hold."""
+        if not math.isfinite(self._held_gap_m):
+            return 0.0
+        kin = self.kin
+        return kin.gripper_for_gap(min(self._held_gap_m + 2 * margin_m, kin.jaw_gap(100.0)))
+
+    def _enter(self, phase: str) -> None:
+        if phase == LET_GO:
+            # The release opens relative to the jaw as it holds now.
+            self._held_gap_m = self.grasp.jaw_gap_m
+        super()._enter(phase)
 
     def _let_go_rise_z(self) -> float:
         """Return the TCP height the open hand rises to after easing off [m, base frame]."""

@@ -5,8 +5,10 @@ With `probe: true`, it also uses `before_descent`.
 Without the probe, the look runs at the open-jaw hover before each straddle. With it, a look
 runs before the probe and, with `look_before_straddle`, again before the straddle. A look reads
 `obs.frames`, fits the block's known silhouette to a colour blob and updates the aim.
-With the default `hue_deg: -1`, the first usable frame supplies the hue.
-Sampling finds the hue window with the most pixels above the saturation and value thresholds
+A colour word in the block's label sets the hue (`LABEL_HUES`, extended by `label_hues`); a `hue_deg`
+within the hue window of that colour fine-tunes it, and one outside it is not used for that label. A
+label without a colour word uses `hue_deg`, and with the default `-1` the first usable frame supplies
+the hue. Sampling finds the hue window with the most pixels above the saturation and value thresholds
 inside the expected visible silhouette at the aim. That window must cover at least `MIN_HUE_SHARE`
 of the region. If no window meets this share, the look is skipped and the grasp keeps its aim.
 See the package README for settings and camera calibration.
@@ -37,12 +39,17 @@ At the bottom of the straddle, with the open jaw around the block, a look betwee
 closing line and across it. The block and the tips come from the same frame and the same measured
 joints, so most of an error in the arm's pose or calibration cancels, and a wrong focal length only
 scales a correction. A height error between the jaw and the block still reads partly as an offset
-across the jaw, since the camera sees the block from the side. An offset above `close_tol_m` moves the
-aim by `correction_gain` times the offset: the jaw first slides along the closing line to centre on the
-block, the arm rises with the jaw open, straddles again at the new aim without the hover look, and
-looks again, up to `close_rounds` times per attempt. A block still off after the last round is a failed
-attempt; the last attempt closes anyway. An empty or edge close also retries from the hover with a new
-look, within `max_attempts`. Skipped looks close as before.
+across the jaw, since the camera sees the block from the side. The jaw closes once the offset across
+the closing line is within `close_tol_m` and the block sits between the open pads along it. Otherwise
+the aim moves by `correction_gain` times the offset outside those bounds, along the closing line no
+farther in an attempt than keeps the block between the pads: the jaw first slides along the closing
+line, the arm rises with the jaw open, straddles again at the new aim without the hover look, and looks
+again, up to `close_rounds` times per attempt. A part of the offset that a correction moved but that the
+next look measures within `SAME_OFFSET_M` of before is the camera's error, not the block's: it no longer
+counts in that attempt. After the last round the jaw closes if the offset across lies within
+`LAST_ACROSS_SHARE` of the gripped face's half length; a block still farther off is a failed attempt,
+and the last attempt closes anyway. An empty or edge close also retries from the
+hover with a new look, within `max_attempts`. Skipped looks close as before.
 
 With `residual_file` set, a successful lift adds the camera-corrected aim at the close minus the
 detector's first aim to a running mean over the last `RESIDUAL_RUNS` runs, and the next run's first aim
@@ -119,6 +126,15 @@ RESIDUAL_RUNS = 10
 RESIDUAL_MAX_M = 0.05
 #: The largest `correction_gain`.
 MAX_CORRECTION_GAIN = 2.0
+#: Block hues by the colour word in the block's label [deg, 0..360), as the wrist camera sees them. Bare wood
+#: has too little saturation for a hue window, so "wooden" is not here.
+LABEL_HUES = {"red": 356.0, "yellow": 50.0, "green": 143.0, "light blue": 190.0}
+#: A part of the offset (along or across the closing line) that a correction moved but that the next look
+#: between the jaw tips measures within this of before is the camera's error [m].
+SAME_OFFSET_M = 0.001
+#: After the last correction the jaw closes with the block off across the closing line by at most this
+#: share of the gripped face's half length: the pads then grip the face's middle third.
+LAST_ACROSS_SHARE = 1.0 / 3.0
 
 #: The phases of a look.
 MEASURE = "measure"
@@ -476,8 +492,11 @@ class WristGraspSettings(GraspSettings):
     max_frame_age_s: float = 0.2
     #: How long a look waits at the hover for a usable frame before it is skipped [s].
     frame_wait_s: float = 1.0
-    #: Block hue [deg, 0..360). -1 samples the dominant hue at the aim in the first usable frame.
+    #: Block hue [deg, 0..360) for a label without a colour word, or a fine adjustment within the hue
+    #: window of the label's colour. -1 samples the dominant hue at the aim in the first usable frame.
     hue_deg: float = -1.0
+    #: Colour words and their hues, "word: deg" separated by commas; they add to or replace `LABEL_HUES`.
+    label_hues: str = ""
     #: Half-width of the hue window around `hue_deg` [deg]; it wraps at 360.
     hue_window_deg: float = 20.0
     #: Minimum pixel saturation [0..1].
@@ -506,7 +525,8 @@ class WristGraspSettings(GraspSettings):
     #: Corrections per attempt from the look between the open jaw tips at the bottom of the straddle.
     #: Zero closes without that look [count].
     close_rounds: int = 3
-    #: The jaw closes once the block lies this close to the jaw tips' midpoint [m].
+    #: The jaw closes once the block lies this close to the jaw tips' midpoint across the closing line [m].
+    #: Along it, the block only has to sit between the open pads.
     close_tol_m: float = 0.0025
     #: Each correction moves the aim by this share of the measured offset; above 1 makes up for backlash.
     correction_gain: float = 1.0
@@ -570,7 +590,7 @@ class CloseLook:
     #: (toward the moving jaw) and across it; NaN when not measured.
     along_m: float
     across_m: float
-    #: 'centred', 'moved', 'off' or 'skipped', and why for the last two.
+    #: 'centred', 'moved', 'bias', 'off' or 'skipped', and why for the last three.
     verdict: str
     why: str = ""
 
@@ -605,6 +625,8 @@ class WristStatus:
     shift_m: float = float("nan")
     #: Set or sampled block hue [deg]. NaN until known.
     hue_deg: float = float("nan")
+    #: Where the hue comes from: "label", "setting" or "sampled".
+    hue_source: str = ""
     #: Winning hue window's share of the expected visible silhouette on the latest sampling attempt [0..1].
     hue_share: float = float("nan")
     #: The last look's verdict: '', 'centred', 'skipped' or 'reverted', and why it was not centred.
@@ -638,6 +660,8 @@ class WristGraspStrategy(GraspStrategy):
         if not 0 < config.hue_window_deg < 180:
             raise ValueError(f"grasp_wrist: hue_window_deg must lie within (0, 180), "
                              f"is {config.hue_window_deg}")
+        #: Colour words and their hues [deg], longest first, so "light blue" wins over a shorter word.
+        self.hues = colour_hues(config.label_hues)
         for name in ("min_saturation", "min_value"):
             value = getattr(config, name)
             if not 0 <= value <= 1:
@@ -684,6 +708,12 @@ class WristGraspStrategy(GraspStrategy):
         self._jaw_look: _CloseState | None = None
         self._close_attempt = -1
         self._close_round = 0
+        #: In this attempt: the last look's offset and the last correction, along and across the closing line
+        #: [m]; which of the two parts are the camera's error; and the corrections along it so far [m].
+        self._close_last: tuple[float, float] | None = None
+        self._close_fix = (0.0, 0.0)
+        self._close_bias = [False, False]
+        self._close_shift = 0.0
         #: The next look before the straddle is skipped: the arm comes back from a correction.
         self._skip_hover_look = False
         #: The detector's first aim, and the aim when the jaw last started closing [m, base frame].
@@ -722,10 +752,25 @@ class WristGraspStrategy(GraspStrategy):
             raise RuntimeError(f"grasp_wrist: camera {cfg.wrist_camera!r} is not in robot.yaml `cameras` "
                                f"({', '.join(cameras) or 'none'})")
         self._cv2, self._camera = cv2, camera
-        if cfg.hue_deg >= 0:
-            self._window = HsvWindow(cfg.hue_deg, cfg.hue_window_deg, cfg.min_saturation, cfg.min_value)
-            self.wrist.hue_deg = cfg.hue_deg
+        hue, self.wrist.hue_source = self._hue()
+        if hue is not None:
+            self._window = HsvWindow(hue, cfg.hue_window_deg, cfg.min_saturation, cfg.min_value)
+            self.wrist.hue_deg = hue
         self._tip_tcp = self.kin.jaw_centre(0.0)
+
+    def _hue(self) -> tuple[float | None, str]:
+        """The block's hue [deg] and where it comes from: "label", "setting", or None and "sampled"."""
+        cfg = self.wrist_settings
+        word = f" {self.label} "
+        for name, hue in self.hues.items():
+            if f" {name} " in word:
+                off = abs((cfg.hue_deg - hue + 180.0) % 360.0 - 180.0)
+                if cfg.hue_deg >= 0 and off <= cfg.hue_window_deg:
+                    return cfg.hue_deg, "setting"
+                return hue, "label"
+        if cfg.hue_deg >= 0:
+            return cfg.hue_deg, "setting"
+        return None, "sampled"
 
     # ------------------------------------------------------------------ measuring
     def measure(self, rgb: np.ndarray, joints: Mapping[str, float],
@@ -846,7 +891,7 @@ class WristGraspStrategy(GraspStrategy):
         if self._look is None:
             self._look = self._new_look("probe")
         # Grasp resumes descent only after this hook returns None.
-        settled = self._settled(self.hover_point)
+        settled = self._settled(self.hover_point, sag=True)
         return self._look_step(obs, lambda: self.hover_point, settled)
 
     def before_straddle(self, obs: Observation, settled: bool) -> Action | None:
@@ -891,6 +936,8 @@ class WristGraspStrategy(GraspStrategy):
         if look is None:
             if self._close_attempt != self.status.attempt:
                 self._close_attempt, self._close_round = self.status.attempt, 0
+                self._close_last, self._close_fix, self._close_bias = None, (0.0, 0.0), [False, False]
+                self._close_shift = 0.0
             look = self._jaw_look = _CloseState(self._t)
         if look.done:
             self._jaw_look = None
@@ -925,17 +972,37 @@ class WristGraspStrategy(GraspStrategy):
         u = np.array([math.cos(self._psi), math.sin(self._psi)])
         along, across = float(error @ u), float(error @ np.array([-u[1], u[0]]))
         dist = float(np.linalg.norm(error))
-        where = f"{dist * 1000:.0f} mm (wzdluz {along * 1000:+.0f}, w poprzek {across * 1000:+.0f} mm)"
+        mm_along, mm_across = round(along * 1000), round(across * 1000)
+        where = f"{dist * 1000:.0f} mm (wzdluz {mm_along:+d}, w poprzek {mm_across:+d} mm)"
         if dist > cfg.max_shift_m:
             return self._end_close_look("skipped", f"blok {dist * 1000:.0f} mm od srodka szczek - nie ufam",
                                         along, across)
         self.wrist.final_offset_m = (along, across)
-        if dist <= cfg.close_tol_m:
+        room = self._between_pads_m()
+        if self._close_last is not None:
+            # A part a correction moved but the camera still sees where it was is the camera's error.
+            for k, (now, before) in enumerate(zip((along, across), self._close_last, strict=True)):
+                self._close_bias[k] |= bool(self._close_fix[k]) and abs(now - before) <= SAME_OFFSET_M
+        self._close_last = (along, across)
+        along_ok = abs(along) <= room or self._close_bias[0]
+        across_ok = abs(across) <= cfg.close_tol_m or self._close_bias[1]
+        if along_ok and across_ok:
+            if any(self._close_bias):
+                return self._end_close_look("bias", f"kamera w szczekach: blok {where} jak przed poprawka - "
+                                            "blad kamery, zamykam", along, across)
             return self._end_close_look("centred", f"kamera w szczekach: blok na srodku, {where}", along,
                                         across)
         if self._close_round < cfg.close_rounds:
-            return self._correct(error, along, across, f"kamera w szczekach: blok {where} od srodka")
+            # Only what lies outside its bound; along the closing line, no farther in all than the pads allow.
+            shift = self._close_shift
+            fix_along = 0.0 if along_ok else float(np.clip(along, -room - shift, room - shift))
+            fix_across = 0.0 if across_ok else across
+            self._close_fix, self._close_shift = (fix_along, fix_across), self._close_shift + fix_along
+            fix = fix_along * u + fix_across * np.array([-u[1], u[0]])
+            return self._correct(fix, fix_along, along, across, f"kamera w szczekach: blok {where} od srodka")
         why = f"blok {where} od srodka po {self._close_round} poprawkach"
+        if abs(across) <= LAST_ACROSS_SHARE * self._face_half_m():
+            return self._end_close_look("off", f"kamera w szczekach: {why} - zamykam", along, across)
         if self.status.attempt < self.grasp_settings.max_attempts:
             self._note_close("off", why, along, across)
             self._jaw_look = None
@@ -943,12 +1010,13 @@ class WristGraspStrategy(GraspStrategy):
         return self._end_close_look("off", f"kamera w szczekach: {why} - zamykam w ostatniej probie",
                                     along, across)
 
-    def _correct(self, error: np.ndarray, along: float, across: float, text: str) -> Action:
-        """Move the aim by `correction_gain` times `error`, then rise with the jaw open and straddle again.
+    def _correct(self, fix: np.ndarray, fix_along: float, along: float, across: float, text: str) -> Action:
+        """Move the aim by `correction_gain` times `fix` [m], `fix_along` of it along the closing line, then
+        rise with the jaw open and straddle again. `along` and `across` are the measured offset [m].
 
         An aim the arm cannot take keeps the old one and closes."""
         assert self.grasp.block_xy is not None
-        aim = np.asarray(self.grasp.block_xy, float) + self.wrist_settings.correction_gain * error
+        aim = np.asarray(self.grasp.block_xy, float) + self.wrist_settings.correction_gain * fix
         try:
             self._aim(aim, strict=bool(self._tilt))
         except RuntimeError as exc:
@@ -958,7 +1026,7 @@ class WristGraspStrategy(GraspStrategy):
         self._close_round += 1
         self._jaw_look = None
         self._skip_hover_look = True
-        self._start_rise(RESTRADDLE, jaw_open=True, ease=self._ease(along))
+        self._start_rise(RESTRADDLE, jaw_open=True, ease=self._ease(fix_along))
         note = f"{text} - poprawka {self._close_round} z {self.wrist_settings.close_rounds}"
         logger.info("Kamera w szczekach: %s", note)
         return self.hold(note)
@@ -970,6 +1038,16 @@ class WristGraspStrategy(GraspStrategy):
         cfg = self.grasp_settings
         u = np.array([math.cos(self._psi), math.sin(self._psi)])
         return float(np.clip(along, -cfg.open_margin_m, cfg.open_margin_m)) * u
+
+    def _between_pads_m(self) -> float:
+        """How far the block may lie off the jaw tips' midpoint along the closing line and still sit
+        between the open pads [m]."""
+        return max(0.0, (self.gap_open_m - self._width_m) / 2 - self.kin.fingertip_radius())
+
+    def _face_half_m(self) -> float:
+        """Half the length of the block face the pads grip, across the closing line [m]."""
+        half = self.block.half_size
+        return half[0] if abs(self._width_m - 2 * half[1]) <= abs(self._width_m - 2 * half[0]) else half[1]
 
     def _note_close(self, verdict: str, why: str, along: float = math.nan, across: float = math.nan) -> None:
         look = CloseLook(self.status.attempt, self._close_round, along, across, verdict, why)
@@ -1242,6 +1320,25 @@ def save_residual(path: str, mean: np.ndarray, runs: int) -> None:
     tmp = file.with_name(file.name + ".tmp")
     tmp.write_text(json.dumps({"mean_m": [float(mean[0]), float(mean[1])], "runs": int(runs)}) + "\n")
     os.replace(tmp, file)
+
+
+def colour_hues(text: str) -> dict[str, float]:
+    """`LABEL_HUES` with the "word: deg" pairs of `text` added or replaced, longest word first.
+
+    Raise ValueError on a pair without a word or with a hue outside [0, 360)."""
+    hues = dict(LABEL_HUES)
+    for pair in filter(None, (part.strip() for part in text.split(","))):
+        word, _, value = pair.rpartition(":")
+        word = " ".join(word.split()).lower()
+        try:
+            hue = float(value)
+        except ValueError:
+            hue = math.nan
+        if not word or not 0 <= hue < 360:
+            raise ValueError(f"grasp_wrist: label_hues needs \"word: deg\" pairs with hues in [0, 360), "
+                             f"has {pair!r}")
+        hues[word] = hue
+    return dict(sorted(hues.items(), key=lambda item: -len(item[0])))
 
 
 def _identity(rotation: np.ndarray) -> bool:

@@ -30,12 +30,17 @@ down at `descend_speed_mps`.
 The arm is measured against the supervisor's command (`obs.command`), not against the strategy's own
 target: the command trails the targets, more so when the operator lowers the speed cap during a run. A
 point counts as reached once the last target is on it, the command has reached that target, and the
-measured TCP is near the point or stands still within `SAG_M` of it, for `SETTLE_S` in a row. At the hover
-the strategy then notes how far the measured TCP sits above the command; during the descent the arm has
-met something once that offset grows by more than `contact_gap_m`, or by more than half of it while the
-arm stands still at the touch point. The arm then holds the pose it measures, so it stops pressing. That
-hold goes out as an ordinary target and the verdict waits until the command has reached it, because the
-twin's runner drops the target sent with `done`.
+measured TCP is near the point or stands still within `SAG_M` of it, for `SETTLE_S` in a row. Where the
+point lies above the arm's way (a lift, the hover), an arm that stands still `sag_m` or less below it, and
+mostly straight below it, counts as reached too: a servo without an integral term settles short under load.
+
+At the hover the strategy notes where each joint stands against its command. During the descent the arm
+has met something once the measured TCP stands more than `contact_gap_m` above where the arm should be, or
+more than half of it while the arm stands still at the touch point. A joint that settled short of its
+command is expected to stay where it hangs until its command comes back to it, as friction holds it, and
+then to follow the command; any other joint keeps its offset from the command. The arm then holds the pose
+it measures, so it stops pressing. That hold goes out as an ordinary target and the verdict waits until the
+command has reached it, because the twin's runner drops the target sent with `done`.
 
 Guards:
 
@@ -58,9 +63,12 @@ Guards:
   `max_tracking_deg`. Unlike `ik`, `act` then raises: the twin's runner holds the arm where it measures
   after an exception, while it would drop a hold pose sent with `done` and keep the command it had already
   sent past the obstacle;
-* **an arm that does not move**: standing still counts as arrival only within `SAG_M` of the point, and a
-  stall is a touch only after the measured TCP came down from the hover by `contact_gap_m` or more. Frozen
-  readings, a servo without torque or a jammed joint never end a run as a success;
+* **an arm that does not move**: standing still counts as arrival only within `SAG_M` of the point, or
+  `sag_m` below a point above the arm's way, and a stall is a touch only after the measured TCP came down
+  from the hover by `contact_gap_m` or more. Frozen readings, a servo without torque or a jammed joint
+  never end a run as a success;
+* **stop on a still arm**: a run whose arm has stood still for `stall_s` short of a point it waits for
+  ends, and the note names the phase and the joints that lag;
 * **the jaw**: IK never moves the gripper. It keeps the command it squeezes something with, else it
   closes (`close_jaw`), else it keeps its start angle.
 
@@ -94,6 +102,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from typing import ClassVar
 
 import numpy as np
 from machinekind_twin_api.strategy import Action, ObjectPose, Observation, RunInfo, Strategy
@@ -128,6 +137,10 @@ COMMAND_TOL_DEG = 0.2
 HOLD_WAIT_S = 2.0
 #: Maximum turn rate for an optional orientation goal [deg/s]. Small steps avoid wrist limits.
 TURN_DEG_S = 90.0
+#: A sagging arm stands below the point within this angle of straight down [deg].
+SAG_CONE_DEG = 60.0
+#: A stop on a still arm names the joints that lag their command by at least this [deg].
+LAG_NOTE_DEG = 0.5
 
 #: Phases of a run (`TouchStatus.phase`).
 WAIT = "wait"
@@ -136,6 +149,9 @@ APPROACH = "approach"
 DESCEND = "descend"
 TOUCHED = "touched"
 DONE = "done"
+#: The phases' names in the panel's notes.
+PHASE_NAMES = {WAIT: "czekam na polozenie", LIFT: "w gore przed nowym celem", APPROACH: "nad obiekt",
+               DESCEND: "w dol", TOUCHED: "dotyk", DONE: "koniec"}
 
 
 @dataclass
@@ -170,6 +186,10 @@ class TouchSettings:
     #: The run ends, the arm holding where it measures, when an arm joint lags the supervisor's command by
     #: more than this [deg].
     max_tracking_deg: float = 25.0
+    #: How far below a lift or hover point a still arm may stand and count as there [m]; 0 turns it off.
+    sag_m: float = 0.02
+    #: The run ends when the arm has stood still this long short of a point it waits for [s].
+    stall_s: float = 2.0
     #: A safety net for the whole run [s]; 0 means none.
     time_limit_s: float = 60.0
 
@@ -209,6 +229,8 @@ class TouchStrategy(Strategy[TouchSettings]):
     """Touches an object from `obs.objects`: hover above it, then straight down until the arm stalls on it."""
 
     settings = TouchSettings
+    #: The phases' names in the panel's notes; subclasses add theirs.
+    phase_names: ClassVar[dict[str, str]] = PHASE_NAMES
 
     def __init__(self, settings: TouchSettings | None = None):
         self.config = settings if settings is not None else TouchSettings()
@@ -223,10 +245,12 @@ class TouchStrategy(Strategy[TouchSettings]):
             value = getattr(config, name)
             if not value > 0:
                 raise ValueError(f"touch: {name} must be positive, is {value}")
-        for name in ("wait_for_pose_s", "max_pose_age_s", "time_limit_s"):
+        for name in ("wait_for_pose_s", "max_pose_age_s", "time_limit_s", "sag_m"):
             value = getattr(config, name)
             if not value >= 0:
                 raise ValueError(f"touch: {name} must be zero or more, is {value}")
+        if not config.stall_s >= SETTLE_S:
+            raise ValueError(f"touch: stall_s must be at least {SETTLE_S} s, is {config.stall_s}")
         self.hz = float(config.hz)
         #: The runner reads it once, when it is built.
         self.time_limit_s = float(config.time_limit_s) if config.time_limit_s > 0 else None
@@ -243,6 +267,8 @@ class TouchStrategy(Strategy[TouchSettings]):
         self.turn_step = np.radians(TURN_DEG_S) / self.hz
         #: Ticks in a row the arm stays arrived before the strategy reads it (`SETTLE_S`).
         self.settle_ticks = max(1, int(np.ceil(SETTLE_S * self.hz)))
+        #: Ticks in a row a still arm may wait short of a point before the run ends (`stall_s`).
+        self.stall_ticks = max(1, int(np.ceil(config.stall_s * self.hz - 1e-9)))
         self.command_tol = np.radians(COMMAND_TOL_DEG)
         # Known from `start`: the arm's kinematics, the limits that apply on it [rad] and the farthest each
         # joint's target may move in one tick [rad].
@@ -261,15 +287,26 @@ class TouchStrategy(Strategy[TouchSettings]):
         self._t = 0.0
         # This tick's measurements, for the phase handlers.
         self._measured: dict[str, float] = {}
+        self._q_measured = np.zeros(0)
+        self._q_command = np.zeros(0)
         self._tcp_measured = np.zeros(3)
         self._still = False
+        #: Ticks in a row the measured TCP stood still in this phase.
+        self._still_count = 0
         self._command_on_target = True
         self._offset_z = 0.0
         self._tcp_prev: np.ndarray | None = None
         self._settle_count = 0
+        #: The last target when the phase began [rad], and the point the arm has stood still short of for
+        #: `stall_s` on this tick, if any.
+        self._q_enter = np.zeros(0)
+        self._stalled: np.ndarray | None = None
         #: The measured TCP's height above the supervisor's command at the hover, and its height there [m].
         self._bias_z = 0.0
         self._hover_z = float("nan")
+        #: The measured joints and the command where the descent started [rad].
+        self._hang_q = np.zeros(0)
+        self._hang_command_q = np.zeros(0)
         self._lift_point = np.zeros(3)
         self._phases: dict[str, Callable[[Observation], Action | None]] = {
             WAIT: self._wait, LIFT: self._lift, APPROACH: self._approach, DESCEND: self._descend,
@@ -311,6 +348,7 @@ class TouchStrategy(Strategy[TouchSettings]):
         """Starts from where the arm is, with or without a pose: the pose may come later."""
         spec = load_robot(run.folder)
         self._kin = RobotKinematics(spec)
+        obs = self._observed(obs)
         self._lo, self._hi = self._hardware_limits(run.limits)
         self._max_step = self._step_limits(run.max_vel)
         self._simulated = bool(run.simulated)
@@ -330,11 +368,19 @@ class TouchStrategy(Strategy[TouchSettings]):
         self.tcp_cmd = self.kin.tcp(self.kin.from_q(self.q_cmd))[:3, 3].copy()
         self.carrot = self.tcp_cmd.copy()
         self._tcp_prev = None
+        self._still_count = 0
         self._command_on_target = True
         self._bias_z = 0.0
         self._hover_z = float("nan")
+        self._q_measured = self.kin.to_q(measured)
+        self._q_command = self.q_cmd.copy()
+        self._hang_q, self._hang_command_q = self._q_measured.copy(), self.q_cmd.copy()
         self._t = float(obs.t)
         self._enter(WAIT)
+
+    def _observed(self, obs: Observation) -> Observation:
+        """`obs` as the strategy reads it; subclasses may convert readings. Touch takes it as it is."""
+        return obs
 
     def _hardware_limits(self, hw: Mapping[str, tuple[float, float]]) -> tuple[np.ndarray, np.ndarray]:
         """The description's limits and the MJCF ranges, intersected with the ones on the arm (`run.limits`).
@@ -417,18 +463,23 @@ class TouchStrategy(Strategy[TouchSettings]):
         st.step += 1
         st.stopped_because = ""
         self._measured = measured
+        self._q_measured, self._q_command = kin.to_q(measured), q_command
         tcp_measured = kin.tcp(measured)[:3, 3].copy()
         moved = np.inf if self._tcp_prev is None else float(np.linalg.norm(tcp_measured - self._tcp_prev))
         self._still = moved <= self.still_m
+        self._still_count = self._still_count + 1 if self._still else 0
         self._tcp_measured = self._tcp_prev = tcp_measured
         self._command_on_target = float(np.abs(q_command[arm] - self.q_cmd[arm]).max()) <= self.command_tol
         # Against the command, which the arm follows, so a command held back by the speed cap is no stall.
         self._offset_z = float(tcp_measured[2] - kin.tcp(kin.from_q(q_command))[2, 3])
 
         # A handler returns None when it moved to another phase, which then handles the same tick.
+        self._stalled = None
         for _ in range(len(self._phases)):
             action = self._phases[st.phase](obs)
             if action is not None:
+                if self._stalled is not None and not action.done:
+                    return self._halt(self._stall_reason(self._stalled), target=self.kin.from_q(self.q_cmd))
                 return action
         raise RuntimeError(f"touch: no answer in phase {st.phase}")
 
@@ -498,16 +549,14 @@ class TouchStrategy(Strategy[TouchSettings]):
             self._enter(APPROACH)
 
     def _lift(self, obs: Observation) -> Action | None:
-        if self._arrived(self._lift_point):
+        if self._arrived(self._lift_point, sag=True):
             self._enter(APPROACH)
             return None
         return self._drive(self._lift_point, self.approach_step_m)
 
     def _approach(self, obs: Observation) -> Action | None:
-        if self._settled(self.hover_point):
-            # The reference of the descent: how the measured TCP stands against the command at the hover.
-            self._bias_z = self._offset_z
-            self._hover_z = float(self._tcp_measured[2])
+        if self._settled(self.hover_point, sag=True):
+            self._take_reference()
             self.status.attempt += 1
             self._enter(DESCEND)
             return None
@@ -515,7 +564,7 @@ class TouchStrategy(Strategy[TouchSettings]):
 
     def _descend(self, obs: Observation) -> Action | None:
         st = self.status
-        st.rise_m = self._offset_z - self._bias_z
+        st.rise_m = self._contact_rise()
         if st.rise_m > self.config.contact_gap_m:
             return self._stall()
         if self._settled(self.touch_point):
@@ -614,25 +663,90 @@ class TouchStrategy(Strategy[TouchSettings]):
     def _enter(self, phase: str) -> None:
         self.status.phase = phase
         self._phase_t0 = self._t
-        self._settle_count = 0
+        self._settle_count = self._still_count = 0
+        self._q_enter = self.q_cmd.copy()
+        self._stalled = None
 
-    def _arrived(self, point: np.ndarray) -> bool:
+    def _arrived(self, point: np.ndarray, *, sag: bool = False, watch: bool = True) -> bool:
         """The last target puts the TCP on `point`, the supervisor's command has reached that target, and
         the measured TCP is near the point or stands still within `SAG_M` of it.
 
         As in `ik`, the last target must be on the point, because the twin's runner drops the target sent
         with `done`. Standing still counts too, because an arm that sags or is held up never gets closer,
-        but only nearby: an arm that never moves stays where it was.
+        but only nearby: an arm that never moves stays where it was. With `sag`, for a point above the
+        arm's way, an arm that stood still for `settle_ticks` counts within `sag_m` below the point
+        (`_sags`). With `watch`, an arm that stood still for `stall_ticks` short of the point ends the run
+        on this tick (`act`).
         """
         if float(np.linalg.norm(point - self.tcp_cmd)) > self.ik_tol or not self._command_on_target:
             return False
         distance = float(np.linalg.norm(self._tcp_measured - point))
-        return distance <= self.config.contact_gap_m / 2 or (self._still and distance <= SAG_M)
+        if distance <= self.config.contact_gap_m / 2 or (self._still and distance <= SAG_M):
+            return True
+        if sag and self._still_count >= self.settle_ticks and self._sags(point):
+            return True
+        if watch and self._still_count >= self.stall_ticks:
+            self._stalled = np.asarray(point, float).copy()
+        return False
 
-    def _settled(self, point: np.ndarray) -> bool:
+    def _settled(self, point: np.ndarray, *, sag: bool = False) -> bool:
         """Whether the arm has been arrived at `point` (`_arrived`) for `settle_ticks` ticks in a row."""
-        self._settle_count = self._settle_count + 1 if self._arrived(point) else 0
+        self._settle_count = self._settle_count + 1 if self._arrived(point, sag=sag) else 0
         return self._settle_count >= self.settle_ticks
+
+    def _sags(self, point: np.ndarray) -> bool:
+        """Whether the measured TCP stands below `point` as a sagging arm does: at most `sag_m` away, and
+        within `SAG_CONE_DEG` of straight down."""
+        error = self._tcp_measured - point
+        distance = float(np.linalg.norm(error))
+        return (distance <= self.config.sag_m
+                and -float(error[2]) >= distance * float(np.cos(np.radians(SAG_CONE_DEG))))
+
+    def _take_reference(self) -> None:
+        """Take the stall reference of a descent that starts where the arm stands now."""
+        self._bias_z = self._offset_z
+        self._hover_z = float(self._tcp_measured[2])
+        self._hang_q, self._hang_command_q = self._q_measured.copy(), self._q_command.copy()
+
+    def _contact_rise(self) -> float:
+        """How far the measured TCP stands above where the arm should be in this descent [m].
+
+        A joint that stood off its command at the reference stays where it was until its command comes
+        back to it, as friction holds a servo that settled short, and then follows the command. A joint
+        whose command moves away from where it stood keeps its offset from the command.
+        """
+        hang, command = self._hang_q, self._q_command
+        offset = hang - self._hang_command_q
+        expected = np.where(offset >= 0, np.maximum(command, np.minimum(hang, command + offset)),
+                            np.minimum(command, np.maximum(hang, command + offset)))
+        z = self.kin.tcp(self.kin.from_q(expected))[2, 3]
+        return float(self._tcp_measured[2] - z)
+
+    def _stall_reason(self, point: np.ndarray) -> str:
+        """Why the run ends on an arm that stands still short of `point`, for the panel: the phase, how far
+        and where the TCP stands from the point, and the joints that lag their command [deg]."""
+        kin = self.kin
+        error = self._tcp_measured - point
+        distance = float(np.linalg.norm(error))
+        cone = distance * float(np.cos(np.radians(SAG_CONE_DEG)))
+        where = "pod celem" if -error[2] >= cone else "nad celem" if error[2] >= cone else "od celu"
+        lag = np.degrees(self._q_measured - self._q_command)
+        move = self._q_command - self._q_enter
+        groups: dict[str, list[str]] = {}
+        for k in sorted(np.flatnonzero(kin.arm), key=lambda k: -abs(lag[k])):
+            if abs(lag[k]) < LAG_NOTE_DEG:
+                continue
+            # Short of the command along this phase's move, or past it.
+            word = "za malo" if lag[k] * move[k] < 0 else "za daleko" if lag[k] * move[k] > 0 else "od celu"
+            groups.setdefault(word, []).append(f"{kin.spec.joints[k]} {abs(lag[k]):.1f} st.")
+        joints = "; ".join(f"{', '.join(names)} {word}" for word, names in groups.items())
+        name = self._phase_name()
+        return (f"{name}: ramie stoi {distance * 1000:.0f} mm {where}" + (f" ({joints})" if joints else "")
+                + " - koniec")
+
+    def _phase_name(self) -> str:
+        """The current phase's name for the panel."""
+        return self.phase_names.get(self.status.phase, self.status.phase)
 
     def _drive(self, goal: np.ndarray, step_m: float, *, rotation: np.ndarray | None = None) -> Action:
         """Step toward `goal` [m, base frame] with the gripper unchanged.

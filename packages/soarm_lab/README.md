@@ -115,7 +115,13 @@ grasp:
   open_margin_m: 0.008
   squeeze_m: 0.008
   grasp_depth: 0.5
+  straddle_push_m: 0.004   # how far the straddle pushes past a light touch
+  close_on_stall_m: 0.003  # a stall with both tips this far below the top closes there; 0: off
+  jaw_gap_offset_m: 0.0    # how much wider the model's jaw gap is than the real one (this stand's gripper)
+  jaw_file: ""             # e.g. a file in the stand folder: learns jaw_gap_offset_m from verified lifts
   lift_m: 0.04
+  sag_m: 0.02              # a still arm this far below a lift or hover point counts as there
+  stall_s: 2.0             # a still arm short of its point this long ends the run
   carry_s: 10.0
   wait_s: 20.0
   time_limit_s: 120.0
@@ -128,11 +134,12 @@ grasp_jev:
 grasp_wrist:
   block: cuboid
   wrist_camera: wrist
-  hue_deg: -1.0
+  hue_deg: -1.0             # a colour word in the label wins; this is for labels without one
+  label_hues: ""             # e.g. "light blue: 192, orange: 20" adds to or replaces the built-in hues
   centre_tol_m: 0.003
   look_before_straddle: true
   close_rounds: 3            # 0: close without the look between the jaw tips
-  close_tol_m: 0.0025
+  close_tol_m: 0.0025        # across the closing line; along it the block only has to sit between the pads
   correction_gain: 1.0
   residual_file: ""          # e.g. a file in the stand folder
 pick_place:
@@ -326,10 +333,23 @@ either, the hand stays straight down and the stop reason says "dlon pochylona po
 bloku". `GraspStatus.tilt_deg` reports the tilt, and the panel shows it. With `probe: true` the
 hand stays straight down.
 
+The straddle stops on a stall once the arm stands more than `straddle_push_m` above where it should
+be. If both jaw tips are then at least `close_on_stall_m` below the block's top, or the hand is within
+5 mm of the grasp point, the fingers are already beside the block: the jaw closes where the arm stands,
+and the usual close, look and lift checks decide whether it holds. Otherwise a tip stands on the block.
 A tip stall retries half the short side away. Retries alternate sides within `max_attempts`.
 With the probe on, each retry probes again. Without the probe, an empty close after a sideways
 retry tries the other side while attempts remain. Any other empty close or motion timeout
 ends the run. Touch's lag guard, `time_limit_s` and the panel's Stop also apply.
+
+Servos without an integral term settle short under load, and friction then holds a joint where it
+hangs until its command comes back down to it. So on the way up and at the hover an arm that stands
+still at most `sag_m` below its point, and mostly straight below it, counts as there. A descent expects
+a joint that hung short at its start to stay put until its command reaches it, so that slack is not
+read as a stall. An arm that stands still `stall_s` short of any point the strategy waits for ends the
+run; the note names the phase, how far the hand stands from the point and the joints that lag, in
+degrees, for example "w gore znad bloku: ramie stoi 29 mm pod celem (wrist_flex 12.7 st., elbow_flex
+10.3 st., shoulder_lift 2.4 st. za malo) - koniec". The same holds for `touch`, `grasp_wrist`, `grasp_jev` and `pick_place`.
 
 The twin's simulated blocks have stiff contacts, so the probe stalls on their top as on the real
 arm and `need_contact` can stay on. With `need_contact: false`, reaching the probe bottom uses the
@@ -377,9 +397,13 @@ renders the arm camera. On hardware, it serves the workspace camera with the sam
 Arm cameras are excluded from triangulation. Until the calibration wave skips them too,
 disable the physical `wrist` record during the wave.
 
-Set `hue_deg`, `hue_window_deg`, `min_saturation` and `min_value` for the block and lighting.
-The default `hue_deg: -1` samples the first usable frame inside the expected visible silhouette
-at the aim. It selects the hue window with the most pixels above `min_saturation` and `min_value`.
+A colour word in the block's label sets the hue the look searches: red (356°), yellow (50°), green
+(143°) and light blue (190°), as this wrist camera sees them. `label_hues` adds words or replaces
+these hues per stand. A `hue_deg` within `hue_window_deg` of the label's colour fine-tunes it; one of
+another colour is not used for that label, so a stand-wide `hue_deg` cannot hide a block of another
+colour. For a label without a colour word (bare wood among them), set `hue_deg`, `hue_window_deg`,
+`min_saturation` and `min_value` for the block and lighting. The default `hue_deg: -1` samples the
+first usable frame inside the expected visible silhouette at the aim. It selects the hue window with the most pixels above `min_saturation` and `min_value`.
 The window spans ±`hue_window_deg`, or ±20° by default, and must cover at least 30% of that region.
 The status reports `hue_deg` and `hue_share`. Bare wood falls below `min_saturation`, so the look
 is skipped and the grasp continues from the detector's aim.
@@ -410,16 +434,35 @@ the same measured joints, so most of an error in where the arm thinks it is canc
 `focal_px` only changes how far each correction goes. The tip pixel still matters: it sets where the
 tips are in the frame.
 
-When the block lies more than `close_tol_m` off, the jaw first slides along the closing line to centre
-on the block, so neither tip drags it. The arm then rises with the jaw open, moves the aim by
-`correction_gain` times the offset, straddles again without the hover look and looks again. This
-repeats up to `close_rounds` times per attempt. A block still off after the last round counts as a
-failed attempt; the last attempt closes anyway. `close_rounds: 0` closes without this look.
+The jaw closes when the block lies within `close_tol_m` of the tips' midpoint across the closing line
+and sits between the open pads along it: the moving jaw then pushes it against the fixed one. That
+room along the line comes from the opening, the block's width and the fingertip radius: about 7 mm on
+each side at the default `open_margin_m`. Otherwise the jaw first slides along the closing line, so
+neither tip drags the block, and the arm rises with the jaw open, moves the aim by `correction_gain`
+times the part of the offset outside those bounds (along the line no farther in an attempt than the
+pads allow), straddles again without the hover look and looks again, up to `close_rounds` times per
+attempt. A part of the offset, along or across, that a correction moved but the next look still sees
+within 1 mm of before is the camera's error, not the block's: it no longer counts in that attempt.
+After the last round the jaw closes if the block lies within the middle third of the gripped face
+across the closing line, and the close and lift checks judge the grip. A block still farther off
+counts as a failed attempt; the last attempt closes anyway. `close_rounds: 0` closes without this
+look.
 
 With a camera, a failed close is retried instead of ending the run: an empty close, or a jaw that
-stops more than 6 mm from the block's width (an edge grip; the jaw opens first). The arm rises with
-the jaw open and comes back to the hover, where the hover look finds the block again. This repeats up
-to `max_attempts`, and the last attempt lifts what it holds. Plain `grasp` keeps its old behaviour.
+stops more than 6 mm narrower than the block's width (an edge or corner grip; the jaw opens first). A
+jaw that holds wider than the block is a full grip. The arm rises with the jaw open and comes back to
+the hover, where the hover look finds the block again. This repeats up to `max_attempts`, and the last
+attempt lifts what it holds. Plain `grasp` keeps its old behaviour.
+
+A real gripper may read its jaw wider than the model puts it at the same reading. `jaw_gap_offset_m`
+is that difference for the stand, 0 in simulation: every grasp-based strategy then opens, closes,
+releases and checks the jaw as it really is, and finds the jaw tips where they really are. To measure
+it, grip a block of known width and lift it: the success note shows the held gap ("szczeka 39 mm"), and
+the offset is that gap minus the block's width. With `jaw_file` set (for example a file in the stand
+folder) the strategy learns it on its own: each verified lift adds the held gap minus the block's width
+to a running mean over the last 10 lifts, and the next run uses that mean instead of the setting. A
+release opens past the jaw as it holds, not only past the block's width, so a gripper that reads wide
+still lets go.
 
 `residual_file` keeps, per stand, a running mean over the last 10 runs of how far the camera moved the
 aim from the detector's first pose, written after each lift. The next run adds it to the first aim.
