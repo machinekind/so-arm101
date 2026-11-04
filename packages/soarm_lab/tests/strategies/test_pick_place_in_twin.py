@@ -851,14 +851,17 @@ def test_the_wrist_look_and_jev_pick_a_cube_and_place_it_on_another(twin):
 
 
 @pytest.mark.render
+@pytest.mark.parametrize("pick_shift", ["auto", "always"])
 @pytest.mark.parametrize("across", [False, True], ids=["along the jaws", "across the jaws"])
-def test_a_cube_pushed_after_the_wrist_look_is_still_gripped_and_placed(twin, across: bool):
+def test_a_cube_pushed_after_the_wrist_look_is_still_gripped_and_placed(twin, across: bool, pick_shift: str):
     """A push along the jaws leaves the cube between the open pads: the jaw closes at once. A push across them
-    is corrected first."""
+    is corrected first. The pick's own correction, used by default without a table, cannot tell that
+    correction from a camera error: it carries the push to the place, which still lands within the place
+    tolerance."""
     sinking = add_blocks(twin, Placed("red", "cube", (0.205, -0.05), 25.0, RED),
                          Placed("blue", "cube", TARGET_XY, 10.0, BLUE))
     clock = Clock()
-    strategy = built(label="red", place_on="blue", wrist_camera="wrist")
+    strategy = built(label="red", place_on="blue", wrist_camera="wrist", pick_shift=pick_shift)
     cameras = Cameras(twin, clock, ("red", "blue"))
     runner = StrategyRunner(twin, strategy, objects=cameras, cameras=("wrist",))
     pushed: list[np.ndarray] = []
@@ -886,7 +889,16 @@ def test_a_cube_pushed_after_the_wrist_look_is_still_gripped_and_placed(twin, ac
     settle(twin)
     red, red_rot = truth(twin, "red")
     blue, _ = truth(twin, "blue")
-    assert np.linalg.norm(red[:2] - blue[:2]) < 0.004 and tilt_deg(red_rot) < 2.0
+    off = float(np.linalg.norm(red[:2] - blue[:2]))
+    if pick_shift == "auto":
+        assert strategy.place.correction_from == "" and off < 0.004
+    else:
+        # Only a correction moves the aim; the jaws centre a push along them as they close.
+        moved = pushed[0] if across else np.zeros(2)
+        shift = np.array(strategy.place.correction_m)
+        assert strategy.place.correction_from == "pick" and np.linalg.norm(shift - moved) < 0.0015
+        assert off < strategy.place_settings.place_tol_m
+    assert tilt_deg(red_rot) < 2.0
     assert not sinking.artefacts(), sinking.depth
 
 

@@ -627,9 +627,10 @@ Where the table has no answer (outside its corners by more than 3 cm, at another
 tilted, or when the leg's start is out of reach), the place takes the pick's own correction instead: the
 aim the wrist camera centred the jaws on, minus where the cameras saw the block. With the wrist camera
 and no table, `pick_shift: always` (the default) does the same everywhere; `auto` does it only with a
-table set, `off` never. When the table's correction at the pick and the pick's own differ by more than
-`table_check_m` (4 mm), the run stops trusting the table, as after a fixed camera was moved. A put-back
-takes no correction. `place.correction_m`, `place.correction_from` (`table`, `pick` or empty) and
+table set, `off` never. The pick's correction cannot tell a camera error from a block pushed after the
+wrist look: it carries such a push to the place too. When the table's correction at the pick and the
+pick's own differ by more than `table_check_m` (4 mm), the run stops trusting the table, as after a fixed
+camera was moved; a push of that size during the pick does the same. A put-back takes no correction. `place.correction_m`, `place.correction_from` (`table`, `pick` or empty) and
 `place.table_miss` say what the run did; the panel adds "poprawka z tablicy 7 mm (ccw)" or "poprawka z
 chwytu 10 mm - cel poza tablica" to the carry note. A table file that cannot be used leaves
 `place.table_problem` and the run goes on without it.
