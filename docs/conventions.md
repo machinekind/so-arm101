@@ -9,7 +9,8 @@
 The twin and `soarm_lab` meet only through data and entry points:
 
 - the twin exports the measured station as a folder (`twin export`): `scene.xml`, `assets/`, `station.json`;
-- the twin finds the lab's strategies under the `machinekind_twin.strategies` entry point and runs them through its `StrategyRunner`.
+- the twin finds the lab's strategies under the `machinekind_twin.strategies` entry point and runs them through its `StrategyRunner`;
+- the twin finds the lab's detectors under the `machinekind_twin.detectors` entry point and places what they see with its own camera models.
 
 The contracts are a base dependency of both packages, `machinekind-twin-api>=0.1.4,<0.2`. They need only numpy.
 The twin is a dev dependency. Tests that run a package through the twin's loaders, factory and runner are
@@ -112,8 +113,10 @@ The plugin contracts are the package `machinekind-twin-api` (see the root README
 - `machinekind_twin_api.entry_points` names the entry point groups: `ROBOTS`, `BACKENDS`, `STRATEGIES` and `DETECTORS`.
   `packages/soarm/pyproject.toml` registers the robot folder under `machinekind_twin.robots` (`ROBOTS`)
   and the backend factories under `machinekind_twin.backends` (`BACKENDS`).
-  These packages register no detector (`machinekind_twin.detectors`, `DETECTORS`). The twin places what a detector
-  sees in the base frame and hands strategies `Observation.objects`.
+  `packages/soarm_lab/pyproject.toml` registers one detector under `machinekind_twin.detectors` (`DETECTORS`):
+  `charuco`, `soarm_lab.detectors.charuco.CharucoDetector`, which reports each corner of a ChArUco board as a pixel
+  labelled `charuco c<id>`. The twin places what a detector sees in the base frame, through the same calibrated
+  cameras as the blocks, and hands strategies `Observation.objects`. The detector imports OpenCV only in `start`.
 - The strategy contract is `machinekind_twin_api.strategy`: `Strategy`, `RunInfo`, `Observation`, `ObjectPose` and `Action`.
   The twin builds a strategy's settings dataclass strictly (`machinekind_twin.strategies`).
   Every strategy here subclasses `Strategy[ItsSettings]`, and `uv run pyright` checks it against the contract.
@@ -141,6 +144,7 @@ The plugin contracts are the package `machinekind-twin-api` (see the root README
   With `grasp_source: library`, `soarm_lab.grasp_library` composes cached grasps with the block pose.
   `GraspStrategy.candidates` filters and ranks them before the jaw and reach checks.
 - `packages/soarm_lab/pyproject.toml` registers these strategies under `machinekind_twin.strategies` (`STRATEGIES`)
-  as `policy`, `ik`, `touch`, `touch_jev`, `grasp`, `grasp_jev`, `grasp_wrist` and `dream`. `soarm_lab.strategies.dream.DreamStrategy` imports the Dream client only in `start`.
+  as `policy`, `ik`, `touch`, `touch_jev`, `grasp`, `grasp_jev`, `grasp_wrist`, `pick_place`, `build`,
+  `calibrate_approach` and `dream`. `soarm_lab.strategies.dream.DreamStrategy` imports the Dream client only in `start`.
 - The station export is `Workspace.export` in the twin (`twin export`). `soarm_lab.station.Station` reads it.
   `soarm_lab.robot.RobotSpec` reads only the `robot.yaml` fields the lab uses and skips the others.
