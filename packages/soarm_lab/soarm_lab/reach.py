@@ -162,7 +162,7 @@ class Reach:
         at_release = self._reaches(np.array([*tcp, release_z]), psi, tilt, self.seed)
         if at_release is None or self._reaches(np.array([*tcp, carry_z]), psi, tilt, at_release) is None:
             return False
-        eased = tcp - cfg.release_margin_m * np.array([math.cos(psi), math.sin(psi)])
+        eased = tcp - min(cfg.release_ease_m, cfg.release_margin_m) * np.array([math.cos(psi), math.sin(psi)])
         clear_z = max(release_z, placed_top + JAW_CLEAR_M + kin.jaw_reach(cmd_release, tilt=tilt))
         return self._reaches(np.array([*eased, clear_z]), psi, tilt, at_release) is not None
 

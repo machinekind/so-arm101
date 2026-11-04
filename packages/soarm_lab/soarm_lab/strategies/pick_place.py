@@ -22,10 +22,15 @@ the held block and the target's top, and `GRIP_SLIP_M` more for a block that sli
 on the way, which nothing the arm measures shows. Every planned point must be reachable with the hand
 down.
 
-After the release the open hand must leave without touching the placed block. Where the arm reaches,
-it rises until the jaw clears the block's top. Otherwise the jaw opens fully, so that its moving side
-clears the block, and the way to the start position must lead away from the fixed jaw. Headings with
-the first exit win.
+After the release the open hand must leave without touching the placed block. The jaw opens where the
+hand stands, and the hand eases at most `release_ease_m` toward the fixed jaw, so the fixed pad leaves
+the block's face. It then rises straight up at `retreat_speed_mps` until the open jaw's lowest point,
+from the measured joints, stands `retreat_clear_m` above the block's top; an arm that settles short
+rises further, by `sag_m` at most. Only then does the hand move toward the start position, never
+lower, at `retreat_speed_mps` and with its orientation held while the jaw is near the block. Where the
+arm cannot rise that high, a jaw `JAW_CLEAR_M` clear still leaves; below that the jaw opens fully, so
+that its moving side clears the block, and the way to the start position must lead away from the
+fixed jaw. Headings with the first exit win.
 
 Over a block target the run latches the newest fresh camera pose of the target seen since the carry
 began, if it was captured at most `fresh_pose_s` before the hand started over the target. The hand
@@ -33,12 +38,17 @@ may hide the target at the hover, so the pose may come from the way there. A tar
 re-plans the hover, at most `MAX_REPLANS` times. The descent settles `SLOW_ABOVE_M` over the release
 height, or at the carry height when that is lower, then runs at `place_speed_mps` and stops on a
 stall or at the release height. The jaw opens `release_margin_m` past the held block on each side,
-eases off toward the fixed jaw as `grasp_jev` does, rises and moves to the start position. Fresh
-poses captured after the release then verify the result.
+and the hand leaves as above. Fresh poses captured after the release then verify the result.
 
 A target not seen at the hover, an unreachable place or a target that keeps moving puts the block
 back where it was picked, without verification. The carry back stays above the target the hand
 hovered over. `PlaceStatus.outcome` names the result with one of `OUTCOMES`.
+
+A block that fell is picked and placed again, `place_retries` times at most in a run: one the check
+finds off the target, unless it still sits on a target or supports that moved, and one that dropped
+out of the jaw on the way, through grasp's recovery. A retry after the check needs fresh poses of the
+block, lying flat, and of the target or each support. The hand first moves over the block at its
+height, and each new pick gets the whole `max_attempts`. `PlaceStatus.retries` counts the retries.
 
 At a pose, only headings whose jaw stays `JAW_SIDE_CLEAR_M` clear of every other object at the release
 count, from the objects' poses and catalog sizes; the held block and its supports do not count. Over
@@ -86,8 +96,10 @@ from .grasp import (
     JAW_WAIT_S,
     MAX_ROT_ERR_DEG,
     ON_BLOCK_M,
+    SEEN,
     GraspCandidate,
     JawPlan,
+    Sighting,
     hand_down,
     heading,
     ik_restarts,
@@ -96,7 +108,7 @@ from .grasp import (
 from .grasp_jev import JEV_PHASE_NAMES, LET_GO, GraspJevSettings, GraspJevStrategy
 from .jaw import JawReading
 from .judges import Judge, JudgeError, Questions, Reply
-from .touch import DONE, SETTLE_S, TURN_DEG_S, WAIT, TouchStrategy, normalised
+from .touch import APPROACH, DONE, SETTLE_S, TURN_DEG_S, WAIT, TouchStrategy, normalised
 from .wrist import WristGraspSettings, WristGraspStrategy, fold
 
 logger = logging.getLogger(__name__)
@@ -127,10 +139,14 @@ LATCH = "latch"
 PLACE = "place"
 PARK = "park"
 VERIFY = "verify"
+#: After a fall: wait for fresh poses before picking the block again, then move over it.
+RETRY = "retry"
+TRANSIT = "transit"
 #: The phases' names in the panel's notes.
 PLACE_PHASE_NAMES = {**JEV_PHASE_NAMES, TARGET: "planuje odlozenie", CARRY_UP: "unosze blok do przeniesienia",
                      CARRY_OVER: "niose blok nad cel", LATCH: "sprawdzam cel w kamerach",
-                     PLACE: "opuszczam blok", PARK: "odsuwam ramie od bloku", VERIFY: "sprawdzam odlozenie"}
+                     PLACE: "opuszczam blok", PARK: "odsuwam ramie od bloku", VERIFY: "sprawdzam odlozenie",
+                     RETRY: "ponawiam odlozenie", TRANSIT: "przenosze reke nad blok"}
 
 #: Hover re-plans after the latched target moved, before the block goes back.
 MAX_REPLANS = 2
@@ -152,8 +168,13 @@ PLACED_Z_TOL_M = 0.01
 #: A fresh target pose this close to the planned one is latched without a new hover [m, deg].
 LATCH_SAME_M = 0.004
 LATCH_SAME_DEG = 3.0
-#: The open jaw's lowest point clears the placed block's top by this much before the hand leaves [m].
+#: The least clearance of the open jaw's lowest point over the placed block's top before the hand leaves,
+#: where the arm cannot rise `retreat_clear_m` [m].
 JAW_CLEAR_M = 0.004
+#: The jaw counts as `retreat_clear_m` clear this much short of it [m].
+CLEAR_TOL_M = 0.001
+#: The largest `release_ease_m` [m].
+MAX_RELEASE_EASE_M = 0.003
 #: The fully open jaw [app units].
 FULL_OPEN = 100.0
 #: A hand that leaves with the fixed jaw beside the placed block moves at least this much away from
@@ -193,8 +214,16 @@ class PickPlaceSettings(GraspJevSettings, WristGraspSettings):
     place_speed_mps: float = 0.02
     #: The jaw opens this much past the held block on each side to release it [m].
     release_margin_m: float = 0.004
+    #: Then the hand moves this far toward the fixed jaw, so its pad leaves the placed block [m]; at most
+    #: `MAX_RELEASE_EASE_M` and `release_margin_m`. Zero rises from where the jaw opened.
+    release_ease_m: float = 0.002
     #: How far the open hand rises after the release, if the arm reaches [m].
     retreat_m: float = 0.05
+    #: TCP speed of the open hand's rise off the placed block and of its move away while near it [m/s].
+    retreat_speed_mps: float = 0.02
+    #: The open jaw's lowest point rises this far above the placed block's top before the hand moves away
+    #: [m]; less where the arm cannot reach that, but `JAW_CLEAR_M` at least.
+    retreat_clear_m: float = 0.02
     #: The latch takes a target pose captured at most this long before the hand started over the target,
     #: the verification one at most this old [s].
     fresh_pose_s: float = 1.0
@@ -204,6 +233,9 @@ class PickPlaceSettings(GraspJevSettings, WristGraspSettings):
     verify_wait_s: float = 3.0
     #: A placed block's centre may lie this far from the target's centre [m].
     place_tol_m: float = 0.008
+    #: How many times a run picks and places the block again after it fell off the target or out of the
+    #: jaw on the way.
+    place_retries: int = 2
     #: As in `grasp`, but on by default: the hand tilts where the pick or the place needs it [deg].
     max_tilt_deg: float = 30.0
 
@@ -238,6 +270,11 @@ class PlaceStatus:
     contact: bool = False
     #: The jaw opened fully to leave the placed block, because the arm could not lift it clear.
     opened_wide: bool = False
+    #: How far the open jaw's lowest point stood above the placed block's top as the hand left [m].
+    jaw_clear_m: float = float("nan")
+    #: Picks of the block after it fell (`place_retries`), and the outcome each one followed.
+    retries: int = 0
+    retried: tuple[str, ...] = ()
     #: The block went back to where it was picked.
     put_back: bool = False
     #: The verified block's centre [m, base frame], its distance from the target centre [m], its height
@@ -341,15 +378,18 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         if config.place_on_block not in BLOCKS:
             raise ValueError(f"pick_place: place_on_block must be one of {', '.join(BLOCKS)}, "
                              f"is {config.place_on_block!r}")
-        for name in ("carry_clearance_m", "place_speed_mps", "release_margin_m", "retreat_m", "fresh_pose_s",
-                     "place_tol_m"):
+        for name in ("carry_clearance_m", "place_speed_mps", "release_margin_m", "retreat_m",
+                     "retreat_speed_mps", "retreat_clear_m", "fresh_pose_s", "place_tol_m"):
             value = getattr(config, name)
             if not value > 0:
                 raise ValueError(f"pick_place: {name} must be positive, is {value}")
-        for name in ("place_gap_m", "target_wait_s", "verify_wait_s"):
+        for name in ("place_gap_m", "target_wait_s", "verify_wait_s", "place_retries"):
             value = getattr(config, name)
             if not value >= 0:
                 raise ValueError(f"pick_place: {name} must be zero or more, is {value}")
+        if not 0 <= config.release_ease_m <= MAX_RELEASE_EASE_M:
+            raise ValueError(f"pick_place: release_ease_m must lie within [0, {MAX_RELEASE_EASE_M}], is "
+                             f"{config.release_ease_m}")
         for name in ("place_x_m", "place_y_m", "place_yaw_deg"):
             value = getattr(config, name)
             if not math.isfinite(value):
@@ -383,13 +423,18 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         #: The blocks the held block rests on at a pose; () for the table or a target block.
         self.rest_on = rests
         self.target_block = block(config.place_on_block)
+        #: How far the hand eases toward the fixed jaw after the release [m].
+        self._ease_m = min(config.release_ease_m, config.release_margin_m)
         self.place = PlaceStatus(target=self.target_label, rests_on=self.rest_on)
         self._reset_place()
         #: The jaw bodies' points in the TCP frame by gripper command.
         self._jaw_clouds: dict[float, tuple[np.ndarray, ...]] = {}
+        #: The latest observation, for a pick again that grasp's recovery starts.
+        self._obs: Observation | None = None
         self._phases.update({CARRY: self._lifted, TARGET: self._target, CARRY_UP: self._carry_up,
                              CARRY_OVER: self._carry_over, LATCH: self._latch, PLACE: self._place,
-                             PARK: self._park, VERIFY: self._verify})
+                             PARK: self._park, VERIFY: self._verify, RETRY: self._retry,
+                             TRANSIT: self._transit})
 
     def _reset_place(self) -> None:
         #: Outcome for the next end of the run, '' for the default.
@@ -427,8 +472,20 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         self._release_tcp_z = float("nan")
         #: The jaw is open enough to leave the placed block.
         self._opened = True
+        #: How much higher than planned the open hand rose, for an arm that settled short [m].
+        self._rise_extra = 0.0
+        #: While the TCP is this close to the placed block across, the leaving hand moves slowly and keeps its
+        #: orientation while the arm can [m].
+        self._near_m = 0.0
+        self._park_held = True
         #: When the open hand finished rising [s, `obs.t`].
         self._released_t = float("nan")
+        #: The outcome and stop reason of a fall the next pick of the block retries, or None; and the outcome
+        #: the pick under way retries, or ''.
+        self._fallen: tuple[str, str] | None = None
+        self._retrying = ""
+        #: Where the hand moves over the block before picking it again [m, base frame].
+        self._transit_point = np.zeros(3)
         #: Positions of the blocks the picked one rested on before the pick and since the lift [m].
         self._supports: dict[str, np.ndarray] = {}
         self._support_now: dict[str, np.ndarray] = {}
@@ -447,13 +504,15 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
 
     def start(self, run: RunInfo, obs: Observation) -> None:
         """Start the grasp family's checks, then clear the place state."""
+        # A retry's pick widened the attempt budget.
+        self.grasp_settings = self.place_settings
         super().start(run, obs)
         self.place = PlaceStatus(target=self.target_label, rests_on=self.rest_on)
         self._reset_place()
         self._start_tcp = self.tcp_cmd.copy()
 
     def act(self, obs: Observation) -> Action:
-        self._scene, self._others = obs.objects, None
+        self._scene, self._others, self._obs = obs.objects, None, obs
         self._note_supports(obs)
         return super().act(obs)
 
@@ -473,12 +532,15 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         return not self.judged and super()._edge_grip()
 
     def carrying(self, obs: Observation, reading: JawReading) -> Action | None:
-        """Monitor the hold as the grasp family does. A drop ends the place sequence until a regrasp."""
+        """Monitor the hold as the grasp family does. A drop ends the place sequence until a regrasp, which
+        is a retry when the block fell on the way to the target."""
         if self.judged:
             action = super().carrying(obs, reading)
         else:
             action = super(GraspJevStrategy, self).carrying(obs, reading)
         if action is not None and self.grasp.verdict == "dropped":
+            if self._placing and not self._putting_back:
+                self._fall(DROPPED, "blok wypadl ze szczeki w drodze")
             self._placing, self._place_plan = False, None
         return action
 
@@ -726,10 +788,12 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         if over_m > 0:
             # Never lower the held block over what the hand hovers above.
             want = max(want, float(self.tcp_cmd[2]))
-        # TCP heights where the jaw at the release opening, or the fully open moving jaw, clears the
-        # placed block.
+        # TCP heights where the jaw at the release opening clears the placed block by `retreat_clear_m` and
+        # by `JAW_CLEAR_M`, and where the fully open moving jaw does.
         placed_top = top + cfg.place_gap_m + self.height_m
-        clear_z = placed_top + JAW_CLEAR_M + self.kin.jaw_reach(self._place_open_cmd, tilt=self._tilt)
+        reach = self.kin.jaw_reach(self._place_open_cmd, tilt=self._tilt)
+        safe_z = placed_top + cfg.retreat_clear_m + reach
+        clear_z = placed_top + JAW_CLEAR_M + reach
         wide_z = placed_top + JAW_CLEAR_M + self.kin.jaw_reach(FULL_OPEN, moving=True, tilt=self._tilt)
         seed0 = self.kin.from_q(self.q_cmd)
         problem, fallback = "", None
@@ -740,7 +804,7 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
             psi = wrap(self._psi + turn)
             u = np.array([math.cos(psi), math.sin(psi)])
             tcp_xy = xy - rot2(psi) @ hand_xy
-            eased = tcp_xy - cfg.release_margin_m * u
+            eased = tcp_xy - self._ease_m * u
             away = self._start_tcp[:2] - eased
             leaves = float(away @ u) <= -AWAY_COS * float(np.linalg.norm(away)) - 1e-9
             where = f"({tcp_xy[0]:.3f}, {tcp_xy[1]:.3f}, {release_z:.3f}) m"
@@ -754,8 +818,8 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
                 problem = problem or f"punkt odlozenia {where} poza zasiegiem z chwytakiem w dol"
                 continue
             # Once a heading that opens fully is known, only one that rises clear is worth more.
-            retreat = self._retreat(eased, psi, release_z, clear_z, wide_z if leaves and fallback is None
-                                    else math.inf, at_release)
+            retreat = self._retreat(eased, psi, release_z, (safe_z, clear_z),
+                                    wide_z if leaves and fallback is None else math.inf, at_release)
             if retreat is None:
                 problem = problem or (f"po odlozeniu szczeki nie mina bloku: wysokosc {clear_z:.3f} m poza "
                                       "zasiegiem")
@@ -781,15 +845,17 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
             fallback = plan
         return fallback if fallback is not None else problem
 
-    def _retreat(self, eased: np.ndarray, psi: float, release_z: float, clear_z: float, wide_z: float,
-                 seed: Mapping[str, float]) -> tuple[float, bool] | None:
+    def _retreat(self, eased: np.ndarray, psi: float, release_z: float, clear: tuple[float, float],
+                 wide_z: float, seed: Mapping[str, float]) -> tuple[float, bool] | None:
         """Return the open hand's retreat height [m] and whether the jaw must then open fully, or None.
 
-        The hand rises `retreat_m`, or less when out of reach, but at least to `clear_z`. Below that,
-        a retreat at or above `wide_z` lets the fully open jaw clear the block; infinite rules it out.
+        `clear` holds the heights where the jaw clears the block by `retreat_clear_m` and by `JAW_CLEAR_M`.
+        The hand rises `retreat_m` and to the first, or less when out of reach, but at least to the second.
+        Below that, a retreat at or above `wide_z` lets the fully open jaw clear the block; infinite rules
+        it out.
         """
-        low = max(clear_z, release_z)
-        for z in (max(release_z + self.place_settings.retreat_m, low), low):
+        safe, low = (max(z, release_z) for z in clear)
+        for z in dict.fromkeys((max(release_z + self.place_settings.retreat_m, safe), safe, low)):
             if self._reaches(np.array([*eased, z]), psi, seed) is not None:
                 return z, False
         for z in _heights(low, max(wide_z, release_z))[1:]:
@@ -885,6 +951,7 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         if not math.isfinite(self._lifted_t):
             self._lifted_t = self._t
         self._placing, self._place_plan, self._replans, self._over_top = True, None, 0, 0.0
+        self._retrying = ""
         self._target_seen, self._rest_seen = None, {}
         self._enter(TARGET)
 
@@ -1100,7 +1167,7 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         return self._drive(plan.release, slow / self.hz)
 
     def _let_go_now(self) -> Action | None:
-        self._released = False
+        self._released, self._rise_extra = False, 0.0
         self._release_tcp_z = float(self.kin.tcp(self.kin.from_q(self.q_cmd))[2, 3])
         self._enter(LET_GO)
         return None
@@ -1121,7 +1188,13 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
 
     @property
     def ease_off_m(self) -> float:
-        return self.place_settings.release_margin_m if self._placing else super().ease_off_m
+        """While placing, a few millimetres at most: the jaw opened in place around the block."""
+        return self._ease_m if self._placing else super().ease_off_m
+
+    @property
+    def rise_step_m(self) -> float:
+        """While placing, the open hand rises at `retreat_speed_mps`."""
+        return self.place_settings.retreat_speed_mps / self.hz if self._placing else super().rise_step_m
 
     def _let_go_rise_z(self) -> float:
         """While placing, rise to the retreat, higher by as much as a stall left the block higher if the arm
@@ -1137,41 +1210,79 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         return max(rise_z, z)
 
     def _after_let_go(self) -> Action | None:
-        """While placing, leave the block for the cameras.
+        """While placing, leave the block for the cameras once the open jaw clears it.
 
-        The hand leaves straight when the jaw clears the block's top. Otherwise the jaw opens fully
+        The open jaw's lowest point, from the measured joints, must stand `retreat_clear_m` above the placed
+        block's top. An arm that settled short rises by what is missing, `sag_m` at most in all, where it
+        reaches. Where it cannot, a jaw `JAW_CLEAR_M` clear still leaves. Below that the jaw opens fully
         first, and the hand must leave away from the fixed jaw with the moving jaw over the block.
         """
         if not self._placing:
             return super()._after_let_go()
-        plan = self._place_plan
+        plan, cfg = self._place_plan, self.place_settings
         assert plan is not None
+        top = self._placed_top()
+        clear = self._jaw_low_z() - top
+        short = cfg.retreat_clear_m - clear
+        if short > CLEAR_TOL_M and self._rise_extra + short <= self.config.sag_m + 1e-9:
+            point = self._release_point + np.array([0.0, 0.0, short])
+            if self._reaches(point, self._psi, self.kin.from_q(self.q_cmd)) is not None:
+                self._rise_extra += short
+                self._release_point = point
+                return self._drive(point, self.rise_step_m)
         self._released_t = self._t
-        z = float(self._release_point[2])
+        self.place.jaw_clear_m = clear
         park_z = max(float(self._start_tcp[2]), float(self.tcp_cmd[2]))
         self._park_point = np.array([*self._start_tcp[:2], park_z])
-        distance = float(np.linalg.norm(self._park_point - self.tcp_cmd))
-        self._park_s = distance / self.config.speed_mps + JAW_WAIT_S
-        # The placed block's top, higher when the descent stalled above the release height.
-        top = (plan.top_m + self.place_settings.place_gap_m + self.height_m
-               + max(self._release_tcp_z - plan.release_z, 0.0) + JAW_CLEAR_M)
-        self._opened = z - self.kin.jaw_reach(self._place_open_cmd, tilt=self._tilt) >= top - 1e-6
+        self._opened = clear >= JAW_CLEAR_M - CLEAR_TOL_M
         if not self._opened:
             u = np.array([math.cos(self._psi), math.sin(self._psi)])
             away = self._park_point[:2] - self.tcp_cmd[:2]
             leaves = float(away @ u) <= -AWAY_COS * float(np.linalg.norm(away)) + 1e-9
-            if not leaves or z - self.kin.jaw_reach(FULL_OPEN, moving=True, tilt=self._tilt) < top - 1e-6:
+            wide = float(self._tcp_measured[2]) - self.kin.jaw_reach(FULL_OPEN, moving=True, tilt=self._tilt)
+            if not leaves or wide - top < JAW_CLEAR_M - CLEAR_TOL_M:
                 return self._finish(STOPPED, "otwarta reka nie odjedzie od odlozonego bloku bez "
                                              "potracenia go")
             self.place.opened_wide = True
-            self._park_s += JAW_WAIT_S
+        elif clear < cfg.retreat_clear_m - CLEAR_TOL_M:
+            logger.info("Szczeka tylko %.0f mm nad odlozonym blokiem", clear * 1000)
+        distance = float(np.linalg.norm(self._park_point - self.tcp_cmd))
+        self._near_m = (self._jaw_radius(self._place_open_cmd if self._opened else FULL_OPEN)
+                        + math.hypot(*self.block.half_size[:2]) + cfg.retreat_clear_m)
+        self._park_s = (min(distance, self._near_m) / cfg.retreat_speed_mps + distance / self.config.speed_mps
+                        + JAW_WAIT_S * (1 if self._opened else 2))
+        self._park_held = True
         self._enter(PARK)
         return None
+
+    def _placed_top(self) -> float:
+        """The placed block's top [m above the table], higher when the descent stalled above the release
+        height."""
+        plan = self._place_plan
+        assert plan is not None
+        return (plan.top_m + self.place_settings.place_gap_m + self.height_m
+                + max(self._release_tcp_z - plan.release_z, 0.0))
+
+    def _jaw_low_z(self) -> float:
+        """The jaw's lowest point at the measured joints [m above the table]."""
+        joints, name = self._measured, self.kin.spec.gripper
+        assert name is not None
+        grip = float(joints.get(name, self.kin.from_q(self.q_cmd)[name]))
+        T = self.kin.tcp(joints)
+        points = np.vstack(self._jaw_cloud(round(grip, 1))) @ T[:3, :3].T + T[:3, 3]
+        return float(points[:, 2].min())
+
+    def _jaw_radius(self, cmd: float) -> float:
+        """How far the jaw at `cmd` [app units] reaches across from the TCP of the last target [m]."""
+        R = self.kin.tcp(self.kin.from_q(self.q_cmd))[:3, :3]
+        points = np.vstack(self._jaw_cloud(cmd)) @ R.T
+        return float(np.hypot(points[:, 0], points[:, 1]).max())
 
     def _park(self, obs: Observation) -> Action | None:
         """Open the jaw fully if leaving needs it, then move the open hand toward the start position.
 
-        A point out of reach ends the move early.
+        The way never goes lower. While the TCP is within `_near_m` of the placed block across, the hand
+        keeps its orientation and moves at `retreat_speed_mps`. A point out of reach ends the move early.
         """
         if not self._opened:
             self._set_jaw_goal(FULL_OPEN)
@@ -1189,7 +1300,16 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
                                     f"{self._put_back_why} - blok odlozony z powrotem")
             self._enter(VERIFY)
             return None
-        return TouchStrategy._drive(self, self._park_point, self.approach_step_m)
+        plan = self._place_plan
+        assert plan is not None
+        if float(np.linalg.norm(self.tcp_cmd[:2] - plan.target_xy)) >= self._near_m:
+            return TouchStrategy._drive(self, self._park_point, self.approach_step_m)
+        if not self._park_held:
+            return TouchStrategy._drive(self, self._park_point, self.rise_step_m)
+        action = self._drive(self._park_point, self.rise_step_m)
+        # Where the arm cannot keep the hand's orientation, the way goes on without it.
+        self._park_held = not self.status.out_of_reach
+        return action
 
     # ------------------------------------------------------------------ the check
     def _verify(self, obs: Observation) -> Action:
@@ -1209,22 +1329,27 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
                          or any(pose is None for pose in rests.values())):
             # The blocks the picked one rested on, and a pose's supports, get the same wait.
             return self.hold()
+        # What the block rests on may have moved: where it should lie now [m], and why.
+        moved, shift = "", np.zeros(3)
         if self.target_label:
             target = self._fresh(obs, self.target_label, since)
             if target is not None:
-                shift = float(np.linalg.norm(np.asarray(target.position, float)[:2] - plan.target_xy))
-                place.target_shift_m = shift
-                if shift > cfg.place_tol_m:
-                    return self._finish(TARGET_MOVED, f"cel '{self.target_label}' przesuniety o "
-                                                      f"{shift * 1000:.0f} mm przy odkladaniu")
-        shifts = {label: float(np.linalg.norm(np.asarray(pose.position, float) - self._rest_pos[label]))
-                  for label, pose in rests.items() if pose is not None}
-        if shifts:
-            moved = max(shifts, key=shifts.__getitem__)
-            place.target_shift_m = shift = shifts[moved]
-            if shift > cfg.place_tol_m:
-                return self._finish(TARGET_MOVED, f"podpora '{moved}' przesunieta o {shift * 1000:.0f} mm "
-                                                  "przy odkladaniu")
+                xy, top, _ = self._target_from(target)
+                shift = np.array([*(xy - plan.target_xy), top - plan.top_m])
+                place.target_shift_m = float(np.linalg.norm(shift[:2]))
+                if place.target_shift_m > cfg.place_tol_m:
+                    moved = (f"cel '{self.target_label}' przesuniety o {place.target_shift_m * 1000:.0f} mm "
+                             "przy odkladaniu")
+        offs = {label: np.asarray(pose.position, float) - self._rest_pos[label]
+                for label, pose in rests.items() if pose is not None}
+        if offs:
+            worst = max(offs, key=lambda label: float(np.linalg.norm(offs[label])))
+            place.target_shift_m = float(np.linalg.norm(offs[worst]))
+            d = np.array(list(offs.values()))
+            shift = np.array([*d[:, :2].mean(axis=0), d[:, 2].max()])
+            if place.target_shift_m > cfg.place_tol_m:
+                moved = (f"podpora '{worst}' przesunieta o {place.target_shift_m * 1000:.0f} mm przy "
+                         "odkladaniu")
         p = np.asarray(mine.position, float)
         error = float(np.linalg.norm(p[:2] - plan.target_xy))
         dz = float(p[2]) - (plan.top_m + self.height_m / 2)
@@ -1233,6 +1358,12 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         place.placed_tilt_deg = lean = _lean_deg(mine.rotation, self.block)
         # A target block's place is not checked for level.
         level = bool(self.target_label) or not lean > LEVEL_TOL_DEG
+        if moved:
+            # A block still on what moved needs no new pick.
+            off = float(np.linalg.norm(p[:2] - plan.target_xy - shift[:2]))
+            if off <= cfg.place_tol_m and abs(dz - shift[2]) <= PLACED_Z_TOL_M and level:
+                return self._finish(TARGET_MOVED, moved)
+            return self._fell_off(TARGET_MOVED, moved)
         where = self._where()
         offsets = f"{error * 1000:.0f} mm od srodka, {dz * 1000:+.0f} mm w pionie"
         if not level:
@@ -1241,7 +1372,129 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
             tilted = f" (dlon pochylona {self.grasp.tilt_deg:.0f} st.)" if self._tilt else ""
             return self._finish(PLACED, f"blok '{self.label}' odlozony na {where}: {offsets}{tilted}",
                                 success=True)
-        return self._finish(FELL_OFF, f"blok '{self.label}' nie lezy na {where}: {offsets}")
+        return self._fell_off(FELL_OFF, f"blok '{self.label}' nie lezy na {where}: {offsets}")
+
+    # ------------------------------------------------------------------ after a fall
+    def _fall(self, outcome: str, why: str) -> bool:
+        """Note that the block fell with `outcome` and `why`. Return whether a retry is left; its pick then
+        gets the whole attempt budget."""
+        cfg = self.place_settings
+        self._fallen = (outcome, why)
+        if self.place.retries >= cfg.place_retries:
+            return False
+        self.grasp_settings = replace(cfg, max_attempts=self.status.attempt + cfg.max_attempts)
+        return True
+
+    def _fell_off(self, outcome: str, why: str) -> Action:
+        """After the check found the block off its place: look for it to pick it again, or end."""
+        if not self._fall(outcome, why):
+            return self._finish(outcome, why)
+        self._enter(RETRY)
+        return self.hold(f"{why} - szukam bloku do ponowienia")
+
+    def _retry(self, obs: Observation) -> Action:
+        """Wait for fresh poses of the fallen block and of the target or each support, then pick it again.
+
+        A block that leans, or poses that stay missing for `target_wait_s`, end the run without a retry."""
+        assert self._fallen is not None
+        outcome, why = self._fallen
+        since = self._released_t + DROP_SETTLE_S
+        mine = self._fresh(obs, self.label, since)
+        if mine is not None and _lean_deg(mine.rotation, self.block) > LEVEL_TOL_DEG:
+            return self._finish(outcome, f"{why} - bez ponowienia: blok pochylony")
+        under = (self.target_label,) if self.target_label else self.rest_on
+        missing = tuple(label for label in under if self._fresh(obs, label, since) is None)
+        if mine is None or missing:
+            if self._t - self._phase_t0 < self.place_settings.target_wait_s:
+                return self.hold()
+            what = (f"blok '{self.label}'" if mine is None
+                    else f"{'cel' if self.target_label else 'podpora'} {_names(missing)}")
+            return self._finish(outcome, f"{why} - bez ponowienia: {what} niewidoczny w kamerach")
+        p = np.asarray(mine.position, float)
+        rotation = np.asarray(mine.rotation, float)
+        if rotation.shape != (3, 3) or not np.all(np.isfinite(rotation)):
+            rotation = np.eye(3)
+        age = float(mine.age_s)
+        return self._regrasp(Sighting(SEEN, (float(p[0]), float(p[1])), float(p[2]), rotation,
+                                      str(mine.source), age, float(obs.t) - age))
+
+    def _recover(self, obs: Observation) -> Action:
+        """As grasp does, but a block that fell on the way with no retry left ends the run at once."""
+        if self._fallen is not None and self.place.retries >= self.place_settings.place_retries:
+            return self._finish(*self._fallen)
+        return super()._recover(obs)
+
+    def _regrasp(self, seen: Sighting) -> Action:
+        """Pick the block again where `seen` puts it, as grasp's recovery does.
+
+        After a fall from the place sequence this is a retry: the place starts over, the place must still
+        fit, and a hand above the new hover first moves over it at its height, clear of the target."""
+        if self._fallen is None:
+            return super()._regrasp(seen)
+        outcome, why = self._fallen
+        obs, cfg, place = self._obs, self.place_settings, self.place
+        assert obs is not None
+        self._fallen = None
+        self._placing = self._putting_back = False
+        self._place_plan = None
+        self._lifted_t, self._support_now = float("nan"), {}
+        place.support_shift_m, place.support_moved = float("nan"), False
+        self._held_gap_m = float("nan")
+        self._goal = self._goal_from(obs)
+        # An aim that fails ends the run with the fall's outcome.
+        self._pending = outcome
+        z = float(self.tcp_cmd[2])
+        action = super()._regrasp(seen)
+        if self.status.phase == DONE:
+            return action
+        problem = "" if self._fitted else self._place_problem(obs)
+        if problem:
+            return self._finish(outcome, f"{why} - ponowienie niemozliwe: {problem}")
+        self._pending = ""
+        self._find_supports(obs)
+        place.retries += 1
+        place.retried = (*place.retried, outcome)
+        logger.info("%s - ponawiam (%d z %d)", why, place.retries, cfg.place_retries)
+        self._retrying = outcome
+        over = self._over_z(z) if self.status.phase == APPROACH else None
+        if over is not None:
+            self._transit_point = np.array([*self.hover_point[:2], over])
+            self._move(TRANSIT, self._transit_point)
+        return self.hold(f"{why} - ponawiam ({place.retries} z {cfg.place_retries})")
+
+    def _over_z(self, z: float) -> float | None:
+        """The TCP height over the new hover the hand moves to first from height `z` [m], or None when the
+        way straight to the hover is clear.
+
+        The jaw clears every block the cameras report by `retreat_clear_m` there. The highest of `z`, the
+        middle and that clearance the arm reaches with the hand down wins; with none, None."""
+        hover = self.hover_point
+        world = world_state(self._scene, place_check=_any_place)
+        tops = [o.top_m for o in world.objects.values() if o.label != self.label and not o.in_gripper]
+        name = self.kin.spec.gripper
+        assert name is not None
+        grip = self.kin.from_q(self.q_cmd)[name]
+        reach = max(self.kin.jaw_reach(grip), self.kin.jaw_reach(self.cmd_open))
+        safe = max(tops, default=0.0) + self.place_settings.retreat_clear_m + reach
+        if float(hover[2]) >= safe or z <= safe:
+            return None
+        seed = self.kin.from_q(self.q_cmd)
+        for h in (z, (z + safe) / 2, safe):
+            if self._reaches(np.array([*hover[:2], h]), self._psi, seed) is not None:
+                return h
+        return None
+
+    def _transit(self, obs: Observation) -> Action | None:
+        """Move the hand over the block at its height, then down to the hover as grasp's approach does."""
+        self._ramp_jaw()
+        point = self._transit_point
+        if self._arrived(point, sag=True):
+            self._enter(APPROACH)
+            return None
+        if self._timed_out():
+            return self._halt(f"ramie nie przenioslo reki nad blok ({self.status.distance * 1000:.0f} mm od "
+                              "celu)", self.kin.from_q(self.q_cmd))
+        return self._drive(point, self.approach_step_m)
 
     # ------------------------------------------------------------------ the end
     def _finish(self, outcome: str, reason: str, success: bool = False) -> Action:
@@ -1249,6 +1502,11 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         if self.place.support_moved:
             reason += f"; blok pod podniesionym przesuniety o {self.place.support_shift_m * 1000:.0f} mm"
         return self._halt(reason, self.kin.from_q(self.q_cmd), success=success)
+
+    def _halt(self, reason: str, target: Mapping[str, float], success: bool = False) -> Action:
+        if self.place.retries:
+            reason += f"; ponowienia: {self.place.retries} z {self.place_settings.place_retries}"
+        return super()._halt(reason, target, success)
 
     def _end(self, reason: str, success: bool = False) -> None:
         super()._end(reason, success)
@@ -1260,6 +1518,8 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
     def _default_outcome(self) -> str:
         if self.grasp.verdict == "taken":
             return DROPPED
+        if self._retrying:
+            return self._retrying
         return STOPPED if self._placing else PICK_FAILED
 
     def stop(self, reason: str) -> None:
@@ -1280,6 +1540,12 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
 
     # ------------------------------------------------------------------ the panel
     def _note(self) -> str:
+        text = self._phase_note()
+        if self.place.retries and self.status.phase != DONE:
+            text += f" | ponowienie {self.place.retries} z {self.place_settings.place_retries}"
+        return text
+
+    def _phase_note(self) -> str:
         st = self.status
         mm = st.distance * 1000
         if self._putting_back:
@@ -1303,6 +1569,10 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
             return f"odsuwam ramie od bloku: {mm:.0f} mm"
         if st.phase == VERIFY:
             return f"sprawdzam odlozenie w kamerach: {self._t - self._phase_t0:.1f} s"
+        if st.phase == RETRY:
+            return f"szukam bloku do ponowienia: {self._t - self._phase_t0:.1f} s"
+        if st.phase == TRANSIT:
+            return f"przenosze reke nad blok: {mm:.0f} mm"
         return super()._note()
 
 
