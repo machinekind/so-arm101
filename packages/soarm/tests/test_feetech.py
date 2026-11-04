@@ -10,16 +10,20 @@ after the goal register has been overwritten. The late-reply test runs through t
 from __future__ import annotations
 
 import dataclasses
+import logging
 import threading
 import time
 
 import pytest
 from machinekind_twin_api.backend import BackendContext, supports_read_only
 
-from fake_bus import REST_TICKS, FakeBusLink
+from fake_bus import LEROBOT_GAINS, REST_TICKS, FakeBusLink
 from soarm import feetech, serial_bridge
 from soarm.feetech import (
+    ADDR_D_GAIN,
     ADDR_GOAL_POSITION,
+    ADDR_I_GAIN,
+    ADDR_P_GAIN,
     ADDR_PRESENT_POSITION,
     ADDR_TORQUE_ENABLE,
     INST_READ,
@@ -343,3 +347,128 @@ def test_read_only_needs_a_read_only_bus(so101_context):
     ctx = dataclasses.replace(so101_context(), read_only=True)
     with pytest.raises(ValueError, match="read_only"):
         FeetechArm(ctx, bus=FeetechBus("COM_TEST"))
+
+
+# ------------------------------------------------------------------ position gains
+GAIN_ADDRS = (ADDR_P_GAIN, ADDR_D_GAIN, ADDR_I_GAIN)
+
+
+def gain_writes(link: FakeBusLink) -> list[tuple[int, int, int]]:
+    """(servo id, register, value) of every write to a gain register, in order."""
+    return [(dev_id, addr, value) for _, dev_id, addr, value in link.ops("write") if addr in GAIN_ADDRS]
+
+
+def gains_in(link: FakeBusLink, dev_id: int) -> tuple[int, int, int]:
+    return tuple(link.registers[dev_id][addr] for addr in GAIN_ADDRS)
+
+
+def test_connect_writes_the_configured_gains_between_goal_and_torque(so101_context):
+    ctx = so101_context(p_gain={"shoulder_lift": 40, "elbow_flex": 40, "wrist_flex": 40},
+                        d_gain={"elbow_flex": 24}, i_gain={"wrist_flex": 2})
+    _, link = connected(ctx)
+    assert gain_writes(link) == [
+        (2, ADDR_P_GAIN, 40),
+        (3, ADDR_P_GAIN, 40), (3, ADDR_D_GAIN, 24),
+        (4, ADDR_P_GAIN, 40), (4, ADDR_I_GAIN, 2),
+    ]
+    assert gains_in(link, 2) == (40, 32, 0)
+    assert gains_in(link, 3) == (40, 24, 0)
+    assert gains_in(link, 4) == (40, 32, 2)
+    for dev_id in (1, 5, 6):                         # joints the config leaves out keep their values
+        assert gains_in(link, dev_id) == LEROBOT_GAINS
+
+    kinds = [(entry[0], entry[2]) for entry in link.log]
+    last_goal = max(i for i, k in enumerate(kinds) if k == ("sync", ADDR_GOAL_POSITION))
+    first_gain = min(i for i, k in enumerate(kinds) if k[0] == "write" and k[1] in GAIN_ADDRS)
+    last_gain = max(i for i, k in enumerate(kinds) if k[0] == "write" and k[1] in GAIN_ADDRS)
+    first_torque = min(i for i, k in enumerate(kinds) if k == ("write", ADDR_TORQUE_ENABLE))
+    assert last_goal < first_gain and last_gain < first_torque
+    # Nothing but gains and torque is written one by one: no goal, no EEPROM lock.
+    assert {addr for _, _, addr, _ in link.ops("write")} == {ADDR_P_GAIN, ADDR_D_GAIN, ADDR_I_GAIN, ADDR_TORQUE_ENABLE}
+
+
+def test_without_gains_in_the_config_no_gain_is_written(arm_ctx):
+    arm, link = connected(arm_ctx)
+    assert arm.gains == {}
+    assert gain_writes(link) == []
+    assert all(gains_in(link, dev_id) == LEROBOT_GAINS for dev_id in link.registers)
+
+
+def test_the_gains_are_written_again_at_every_connect(so101_context):
+    """With the EEPROM lock on, a power cycle brings back the stored value; the next connect fixes it."""
+    arm, link = connected(so101_context(p_gain={"shoulder_lift": 40}))
+    arm.disconnect()
+    link.registers[2][ADDR_P_GAIN] = LEROBOT_GAINS[0]
+    link.log.clear()
+    arm.bus.open(link=link)
+    arm.connect()
+    assert gain_writes(link) == [(2, ADDR_P_GAIN, 40)]
+    assert link.registers[2][ADDR_P_GAIN] == 40
+
+
+def test_connect_logs_the_gains_the_servos_had_and_the_ones_it_set(so101_context, caplog):
+    link = FakeBusLink()
+    link.registers[3][ADDR_P_GAIN] = 28
+    with caplog.at_level(logging.INFO, logger="soarm.feetech"):
+        arm, _ = connected(so101_context(p_gain={"shoulder_lift": 40}), link)
+    before = [r.getMessage() for r in caplog.records if "przy polaczeniu" in r.getMessage()]
+    assert len(before) == 1
+    assert "shoulder_lift 16/32/0" in before[0] and "elbow_flex 28/32/0" in before[0]
+    assert arm.servo_gains["shoulder_lift"] == LEROBOT_GAINS          # read before the write
+    assert any("Ustawiono" in r.getMessage() and "shoulder_lift P=40" in r.getMessage() for r in caplog.records)
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_a_gain_the_servo_does_not_keep_is_warned_about(so101_context, caplog):
+    link = FakeBusLink()
+    real_write = link.write
+
+    def deaf_to_gains(data: bytes) -> int:
+        n = real_write(data)
+        if data[4] == INST_WRITE and data[2] == 3 and data[5] == ADDR_P_GAIN:
+            link.registers[3][ADDR_P_GAIN] = LEROBOT_GAINS[0]       # the servo kept its own value
+        return n
+
+    link.write = deaf_to_gains
+    with caplog.at_level(logging.INFO, logger="soarm.feetech"):
+        connected(so101_context(p_gain={"shoulder_lift": 40, "elbow_flex": 40}), link)
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "elbow_flex P=40, odczyt 16" in warnings[0] and "shoulder_lift" not in warnings[0]
+
+
+def test_read_only_never_writes_gains_but_logs_them(so101_context, caplog):
+    """A watched arm gets the same `feetech:` section as the driven one."""
+    ctx = dataclasses.replace(so101_context(p_gain={"shoulder_lift": 40}), read_only=True)
+    link = FakeBusLink()
+    bus = FeetechBus("COM_TEST", read_only=True)
+    bus.open(link=link)
+    arm = FeetechArm(ctx, bus=bus)
+    with caplog.at_level(logging.INFO, logger="soarm.feetech"):
+        arm.connect()
+    arm.disconnect()
+    assert not [op for op in link.log if op[0] in ("write", "sync")]
+    assert gains_in(link, 2) == LEROBOT_GAINS
+    assert arm.servo_gains["shoulder_lift"] == LEROBOT_GAINS
+    assert any("przy polaczeniu" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("settings, error, match", [
+    ({"p_gain": {"shoulder": 40}}, ValueError, r"feetech\.p_gain: nieznany staw 'shoulder'"),
+    ({"d_gain": {"elbow_flex": 255}}, ValueError, r"feetech\.d_gain\.elbow_flex: .*0\.\.254, dostalem 255"),
+    ({"i_gain": {"wrist_flex": -1}}, ValueError, r"feetech\.i_gain\.wrist_flex: .*0\.\.254"),
+    ({"p_gain": {"shoulder_lift": 0}}, ValueError, r"1\.\.254, dostalem 0 \(P 0 = staw nie trzyma pozycji\)"),
+    ({"p_gain": {"shoulder_lift": 40.5}}, ValueError, r"liczby calkowitej"),
+    ({"p_gain": {"shoulder_lift": True}}, ValueError, r"liczby calkowitej"),
+    ({"p_gain": {"shoulder_lift": "40"}}, ValueError, r"liczby calkowitej"),
+    ({"p_gain": 40}, TypeError, r"feetech\.p_gain: oczekiwano mapowania"),
+    ({"gains": {"shoulder_lift": 40}}, ValueError, r"Nieznane klucze w sekcji feetech"),
+])
+def test_bad_gains_are_refused_before_the_bus_opens(so101_context, settings, error, match):
+    with pytest.raises(error, match=match):
+        FeetechArm(so101_context(**settings))
+
+
+def test_gains_accept_the_whole_range_and_every_joint(so101_context):
+    arm = FeetechArm(so101_context(p_gain={"gripper": 254, "shoulder_pan": 1}, d_gain={"shoulder_pan": 0}))
+    assert arm.gains == {"shoulder_pan": {ADDR_P_GAIN: 1, ADDR_D_GAIN: 0}, "gripper": {ADDR_P_GAIN: 254}}

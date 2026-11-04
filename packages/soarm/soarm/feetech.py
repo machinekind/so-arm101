@@ -21,11 +21,18 @@ that is, because it subtracts the homing offset stored in its EEPROM. LeRobot's 
 sets that offset at its "middle" step, so the pose held there must be the MJCF's zero
 (docs/first-contact.md). There is no per-joint zero offset or direction setting here.
 
+Position gains
+--------------
+Each servo runs its own position loop with the P, D and I gains stored in its memory. `p_gain`,
+`d_gain` and `i_gain` in the `feetech:` section override them per joint: `connect` writes them at
+every start, after the goal and before torque, and never touches the EEPROM lock. A joint the
+config leaves out keeps its servo's value. `connect` logs the gains every servo had before the write.
+
 Read-only
 ---------
 The twin may open an arm it only watches (`BackendContext.read_only`). The bus then goes through
 `ReadOnlyLink`, which refuses every packet but PING, READ and SYNC READ before it reaches the port.
-`connect` and `disconnect` skip every write (no goal, no torque) and `send_joints` raises.
+`connect` and `disconnect` skip every write (no goal, no gains, no torque) and `send_joints` raises.
 """
 
 from __future__ import annotations
@@ -34,8 +41,8 @@ import logging
 import math
 import socket
 import time
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
 from typing import Any
 
 from machinekind_twin_api.backend import BackendContext, RobotBackend, RobotInfo, read_only_capable
@@ -58,6 +65,11 @@ READ_INSTRUCTIONS = frozenset({INST_PING, INST_READ, INST_SYNC_READ})
 #: cannot reach and has no way to find out.
 ADDR_MIN_ANGLE_LIMIT = 9
 ADDR_MAX_ANGLE_LIMIT = 11
+#: Position-loop gains, one byte each, side by side. They live in the EEPROM area: with the
+#: EEPROM lock on, a write changes the running value and lasts until power off.
+ADDR_P_GAIN = 21
+ADDR_D_GAIN = 22
+ADDR_I_GAIN = 23
 ADDR_TORQUE_ENABLE = 40
 ADDR_GOAL_POSITION = 42
 ADDR_PRESENT_POSITION = 56
@@ -67,6 +79,15 @@ ADDR_PRESENT_TEMPERATURE = 63
 TICKS_PER_REV = 4096
 TICK_MIN = 0
 TICK_MAX = 4095
+
+#: Each gain: its `FeetechSettings` field, its letter in the logs and its register, in register order.
+GAINS: tuple[tuple[str, str, int], ...] = (
+    ("p_gain", "P", ADDR_P_GAIN),
+    ("d_gain", "D", ADDR_D_GAIN),
+    ("i_gain", "I", ADDR_I_GAIN),
+)
+#: Highest gain accepted, as in the STS memory table.
+GAIN_MAX = 254
 
 
 #: Below this voltage the servo answers (the board is powered over USB) but has nothing
@@ -424,6 +445,29 @@ class FeetechSettings:
     #: Torque off on exit. Off by default, because a limp arm drops under its own weight;
     #: enable it only when you know the arm is supported.
     torque_off_on_exit: bool = False
+    #: Position-loop gains per joint, written at every connect, e.g. `p_gain: {shoulder_lift: 40}`.
+    #: P sets how hard a joint pulls toward its goal, D damps the motion, I slowly removes an error
+    #: that stays. A joint left out keeps its servo's own value.
+    p_gain: dict[str, int] = field(default_factory=dict)
+    d_gain: dict[str, int] = field(default_factory=dict)
+    i_gain: dict[str, int] = field(default_factory=dict)
+
+    def gains(self, joints: Iterable[str]) -> dict[str, dict[int, int]]:
+        """The configured gains as {joint: {register: value}} in joint order; raises on a bad entry."""
+        joints = tuple(joints)
+        out: dict[str, dict[int, int]] = {}
+        for key, letter, addr in GAINS:
+            # P 0 leaves the joint no pull toward its goal: under torque it drops like a limp one.
+            low = 1 if addr == ADDR_P_GAIN else 0
+            for name, value in getattr(self, key).items():
+                if name not in joints:
+                    raise ValueError(f"feetech.{key}: nieznany staw {name!r}. Stawy: {', '.join(joints)}")
+                if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= GAIN_MAX:
+                    hint = " (P 0 = staw nie trzyma pozycji)" if letter == "P" and value == 0 else ""
+                    raise ValueError(f"feetech.{key}.{name}: oczekiwano liczby calkowitej "
+                                     f"{low}..{GAIN_MAX}, dostalem {value!r}{hint}")
+                out.setdefault(name, {})[addr] = value
+        return {name: out[name] for name in joints if name in out}
 
 
 @read_only_capable
@@ -444,6 +488,8 @@ class FeetechArm(RobotBackend):
                 "albo --port /dev/ttyACM0 (Linux)."
             )
         self.joints = tuple(ctx.joints)
+        #: Configured gains {joint: {register: value}}, written at every connect unless read-only.
+        self.gains = self.settings.gains(self.joints)
         self.gripper = ctx.gripper
         self.limits: dict[str, tuple[float, float]] = dict(ctx.limits)
         #: Only reads: `connect`, `send_joints` and `disconnect` write nothing.
@@ -457,6 +503,8 @@ class FeetechArm(RobotBackend):
         self._positions: dict[str, float] = {}
         #: Limits read from the servos [ticks]. No entry = the servo does not limit.
         self.servo_limits: dict[str, tuple[int, int]] = {}
+        #: (P, D, I) each servo had at connect, before any write. No entry = no reply.
+        self.servo_gains: dict[str, tuple[int, int, int]] = {}
         self._sync_read_ok = True
         #: SYNC READ has answered at least once this session: silence on it is then the
         #: link, not old firmware, and it must not be switched off for good.
@@ -516,6 +564,7 @@ class FeetechArm(RobotBackend):
 
         self._check_power()
         self._read_servo_limits()
+        self._read_gains()
         ticks = self._read_start_positions()
 
         if not self.read_only:
@@ -531,15 +580,64 @@ class FeetechArm(RobotBackend):
         )
 
     def _hold_where_it_stands(self, ticks: dict[str, int]) -> None:
-        """Goal = the measured position, then torque on."""
+        """Goal = the measured position, then the configured gains, then torque on."""
         # ORDER MATTERS. The goal register keeps its value from the previous
         # session, so enabling torque alone would jerk the arm to that pose.
         # First set the goal to where the arm actually stands.
         self.bus.sync_write(
             ADDR_GOAL_POSITION, 2, {self.ids[name]: int(value) for name, value in ticks.items()}
         )
+        # Gains after the goal: before it, a servo still under torque from a previous session
+        # would pull harder toward that session's goal.
+        self._write_gains()
         for dev_id in self.ids.values():
             self.bus.write(dev_id, ADDR_TORQUE_ENABLE, 1, 1)
+
+    def _gains_of(self, dev_id: int) -> tuple[int, int, int] | None:
+        """(P, D, I) of one servo in one read: the three registers sit side by side."""
+        raw = self.bus.read(dev_id, ADDR_P_GAIN, len(GAINS))
+        return None if raw is None else (raw & 0xFF, (raw >> 8) & 0xFF, (raw >> 16) & 0xFF)
+
+    def _read_gains(self) -> None:
+        """Reads and logs the gains every servo has before connect writes any (also read-only)."""
+        self.servo_gains = {}
+        shown: list[str] = []
+        for name, dev_id in self.ids.items():
+            gains = self._gains_of(dev_id)
+            if gains is not None:
+                self.servo_gains[name] = gains
+            shown.append(f"{name} {'?' if gains is None else '/'.join(map(str, gains))}")
+        logger.info("Wzmocnienia serw przy polaczeniu (P/D/I): %s", ", ".join(shown))
+
+    def _write_gains(self) -> None:
+        """Writes the configured gains, reads them back and logs them; warns about any the servo lacks.
+
+        Only the registers the config names are written. The EEPROM lock is left as it is.
+        """
+        if not self.gains:
+            return
+        for name, registers in self.gains.items():
+            for addr, value in registers.items():
+                self.bus.write(self.ids[name], addr, value, 1)
+        letters = {addr: letter for _, letter, addr in GAINS}
+        kept: list[str] = []
+        lost: list[str] = []
+        for name, registers in self.gains.items():
+            back = self._gains_of(self.ids[name])
+            for addr, value in registers.items():
+                got = None if back is None else back[addr - ADDR_P_GAIN]
+                entry = f"{name} {letters[addr]}={value}"
+                if got == value:
+                    kept.append(entry)
+                else:
+                    lost.append(f"{entry}, odczyt {'brak odpowiedzi' if got is None else got}")
+        if kept:
+            logger.info("Ustawiono wzmocnienia serw: %s", ", ".join(kept))
+        if lost:
+            logger.warning(
+                "Serwa nie potwierdzily wzmocnien z konfiguracji (zapis, odczyt po zapisie):\n  %s",
+                "\n  ".join(lost),
+            )
 
     def _read_start_positions(self) -> dict[str, int]:
         """Start position from TWO matching reads of each joint.
