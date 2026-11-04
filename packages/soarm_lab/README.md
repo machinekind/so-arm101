@@ -135,6 +135,7 @@ pick_place:
   place_on_block: cube
   judge: jev                 # or none
   wrist_camera: wrist        # empty: no wrist look
+  max_tilt_deg: 30           # 0 keeps the hand straight down
 ```
 
 Goals use metres in the robot's base frame. Enable the panel's 3D goal handle
@@ -299,6 +300,17 @@ Without the probe, `close_jaw`, `touch_z` and `need_contact` have no effect.
 `grasp_depth` sets tip depth as a fraction of block height. `lift_m` sets lift distance and
 `hold_s` sets the verified hold duration before carry.
 
+`max_tilt_deg` above zero lets a grasp out of reach with the hand straight down tilt the hand in
+5° steps, up to that angle. It is 0 for `grasp`, `grasp_wrist` and `grasp_jev`, so they keep the
+hand straight down unless it is raised. The hand tilts about its closing axis and leans away from
+the base, so the jaws still close level across the block. The arm can tilt the hand only within its
+own vertical plane, so the jaws then close square to the arm, and the block's narrow side must lie
+near square. So a tilted grasp needs the block's yaw: from its pose, or from the wrist look of
+`grasp_wrist`, which then checks a block whose pose has no yaw before the jaw goes down. Without
+either, the hand stays straight down and the stop reason says "dlon pochylona potrzebuje obrotu
+bloku". `GraspStatus.tilt_deg` reports the tilt, and the panel shows it. With `probe: true` the
+hand stays straight down.
+
 A tip stall retries half the short side away. Retries alternate sides within `max_attempts`.
 With the probe on, each retry probes again. Without the probe, an empty close after a sideways
 retry tries the other side while attempts remain. Any other empty close or motion timeout
@@ -369,7 +381,9 @@ limits moves. A final measurement checks each move. An inconsistent result retur
 the original aim when reachable.
 
 A look that cannot settle or obtain a usable measurement is skipped. The straddle (or probe)
-then continues from the settled aim. Looks consume no grasp attempts. Focal length, mount
+then continues from the settled aim. Looks consume no grasp attempts. A grasp with the hand tilted
+looks too, and is stricter: when the measured block does not fit a tilted grasp, or the look gives
+no yaw for a block whose pose has none, the run ends before the jaw goes down. Focal length, mount
 alignment and colour thresholds still need calibration on the stand.
 
 See [wrist settings](soarm_lab/strategies/wrist.py) for the full interface.
@@ -431,6 +445,16 @@ put the block within `place_tol_m` of the target's centre, at the target's top p
 A target not seen at the hover, an unreachable place or a target that keeps moving puts the block
 back where it was picked. The carry back stays at least 1 cm above the target the hand hovered over.
 
+Where the place is out of reach with the hand straight down, the pick takes the least tilt up to
+`max_tilt_deg` (30° by default) at which both the pick and the whole place fit, and the hand keeps
+that tilt to the end, so the held block stays level. The tilted hand keeps its heading against the
+arm as the arm turns, so the place heading follows from the pick: with `align_yaw` the target must
+lie within a few degrees of square to the arm (about 30° at a 10° tilt, 10° at 30°), or the place
+is unreachable. The release, the jaw clearances and the rise count with the tilt. A tilted pick
+needs the picked block's yaw from its pose or the wrist look; otherwise, or when the look finds the
+block too far from square to the arm, the run ends `unreachable` with the block where it lay. The
+stop reason of a tilted place ends with the tilt, and `grasp.tilt_deg` reports it.
+
 The picked block may rest on another block. Its bottom is its pose height minus half its height;
 above 7 mm it counts as stacked. The grasp then counts from that bottom, keeps the open jaw 6 mm
 above the block under it, and lowers the hover and the lift where the arm cannot reach them. While
@@ -452,17 +476,24 @@ on the table or on a block.
 | `dropped` | dropped and not picked again | on the table |
 | `fell_off` | seen after the release, but not on the target | near the target |
 | `target_moved` | the target moved by the check, or kept moving at the hover | near the target / put back |
-| `unreachable` | the block or the place cannot be reached with the hand down, or the open hand could not leave the placed block untouched | where it was / put back |
+| `unreachable` | the block or the place cannot be reached with the hand down, straight or tilted, or the open hand could not leave the placed block untouched | where it was / put back |
 | `stopped` | stopped by a person, the time limit or a motion guard | anywhere |
 
 The stop reason in the panel says the same in Polish. `place.put_back` tells whether the block
 went back, `place.opened_wide` whether the jaw opened fully to leave it. Known gaps: the twin's cube
 detector maps blocks on the table only, so it cannot verify a stacked block yet. With the hand down
-the arm reaches about 9 cm high, so off a stack it picks only the top block of two. A third cube on
-two fits only where the hand can leave away from the fixed jaw toward the start position; a fourth
-never fits. A block that slid down in the grip by more than those 3 mm is pressed onto its target by
-the rest. A dropped block that lands high on another block, such as a cube on a cube, is not picked
+the arm reaches about 9 cm high, so off a stack it picks only the top block of two. Straight down, a
+third cube on two fits only around 20 cm from the base, where the hand can leave away from the fixed
+jaw toward the start position. With the hand tilted, a third cube fits out to about 30 cm and a
+fourth from about 18 to 26 cm, on stacks square to the arm. Moves do not go around other blocks, so a tall stack
+within about 10 cm of the pick or in the way from the start position can be hit. A block that slid
+down in the grip by more than those 3 mm is pressed onto its target by the rest. A dropped block that lands high on another block, such as a cube on a cube, is not picked
 again: recovery waits for a person.
+
+[`reach`](soarm_lab/reach.py) helps a planner choose where to build: `can_place(kind, x, y, bottom_z)`
+says whether a block fits with its bottom at that height, and with what tilt, and `reach_map` gives
+the least tilt over a table grid. Both follow the place plan in outline and are a little cautious:
+they count only a rise that clears the placed block, not the fully open jaw.
 
 See [pick_place settings](soarm_lab/strategies/pick_place.py) for the full interface.
 

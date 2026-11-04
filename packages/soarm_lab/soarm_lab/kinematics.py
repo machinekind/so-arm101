@@ -25,6 +25,7 @@ OpenCV axes. `collision_points` returns jaw primitive points in the same frame.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
@@ -32,6 +33,9 @@ import mujoco
 import numpy as np
 
 from .robot import RobotSpec
+
+#: Random starts of the full IK besides the seed and the rest pose.
+IK_RESTARTS = 6
 
 
 def pose(R: np.ndarray, t: np.ndarray) -> np.ndarray:
@@ -217,6 +221,12 @@ class RobotKinematics:
         d = self.data
         return self._base_inv() @ pose(d.site_xmat[i].reshape(3, 3), d.site_xpos[i])
 
+    def joint_anchor(self, name: str, joints: Mapping[str, float]) -> np.ndarray:
+        """A point on the axis of joint `name` [m, base frame] in pose `joints`."""
+        self._apply(self.to_q(joints))
+        Bi = self._base_inv()
+        return Bi[:3, :3] @ self.data.xanchor[self.model.joint(self.prefix + name).id] + Bi[:3, 3]
+
     def camera(self, name: str, joints: Mapping[str, float]) -> np.ndarray:
         """Return the camera-to-base pose (4x4) for an entry in `spec.cameras`.
 
@@ -329,11 +339,13 @@ class RobotKinematics:
         Ti = inverse(self.tcp(joints))
         return Ti[:3, :3] @ (0.5 * (fixed + moving)) + Ti[:3, 3]
 
-    def jaw_reach(self, gripper: float, *, moving: bool = False) -> float:
+    def jaw_reach(self, gripper: float, *, moving: bool = False, tilt: float = 0.0) -> float:
         """Return the farthest jaw collision point beyond the TCP along `spec.tcp_approach` [m].
 
         Use collision geoms on `spec.jaw_bodies` at `gripper` [app units]. With `moving`, use only the
-        jaw body that carries the moving fingertip. A negative value lies behind the TCP.
+        jaw body that carries the moving fingertip. A negative value lies behind the TCP. With `tilt`
+        [rad], measure along straight down for a hand tilted by that angle about its closing axis, the
+        approach leaning toward closing x approach.
         Raise ValueError if those bodies are missing or have no supported collision geoms."""
         bodies = [name for name in self.spec.jaw_bodies if name]
         if not bodies:
@@ -341,7 +353,10 @@ class RobotKinematics:
         self._apply(self.to_q(self._jaw_pose(gripper)))
         m, d = self.model, self.data
         origin = d.site_xpos[self.site_id]
-        a = d.site_xmat[self.site_id].reshape(3, 3) @ self._approach
+        down = self._approach
+        if tilt:
+            down = math.cos(tilt) * self._approach - math.sin(tilt) * np.cross(self._closing, self._approach)
+        a = d.site_xmat[self.site_id].reshape(3, 3) @ down
         a = a / np.linalg.norm(a)
         ids = {m.body(self.prefix + name).id for name in bodies}
         if moving:
@@ -414,7 +429,7 @@ class RobotKinematics:
         tol: float = 1e-3,
         iters: int = 300,
         damping: float = 0.02,
-        restarts: int = 6,
+        restarts: int = IK_RESTARTS,
         rng: np.random.Generator | None = None,
         accept: Callable[[dict[str, float]], bool] | None = None,
     ) -> IKSolution:

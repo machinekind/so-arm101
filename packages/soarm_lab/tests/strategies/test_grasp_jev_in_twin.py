@@ -51,7 +51,7 @@ TOUCH_FIELDS = ["label", "touch_z", "hover_m", "wait_for_pose_s", "max_pose_age_
                 "max_tracking_deg", "time_limit_s"]
 GRASP_FIELDS = TOUCH_FIELDS + ["block", "probe", "open_margin_m", "squeeze_m", "grasp_depth", "lift_m",
                                "hold_s", "max_attempts", "carry_s", "release", "wait_s", "recover_m",
-                               "grasp_source", "library_dir", "min_score"]
+                               "grasp_source", "library_dir", "min_score", "max_tilt_deg"]
 NEW_FIELDS = ["model", "min_confidence", "min_correction_confidence", "correction_m", "answer_timeout_s",
               "send_frames", "wrist_camera"]
 #: The simulated clock's step, and the twin loop's period [s].

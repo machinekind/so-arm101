@@ -16,7 +16,7 @@ from typing import Any
 
 import numpy as np
 import pytest
-from machinekind_twin_api.strategy import Action, ObjectPose, Observation, RunInfo
+from machinekind_twin_api.strategy import Action, Frame, ObjectPose, Observation, RunInfo
 
 import soarm
 
@@ -25,7 +25,7 @@ pytest.importorskip("mujoco")
 from soarm_lab.blocks import block  # noqa: E402
 from soarm_lab.kinematics import RobotKinematics  # noqa: E402
 from soarm_lab.robot import load_robot  # noqa: E402
-from soarm_lab.strategies.grasp import STACK_CLEAR_M, heading, wrap  # noqa: E402
+from soarm_lab.strategies.grasp import NEEDS_YAW, STACK_CLEAR_M, heading, tilt, wrap  # noqa: E402
 from soarm_lab.strategies.grasp_jev import HELD, HELD_OPTIONS, NEXT, NEXT_OPTIONS, GraspJevSettings  # noqa: E402
 from soarm_lab.strategies.jev import KEY_ENV  # noqa: E402
 from soarm_lab.strategies.judges import Reply, checked_reply  # noqa: E402
@@ -38,7 +38,7 @@ from soarm_lab.strategies.pick_place import (  # noqa: E402
     known_yaw,
     yaw_of,
 )
-from soarm_lab.strategies.wrist import WristGraspSettings, fold  # noqa: E402
+from soarm_lab.strategies.wrist import Measurement, WristGraspSettings, fold  # noqa: E402
 
 SPEC = load_robot()
 KIN = RobotKinematics(SPEC)
@@ -52,6 +52,8 @@ CUBOID = block("cuboid").half_size
 SEEN_AGE_S = 0.05
 #: A fingertip centre this far inside a resting block counts as a hit, not a touch [m].
 HIT_M = 0.0005
+#: Where the base's turning axis crosses the table [m, base frame].
+PAN_XY = KIN.joint_anchor(SPEC.arm_joints[0], SPEC.home)[:2]
 
 
 def rot_z(yaw: float) -> np.ndarray:
@@ -127,6 +129,8 @@ class World:
     #: (time, label) of each fingertip that went into a resting block while `watching`.
     hits: list[tuple[float, str]] = field(default_factory=list)
     watching: bool = False
+    #: Labels whose poses carry no yaw.
+    no_yaw: set[str] = field(default_factory=set)
 
     def body(self, label: str) -> Body:
         return next(b for b in self.bodies if b.label == label)
@@ -135,7 +139,7 @@ class World:
         out = {}
         for b in self.bodies:
             if b.seen:
-                rotation = rot_z(b.yaw) if b.yaw else np.eye(3)
+                rotation = rot_z(b.yaw) if b.yaw and b.label not in self.no_yaw else np.eye(3)
                 source, age = ("w dloni", 0.0) if b.gripped else ("kamery", SEEN_AGE_S)
                 out[b.label] = ObjectPose(np.array([*b.xy, b.z]), rotation, source, age)
         return out
@@ -201,10 +205,12 @@ Hook = Callable[[World, PickPlaceStrategy], None]
 
 
 def run(s: PickPlaceStrategy, world: World, seconds: float = 60.0,
-        on_phase: dict[str, Hook] | None = None, watch: Hook | None = None) -> tuple[list[Action], list[str]]:
+        on_phase: dict[str, Hook] | None = None, watch: Hook | None = None,
+        frames: Mapping[str, Frame] | None = None) -> tuple[list[Action], list[str]]:
     """Start and tick until done. Return the actions and every phase entered, in order.
 
-    `on_phase` hooks run after the tick that entered their phase, `watch` after every world step.
+    `on_phase` hooks run after the tick that entered their phase, `watch` after every world step. Every
+    observation carries `frames`.
     """
     entered: list[str] = []
     enter = s._enter
@@ -222,7 +228,7 @@ def run(s: PickPlaceStrategy, world: World, seconds: float = 60.0,
         world.t = step / s.hz
         before = len(entered)
         a = s.act(Observation(t=world.t, step=step, joints=dict(world.joints), command=dict(world.command),
-                              objects=world.objects()))
+                              objects=world.objects(), frames=frames or {}))
         actions.append(a)
         for phase in entered[before:]:
             # The fake squeeze is not exact, so fingertips count from the lift on.
@@ -268,6 +274,7 @@ def test_its_settings_are_the_grasp_familys_and_the_places():
                            "retreat_m", "fresh_pose_s", "target_wait_s", "verify_wait_s", "place_tol_m"]
     defaults = PickPlaceSettings()
     assert defaults.judge == "jev" and defaults.wrist_camera == "wrist" and defaults.time_limit_s == 240.0
+    assert defaults.max_tilt_deg == 30.0
     assert OUTCOMES == ("placed", "not_found", "target_not_seen", "pick_failed", "dropped", "fell_off",
                         "target_moved", "unreachable", "stopped")
 
@@ -327,7 +334,7 @@ def test_a_cube_goes_on_another_cube_through_every_phase():
     assert np.linalg.norm(red.xy - blue.xy) < 0.002
     assert abs(fold(red.yaw - blue.yaw, math.pi / 2)) < math.radians(1.0)
     assert s.place.error_m < 0.002 and abs(s.place.height_error_m) < 1e-6
-    assert s.status.stopped_because.startswith("blok 'red' odlozony na 'blue': ")
+    assert s.status.stopped_because.startswith("blok 'red' odlozony na 'blue': ") and s.grasp.tilt_deg == 0.0
     assert s.place.release_z == pytest.approx(blue.top + 0.002 + GRIP_SLIP_M + s.place.hang_m)
     # The jaw opened just past the block, not to the straddle's opening, and left it without a touch.
     assert s.grasp.gap_cmd_m == pytest.approx(2 * CUBE[1] + 0.008, abs=1e-4)
@@ -387,11 +394,120 @@ def test_a_third_cube_goes_on_two_and_the_fully_open_jaw_leaves_it_untouched():
 
 
 def test_a_third_cube_the_open_hand_could_not_leave_is_unreachable_before_the_pick():
-    s, world = tower((0.22, 0.0))
+    s, world = tower((0.22, 0.0), max_tilt_deg=0.0)
     _, phases = run(s, world)
 
     assert s.place.outcome == "unreachable" and "open" not in phases
     assert s.status.stopped_because.startswith("po odlozeniu szczeki nie mina bloku")
+
+
+def square(xy: tuple[float, float]) -> float:
+    """The yaw [deg] that sets a block at `xy` square to the arm."""
+    return math.degrees(math.atan2(xy[1] - PAN_XY[1], xy[0] - PAN_XY[0]))
+
+
+def held_tilt(world: World, tilts: list[tuple[float, float]], grip: list[np.ndarray]) -> None:
+    """Record how far the held red cube leans from its grip and the hand from straight down [deg]."""
+    if world.body("red").gripped:
+        R = KIN.tcp(world.joints)[:3, :3]
+        grip[:] = grip or [R]
+        block = math.degrees(math.acos(min(1.0, float((R @ grip[0].T)[2, 2]))))
+        tilts.append((block, math.degrees(tilt(KIN, world.joints))))
+
+
+def tilted(xy: tuple[float, float], under: int, yaw: float, *, red_yaw: float | None = None,
+           posed: bool = True, looked: bool = False, **settings: Any
+           ) -> tuple[PickPlaceStrategy, World, list[tuple[float, float]], list[str]]:
+    """Place the red cube on a stack of `under` cubes at `xy`. Return the held cube's and the hand's tilts
+    and the phases.
+
+    The red cube lies at `red_yaw` [deg], square to the arm by default, with that yaw in its pose when
+    `posed`. With `looked`, the wrist camera sends a frame and measures the red cube where it lies."""
+    names = [f"base{k}" for k in range(under - 1)] + ["blue"]
+    stack = [cube(name, xy, yaw, on=2 * k * CUBE[2]) for k, name in enumerate(names)]
+    red = cube("red", PICK_XY, square(PICK_XY) if red_yaw is None else red_yaw)
+    s, world = built(place_on="blue", **settings), World([red, *stack], no_yaw=set() if posed else {"red"})
+    frames = None
+    if looked:
+        frames = {"wrist": Frame(np.zeros((48, 64, 3), np.uint8), 0.0)}
+        s.measure = lambda rgb, joints: Measurement(red.xy.copy(), red.yaw, 0.9, 1000, 1.0,  # type: ignore[method-assign]
+                                                    np.zeros(2))
+    tilts: list[tuple[float, float]] = []
+    grip: list[np.ndarray] = []
+    _, phases = run(s, world, watch=lambda world, s: held_tilt(world, tilts, grip), frames=frames)
+    return s, world, tilts, phases
+
+
+FAR_XY = (0.24, 0.0)
+FOURTH_XY = (0.21, 0.08)
+
+
+@pytest.mark.parametrize("xy, under", [(FAR_XY, 2), (FOURTH_XY, 3)], ids=["third cube far out", "fourth"])
+def test_a_cube_out_of_straight_down_reach_goes_on_its_stack_with_the_hand_tilted(xy, under):
+    straight, world, *_ = tilted(xy, under, square(xy), max_tilt_deg=0.0)
+    assert straight.place.outcome == "unreachable" and not world.body("red").gripped
+
+    s, world, tilts, _ = tilted(xy, under, square(xy))
+    red, blue = world.body("red"), world.body("blue")
+
+    assert s.place.outcome == "placed", s.status.stopped_because
+    assert 0.0 < s.grasp.tilt_deg <= 30.0
+    assert s.status.stopped_because.endswith(f" (dlon pochylona {s.grasp.tilt_deg:.0f} st.)")
+    assert red.z == pytest.approx(blue.top + CUBE[2]) and np.linalg.norm(red.xy - blue.xy) < 0.002
+    assert abs(fold(red.yaw - blue.yaw, math.pi / 2)) < math.radians(1.0)
+    # The hand kept its tilt and its heading against the arm, so the held cube stayed level.
+    assert tilts and max(block for block, _ in tilts) < 2.0
+    assert [hand for _, hand in tilts] == pytest.approx([s.grasp.tilt_deg] * len(tilts), abs=1.0)
+    assert not world.hits and all(not world.body(f"base{k}").gripped for k in range(under - 1))
+
+
+def test_without_the_blocks_yaw_and_a_wrist_camera_the_hand_does_not_tilt():
+    s, world, tilts, phases = tilted(FAR_XY, 2, square(FAR_XY), posed=False)
+
+    assert s.place.outcome == "unreachable" and "open" not in phases and not tilts and s.grasp.tilt_deg == 0.0
+    assert s.status.stopped_because.endswith(f"; {NEEDS_YAW}")
+
+
+@pytest.mark.parametrize("posed", [True, False], ids=["pose with yaw", "pose without yaw"])
+def test_a_tilted_grasp_looks_with_the_wrist_camera(posed):
+    pytest.importorskip("cv2")
+    s, world, tilts, _ = tilted(FAR_XY, 2, square(FAR_XY), posed=posed, looked=True, wrist_camera="wrist")
+
+    assert s.place.outcome == "placed" and s.grasp.tilt_deg > 0.0, s.status.stopped_because
+    assert s.wrist.verdicts == ["centred"] and tilts and max(block for block, _ in tilts) < 2.0
+
+
+def test_a_tilted_grasp_without_a_frame_keeps_the_poses_yaw_and_never_guesses_one():
+    pytest.importorskip("cv2")
+    s, world, *_ = tilted(FAR_XY, 2, square(FAR_XY), wrist_camera="wrist")
+    assert s.place.outcome == "placed" and s.grasp.tilt_deg > 0.0 and s.wrist.verdicts == ["skipped"]
+
+    s, world, tilts, phases = tilted(FAR_XY, 2, square(FAR_XY), posed=False, wrist_camera="wrist")
+
+    assert s.place.outcome == "unreachable" and "open" in phases and "straddle" not in phases and not tilts
+    assert s.status.stopped_because == f"{NEEDS_YAW}, a kamera go nie zmierzyla (brak klatki z kamery wrist)"
+
+
+@pytest.mark.parametrize("posed", [True, False], ids=["pose with yaw", "pose without yaw"])
+def test_a_cube_askew_to_the_arm_is_not_picked_tilted(posed):
+    """A known yaw refuses before the pick; a guessed one ends once the wrist camera measures the cube."""
+    pytest.importorskip("cv2")
+    s, world, tilts, phases = tilted(FAR_XY, 2, square(FAR_XY), red_yaw=square(PICK_XY) + 40.0, posed=posed,
+                                     looked=True, wrist_camera="wrist")
+
+    assert s.place.outcome == "unreachable" and "straddle" not in phases and not tilts
+    assert np.linalg.norm(world.body("red").xy - PICK_XY) < 1e-9
+    if posed:
+        assert "open" not in phases and s.wrist.looks == 0
+    else:
+        assert s.wrist.verdicts == ["skipped"]
+        assert s.status.stopped_because.startswith("blok w kamerze obrocony o 40 st. wzgledem ramienia: ")
+
+
+def test_a_tilted_place_needs_the_target_square_to_the_arm():
+    s, world, *_ = tilted(FOURTH_XY, 3, square(FOURTH_XY) + 40.0)
+
+    assert s.place.outcome == "unreachable" and not world.body("red").gripped and s.grasp.tilt_deg == 0.0
 
 
 def test_a_cube_put_back_from_over_a_stack_is_carried_above_it():

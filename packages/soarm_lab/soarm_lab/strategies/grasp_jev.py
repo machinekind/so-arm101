@@ -891,16 +891,16 @@ class GraspJevStrategy(GraspStrategy):
         self.carrot = self.tcp_cmd.copy()
 
     # ------------------------------------------------------------------ aiming
-    def _aim(self, xy: np.ndarray) -> None:
+    def _aim(self, xy: np.ndarray, *, strict: bool = False) -> None:
         """Try the pending rotated heading and its mirror before accepting a new aim."""
         if not self._turn_rad:
-            super()._aim(xy)
+            super()._aim(xy, strict=strict)
             return
         saved = self._headings
         psi = wrap(self._psi + self._turn_rad)
         self._headings = [psi, wrap(psi + math.pi)]
         try:
-            super()._aim(xy)
+            super()._aim(xy, strict=strict)
         except RuntimeError:
             self._headings = saved
             raise

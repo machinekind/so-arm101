@@ -24,8 +24,13 @@ A block on another block is measured at its own height, from the bottom the gras
 
 Looks finish after convergence or `rounds` moves. Missing or stale frames, ambiguous blobs,
 poor fits, excessive shifts and an unsettled arm skip the look. The straddle (or probe) then
-continues from the settled aim. Looks consume no grasp attempts. An empty `wrist_camera`
-runs plain `grasp`; a named camera requires OpenCV and a matching robot camera entry.
+continues from the settled aim. Looks consume no grasp attempts. An empty `wrist_camera` runs plain
+`grasp`; a named camera requires OpenCV and a matching robot camera entry.
+
+A grasp with the hand tilted looks too: the camera pose comes from the measured joints. A tilted hand
+closes square to the arm, so it needs the block's yaw. The run ends before the straddle when the
+measured block does not fit a tilted grasp, or when the look gives no yaw for a block whose pose has
+none.
 """
 
 from __future__ import annotations
@@ -43,7 +48,7 @@ from machinekind_twin_api.strategy import Action, Observation, RunInfo
 from ..blocks import BlockSpec
 from ..kinematics import RobotKinematics
 from ..robot import RobotCamera
-from .grasp import GraspSettings, GraspStrategy, wrap
+from .grasp import NEEDS_YAW, GraspSettings, GraspStrategy, wrap
 
 logger = logging.getLogger(__name__)
 
@@ -593,6 +598,8 @@ class WristGraspStrategy(GraspStrategy):
         self._camera: RobotCamera | None = None
         #: The closed tips' midpoint in the TCP frame [m], from the model once `start` has it.
         self._tip_tcp = np.zeros(3)
+        #: The current look measured the block's yaw and the aim follows it.
+        self._yaw_seen = False
 
     def start(self, run: RunInfo, obs: Observation) -> None:
         """Initialize grasp and validate the named camera and OpenCV before motion.
@@ -603,6 +610,7 @@ class WristGraspStrategy(GraspStrategy):
         cfg = self.wrist_settings
         self.wrist = WristStatus()
         self._look = None
+        self._yaw_seen = False
         self._cv2, self._window, self._camera = None, None, None
         if not cfg.wrist_camera:
             return
@@ -751,16 +759,26 @@ class WristGraspStrategy(GraspStrategy):
             return None
         if self._look is None:
             self._look = self._new_look("straddle")
-        return self._look_step(obs, lambda: self.straddle_hover, settled)
+        action = self._look_step(obs, lambda: self.straddle_hover, settled)
+        if action is None and self._tilt and not self._yaw_seen and _identity(self.block_rotation):
+            # A tilted hand closes square to the arm, so it must not close on a block of unknown yaw.
+            return self._refuse(f"{NEEDS_YAW}, a kamera go nie zmierzyla ({self.wrist.skipped})")
+        return action
 
     @property
     def _looking(self) -> bool:
         return self._look is not None
 
+    @property
+    def _measures_yaw(self) -> bool:
+        cfg = self.wrist_settings
+        return bool(cfg.wrist_camera) and (not cfg.probe or cfg.look_before_straddle)
+
     def _new_look(self, where: str) -> Look:
         assert self.grasp.block_xy is not None
         self.wrist.looks += 1
         self.wrist.where = where
+        self._yaw_seen = False
         xy0 = None if self._block_xy0 is None else self._block_xy0.copy()
         return Look(where, self._t, np.asarray(self.grasp.block_xy, float), self.block_rotation.copy(),
                     list(self._headings), xy0, t_target=self._t)
@@ -812,6 +830,7 @@ class WristGraspStrategy(GraspStrategy):
         if look.round >= 1 and dist > MOVE_GUARD * look.last_shift_m + cfg.centre_tol_m:
             return self._revert(look, hover, dist)
         if dist <= cfg.centre_tol_m and yaw_change <= math.radians(YAW_TOL_DEG):
+            self._yaw_seen = True
             return self._finish_look("centred", f"wysrodkowano po kamerze: {dist * 1000:.0f} mm")
         if look.round >= cfg.rounds:
             return self._finish_look("centred", f"wysrodkowano po kamerze: {dist * 1000:.0f} mm po "
@@ -846,16 +865,22 @@ class WristGraspStrategy(GraspStrategy):
     def _reaim(self, look: Look, hover: Callable[[], np.ndarray], m: Measurement, dist: float) -> Action:
         """Aim at the measured centre and yaw, then drive to hover.
 
-        Keep the old aim if the arm cannot reach the new one with the hand down.
+        Keep the old aim if the arm cannot reach the new one with the hand down. A tilted aim must fit
+        the measured block in full, or the run ends: the old one may close on the block askew.
         """
         saved = self.block_rotation.copy(), list(self._headings)
-        psi = self._psi
+        psi, tilted = self._psi, bool(self._tilt)
         self._heading_from(self._block_rotation(m.yaw))
         try:
-            self._aim(m.xy)
+            self._aim(m.xy, strict=tilted)
         except RuntimeError as exc:
             self.block_rotation, self._headings = saved
-            return self._finish_look("skipped", str(exc))
+            action = self._finish_look("skipped", str(exc))
+            if not tilted:
+                return action
+            off = math.degrees(abs(fold(m.yaw - self._bearing(m.xy), self.block.yaw_period)))
+            return self._refuse(f"blok w kamerze obrocony o {off:.0f} st. wzgledem ramienia: {exc}")
+        self._yaw_seen = True
         # A tip stall's sideways retries start from the block the camera saw.
         self._block_xy0 = np.asarray(m.xy, float).copy()
         look.round += 1
@@ -877,12 +902,13 @@ class WristGraspStrategy(GraspStrategy):
         why = (f"przesuniecie nie zgadza sie z obrazem ({dist * 1000:.0f} mm po korekcie "
                f"{look.last_shift_m * 1000:.0f} mm)")
         try:
-            self._aim(look.xy0)
+            self._aim(look.xy0, strict=bool(self._tilt))
         except RuntimeError as exc:
             self.block_rotation, self._headings = moved
             why = f"przesuniecie nie zgadza sie z obrazem, cofniecie niemozliwe: {exc}"
             return self._finish_look("skipped", why)
         self._block_xy0 = look.block_xy0
+        self._yaw_seen = False
         look.phase, look.reverted = RETURN, why
         self.wrist.verdict, self.wrist.skipped = "reverted", why
         look.still_ticks = 0
@@ -914,6 +940,11 @@ class WristGraspStrategy(GraspStrategy):
             return look.text
         what = "cofam centrowanie" if look.phase == RETURN else "centruje po kamerze"
         return f"{what}: {self.status.distance * 1000:.0f} mm do zawisu"
+
+
+def _identity(rotation: np.ndarray) -> bool:
+    """Whether a block rotation carries no yaw."""
+    return bool(np.allclose(rotation, np.eye(3), atol=1e-6))
 
 
 def _unusable(problem: str, area_px: int = 0, ratio: float = math.nan) -> Measurement:

@@ -43,6 +43,15 @@ clears what it was picked from. The blocks under it, found from their poses befo
 checked with fresh camera poses once the hand is away from them; a shift over `place_tol_m` is
 reported in `PlaceStatus.support_moved` and the stop reason. A put-back returns the block onto its
 stack, moved with the block under it when that one was seen to move.
+
+Where the place is out of reach with the hand straight down, the pick takes the least tilt up to
+`max_tilt_deg` at which both the pick and the place fit, and the hand keeps that tilt to the end: the
+held block then stays level. The tilted hand keeps its heading against the arm, so the place heading
+follows from the pick's, and a turn to line up with the target must stay within `MAX_ROT_ERR_DEG` of
+block tilt. The jaw clearances count along straight down for the tilted hand. A tilted pick needs the
+block's yaw from its pose or the wrist look; when the look finds the block does not fit the tilted
+pick, or gives no yaw for a block whose pose has none, the run ends as `unreachable` before the jaw
+goes down.
 """
 
 from __future__ import annotations
@@ -60,7 +69,19 @@ from machinekind_twin_api.strategy import Action, ObjectPose, Observation, RunIn
 
 from ..blocks import block
 from ..blocks.classic_world import BLOCKS
-from .grasp import CARRY, DROP_SETTLE_S, IN_HAND_M, JAW_WAIT_S, MAX_ROT_ERR_DEG, heading, top_down, wrap
+from .grasp import (
+    CARRY,
+    DROP_SETTLE_S,
+    IN_HAND_M,
+    JAW_WAIT_S,
+    MAX_ROT_ERR_DEG,
+    GraspCandidate,
+    JawPlan,
+    hand_down,
+    heading,
+    ik_restarts,
+    wrap,
+)
 from .grasp_jev import LET_GO, GraspJevSettings, GraspJevStrategy
 from .jaw import JawReading
 from .judges import Judge, JudgeError, Questions, Reply
@@ -159,6 +180,8 @@ class PickPlaceSettings(GraspJevSettings, WristGraspSettings):
     verify_wait_s: float = 3.0
     #: A placed block's centre may lie this far from the target's centre [m].
     place_tol_m: float = 0.008
+    #: As in `grasp`, but on by default: the hand tilts where the pick or the place needs it [deg].
+    max_tilt_deg: float = 30.0
 
 
 @dataclass
@@ -364,6 +387,8 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         self._support_now: dict[str, np.ndarray] = {}
         #: When the first verified lift ended [s, `obs.t`].
         self._lifted_t = float("nan")
+        #: The place the pick plans for: the target's centre [m], top [m] and yaw [rad] or None.
+        self._goal: tuple[np.ndarray, float, float | None] | None = None
 
     def start(self, run: RunInfo, obs: Observation) -> None:
         """Start the grasp family's checks, then clear the place state."""
@@ -411,17 +436,52 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
             self._target_ready = True
         # Grasp ends here only without a usable pose or with an unreachable one.
         self._pending = NOT_FOUND if self._pose_problem(self._pose_of(obs, self.label)) else UNREACHABLE
+        self._goal = self._goal_from(obs)
         action = super()._wait(obs)
         if self.status.phase == DONE:
             return action
         self._pending = ""
         if self.status.phase == WAIT:
             return action
-        problem = self._place_problem(obs)
+        problem = "" if self._fitted else self._place_problem(obs)
         if problem:
-            return self._finish(UNREACHABLE, problem)
+            return self._finish(UNREACHABLE, "; ".join(filter(None, (problem, self._tilt_why))))
         self._find_supports(obs)
         return action
+
+    def _goal_from(self, obs: Observation) -> tuple[np.ndarray, float, float | None] | None:
+        """Return the target's centre, top and yaw from `obs`, the table spot, or None without a pose."""
+        if not self.target_label:
+            return self._spot, 0.0, None
+        pose = self._pose_of(obs, self.target_label)
+        return None if self._pose_problem(pose) else self._target_from(pose)
+
+    def plan_problem(self, xy: np.ndarray, cand: GraspCandidate, jaw: JawPlan, tilt: float, grasp_z: float,
+                     plan: dict[str, np.ndarray]) -> str:
+        """Why no place plan fits a pick with hand tilt `tilt` [rad], the held block estimated centred
+        between the closed jaws, or ''."""
+        if self._putting_back:
+            spot, top = self._put_back_spot()
+            goal: tuple[np.ndarray, float, float | None] | None = (spot, top, None)
+        else:
+            goal = self._goal
+        if goal is None:
+            return ""
+        straddle = plan["straddle_xy"]
+        n = np.array([-math.sin(cand.psi), math.cos(cand.psi)])
+        hand = np.array([float(self.kin.jaw_centre(jaw.cmd_block)[2]), float((xy - straddle) @ n)])
+        saved = self._psi, self._rot, self._tilt, self._psi_rel, self._grip_rel, self._width_m
+        self._tilt, self._width_m = tilt, cand.width_m
+        self._set_heading(cand.psi, straddle)
+        self._grip_rel = self._psi_rel
+        try:
+            fit = self._plan_place(*goal, from_xy=straddle, hang=grasp_z - self._bottom(), hand_xy=hand)
+        finally:
+            self._psi, self._rot, self._tilt, self._psi_rel, self._grip_rel, self._width_m = saved
+        return fit if isinstance(fit, str) else ""
+
+    def _refuse(self, reason: str) -> Action:
+        return self._finish(UNREACHABLE, reason)
 
     def _place_problem(self, obs: Observation) -> str:
         """Return why no place plan fits, with the held block estimated centred at the grasp height, or ''."""
@@ -523,20 +583,39 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         return position[:2].copy(), max(float(position[2]) + half, 2 * half), yaw_of(pose.rotation)
 
     def _reaches(self, point: np.ndarray, psi: float, seed: Mapping[str, float]) -> dict[str, float] | None:
-        """Return joints that put the TCP on `point` with the hand down at heading `psi`, or None."""
-        sol = self.kin.ik(point, top_down(psi), seed=seed, accept=self._clear)
+        """Return joints that put the TCP on `point` with the hand down, at heading `psi` and the pick's tilt,
+        or None."""
+        sol = self.kin.ik(point, hand_down(psi, self._tilt), seed=seed, accept=self._clear,
+                          restarts=ik_restarts(self._tilt))
         if sol.ok and self._clear(sol.joints) and sol.rot_err <= math.radians(MAX_ROT_ERR_DEG):
             return sol.joints
         return None
 
-    def _turns(self, yaw: float | None) -> list[float]:
-        """Return heading turns [rad] that line the held block up with `yaw`, smallest first."""
-        if yaw is None or not self.place_settings.align_yaw or self._putting_back:
-            return [0.0]
-        period = min(self.block.yaw_period, self.target_block.yaw_period)
-        d = fold(yaw - self._held_rel - self._psi, period)
-        turns = {round(d + k * period, 9) for k in range(-4, 5) if abs(d + k * period) <= math.pi + 1e-9}
-        return sorted(turns, key=abs)
+    def _turns(self, yaw: float | None, xy: np.ndarray | None = None, hand_xy: np.ndarray | None = None
+               ) -> list[float]:
+        """Return heading turns [rad] that line the held block up with `yaw`, smallest first.
+
+        A tilted hand keeps the grasp's heading against the arm over `xy`, the held block's centre, with the
+        block at `hand_xy` in the hand: the turn that does so, or the turns that line up within
+        `MAX_ROT_ERR_DEG` of block tilt from it."""
+        free = yaw is None or not self.place_settings.align_yaw or self._putting_back
+        turns = [0.0]
+        if not free:
+            assert yaw is not None
+            period = min(self.block.yaw_period, self.target_block.yaw_period)
+            d = fold(yaw - self._held_rel - self._psi, period)
+            near = {round(d + k * period, 9) for k in range(-4, 5) if abs(d + k * period) <= math.pi + 1e-9}
+            turns = sorted(near, key=abs)
+        if not self._tilt or xy is None or hand_xy is None:
+            return turns
+        psi = self._bearing(xy) + self._grip_rel
+        for _ in range(2):
+            psi = self._bearing(xy - rot2(psi) @ hand_xy) + self._grip_rel
+        keep = wrap(psi - self._psi)
+        if free:
+            return [keep]
+        limit = math.asin(min(1.0, math.sin(math.radians(MAX_ROT_ERR_DEG)) / math.sin(abs(self._tilt))))
+        return [t for t in turns if abs(wrap(t - keep)) <= limit]
 
     def _plan_place(self, xy: np.ndarray, top: float, yaw: float | None, *, from_xy: np.ndarray | None = None,
                     hang: float | None = None, hand_xy: np.ndarray | None = None,
@@ -560,11 +639,14 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         # TCP heights where the jaw at the release opening, or the fully open moving jaw, clears the
         # placed block.
         placed_top = top + cfg.place_gap_m + self.height_m
-        clear_z = placed_top + JAW_CLEAR_M + self.kin.jaw_reach(self._place_open_cmd)
-        wide_z = placed_top + JAW_CLEAR_M + self.kin.jaw_reach(FULL_OPEN, moving=True)
+        clear_z = placed_top + JAW_CLEAR_M + self.kin.jaw_reach(self._place_open_cmd, tilt=self._tilt)
+        wide_z = placed_top + JAW_CLEAR_M + self.kin.jaw_reach(FULL_OPEN, moving=True, tilt=self._tilt)
         seed0 = self.kin.from_q(self.q_cmd)
         problem, fallback = "", None
-        for turn in self._turns(yaw):
+        turns = self._turns(yaw, np.asarray(xy, float), hand_xy)
+        if not turns:
+            return "dlon pochylona nie ustawi bloku zgodnie z celem"
+        for turn in turns:
             psi = wrap(self._psi + turn)
             u = np.array([math.cos(psi), math.sin(psi)])
             tcp_xy = xy - rot2(psi) @ hand_xy
@@ -626,6 +708,8 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         place.turn_deg = math.degrees(plan.turn)
         place.carry_z, place.release_z, place.retreat_z = plan.carry_z, plan.release_z, plan.retreat_z
         self._over_top = max(self._over_top, plan.top_m)
+        if not self._putting_back:
+            self._goal = (plan.target_xy.copy(), plan.top_m, plan.yaw)
 
     # ------------------------------------------------------------------ after the lift
     def _lifted(self, obs: Observation) -> Action | None:
@@ -717,7 +801,7 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         assert plan is not None
         point = np.array([*plan.from_xy, plan.carry_z])
         if self._arrived(point):
-            self._psi, self._rot = plan.psi, top_down(plan.psi)
+            self._set_heading(plan.psi, plan.tcp_xy)
             self._move(CARRY_OVER, plan.hover, plan.turn)
             return None
         if self._timed_out():
@@ -780,7 +864,7 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
             # Small corrections ride along the descent, which starts no higher than the hand is.
             self._take_plan_place(replace(new, from_xy=plan.from_xy, turn=plan.turn,
                                           carry_z=min(new.carry_z, plan.carry_z)))
-            self._psi, self._rot = new.psi, top_down(new.psi)
+            self._set_heading(new.psi, new.tcp_xy)
             self._enter(PLACE)
             return None
         if self._replans >= MAX_REPLANS:
@@ -788,7 +872,7 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         self._replans = self.place.replans = self._replans + 1
         # Keep the carry's start: the arm is already at carry height.
         self._take_plan_place(replace(new, from_xy=plan.from_xy))
-        self._psi, self._rot = new.psi, top_down(new.psi)
+        self._set_heading(new.psi, new.tcp_xy)
         logger.info("Cel przesuniety o %.0f mm - nowy zawis", moved * 1000)
         self._move(CARRY_OVER, new.hover, new.turn)
         return self.hold(f"cel przesuniety o {moved * 1000:.0f} mm - nowy zawis")
@@ -883,12 +967,12 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         # The placed block's top, higher when the descent stalled above the release height.
         top = (plan.top_m + self.place_settings.place_gap_m + self.height_m
                + max(self._release_tcp_z - plan.release_z, 0.0) + JAW_CLEAR_M)
-        self._opened = z - self.kin.jaw_reach(self._place_open_cmd) >= top - 1e-6
+        self._opened = z - self.kin.jaw_reach(self._place_open_cmd, tilt=self._tilt) >= top - 1e-6
         if not self._opened:
             u = np.array([math.cos(self._psi), math.sin(self._psi)])
             away = self._park_point[:2] - self.tcp_cmd[:2]
             leaves = float(away @ u) <= -AWAY_COS * float(np.linalg.norm(away)) + 1e-9
-            if not leaves or z - self.kin.jaw_reach(FULL_OPEN, moving=True) < top - 1e-6:
+            if not leaves or z - self.kin.jaw_reach(FULL_OPEN, moving=True, tilt=self._tilt) < top - 1e-6:
                 return self._finish(STOPPED, "otwarta reka nie odjedzie od odlozonego bloku bez "
                                              "potracenia go")
             self.place.opened_wide = True
@@ -950,7 +1034,9 @@ class PickPlaceStrategy(GraspJevStrategy, WristGraspStrategy):
         where = f"'{self.target_label}'" if self.target_label else "stol"
         offsets = f"{error * 1000:.0f} mm od srodka, {dz * 1000:+.0f} mm w pionie"
         if error <= cfg.place_tol_m and abs(dz) <= PLACED_Z_TOL_M:
-            return self._finish(PLACED, f"blok '{self.label}' odlozony na {where}: {offsets}", success=True)
+            tilted = f" (dlon pochylona {self.grasp.tilt_deg:.0f} st.)" if self._tilt else ""
+            return self._finish(PLACED, f"blok '{self.label}' odlozony na {where}: {offsets}{tilted}",
+                                success=True)
         return self._finish(FELL_OFF, f"blok '{self.label}' nie lezy na {where}: {offsets}")
 
     # ------------------------------------------------------------------ the end
