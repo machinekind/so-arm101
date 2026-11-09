@@ -9,10 +9,10 @@ soarm-lab = { workspace = true }
 # The twin comes from the same commit, because it depends on that package too,
 # and so do the twin's example cube detector (examples/detectors/cube)
 # and its LLM detector (packages/machinekind_twin_llm).
-machinekind-twin-api = { git = "https://github.com/machinekind/twin.git", subdirectory = "packages/machinekind_twin_api", rev = "44abb51e1c315d4ebdb6be53439b0d741e32cd76" }
-machinekind-twin = { git = "https://github.com/machinekind/twin.git", rev = "44abb51e1c315d4ebdb6be53439b0d741e32cd76" }
-machinekind-twin-cube = { git = "https://github.com/machinekind/twin.git", subdirectory = "examples/detectors/cube", rev = "44abb51e1c315d4ebdb6be53439b0d741e32cd76" }
-machinekind-twin-llm = { git = "https://github.com/machinekind/twin.git", subdirectory = "packages/machinekind_twin_llm", rev = "44abb51e1c315d4ebdb6be53439b0d741e32cd76" }
+machinekind-twin-api = { git = "https://github.com/machinekind/twin.git", subdirectory = "packages/machinekind_twin_api", rev = "b1d606d4646c0df7146fb2d22656be00ec6fcc46" }
+machinekind-twin = { git = "https://github.com/machinekind/twin.git", rev = "b1d606d4646c0df7146fb2d22656be00ec6fcc46" }
+machinekind-twin-cube = { git = "https://github.com/machinekind/twin.git", subdirectory = "examples/detectors/cube", rev = "b1d606d4646c0df7146fb2d22656be00ec6fcc46" }
+machinekind-twin-llm = { git = "https://github.com/machinekind/twin.git", subdirectory = "packages/machinekind_twin_llm", rev = "b1d606d4646c0df7146fb2d22656be00ec6fcc46" }
 
 # dreamlabs (the `dream` extra of soarm-lab) pins jax to 0.7.1. The JAX trainer's extra (`train`) keeps its
 # own jax and optax: the two extras are resolved apart and never install together.
@@ -37,14 +37,12 @@ torch = ["soarm-lab[torch]"]
 # The application stays optional; the base packages depend only on its API.
 twin = ["machinekind-twin", "machinekind-twin-cube", "machinekind-twin-llm"]
 
-# Type-check the twin contract implementations, grasp library, planner, campaign records, the approach
-# calibration's modules and test panel.
+# Type-check the twin contract implementations, grasp library, planner, campaign records, the approach table
+# and test panel.
 [tool.pyright]
 include = ["packages/soarm_lab/soarm_lab/strategies", "packages/soarm_lab/soarm_lab/grasp_library.py",
            "packages/soarm_lab/soarm_lab/planner", "packages/soarm_lab/soarm_lab/campaign.py",
-           "packages/soarm_lab/soarm_lab/detectors", "packages/soarm_lab/soarm_lab/charuco.py",
-           "packages/soarm_lab/soarm_lab/approach_table.py", "packages/soarm_lab/soarm_lab/stand_errors.py",
-           "packages/soarm/soarm/panel.py"]
+           "packages/soarm_lab/soarm_lab/approach_table.py", "packages/soarm/soarm/panel.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["packages/soarm/tests", "packages/soarm_lab/tests"]

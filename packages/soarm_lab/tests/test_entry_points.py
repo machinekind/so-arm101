@@ -4,7 +4,7 @@ import dataclasses
 from importlib import metadata
 
 import pytest
-from machinekind_twin_api.entry_points import DETECTORS, STRATEGIES
+from machinekind_twin_api.entry_points import STRATEGIES
 from machinekind_twin_api.strategy import Action, Observation, RunInfo
 
 import soarm
@@ -25,7 +25,6 @@ EXPECTED = {
         (STRATEGIES, "build"): "soarm_lab.strategies.build:BuildStrategy",
         (STRATEGIES, "calibrate_approach"):
             "soarm_lab.strategies.calibrate_approach:CalibrateApproachStrategy",
-        (DETECTORS, "charuco"): "soarm_lab.detectors.charuco:CharucoDetector",
         ("console_scripts", "soarm-lab"): "soarm_lab.cli:main",
     },
 }
@@ -86,13 +85,3 @@ def test_the_strategy_follows_the_strategy_protocol(name: str) -> None:
     assert set(action.target) == set(spec.joints) and not action.done
     strategy.stop("zatrzymana")
 
-
-def test_the_detector_entry_point_is_a_class_with_settings_and_detect() -> None:
-    """What the twin's loader checks (`machinekind_twin.detectors.load_detector`), without the twin."""
-    cls = own_entry_points("soarm-lab")[(DETECTORS, "charuco")].load()
-    assert isinstance(cls, type) and callable(getattr(cls, "detect", None))
-    assert dataclasses.is_dataclass(cls.settings)
-    kinds = {f.name: f.type for f in dataclasses.fields(cls.settings)}
-    assert set(kinds.values()) <= {"str", "int", "float", "bool"}
-    detector = cls(cls.settings())
-    assert detector.interval_s > 0 and detector.pixel_error_px > 0

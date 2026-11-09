@@ -2,7 +2,7 @@
 
 The arm approaches the corners of a ChArUco board lying flat on the table from several sides and at the
 heights where a held block is released on a tower's first, second and third level. At each stop the wrist
-camera, rigid to the jaws, measures where the corner lies against the TCP (`charuco`): no joint reading
+camera, rigid to the jaws, measures where the corner lies against the TCP (`tcp_to_corner`): no joint reading
 enters a sample. The corrections go to an approach table (`approach_table`) that `pick_place` reads.
 
     # configs/local.yaml of the twin
@@ -26,7 +26,7 @@ Phases (`CalibrationStatus.phase`):
 - `mount`: per level, approach a corner, look, turn the wrist roll alone half a turn and look again. The
   arm's other joints and their play stay put and the TCP's move round the roll axis is in its command, so
   what the two looks disagree on beyond that move is a constant error of the TCP in the camera's axes,
-  which turns with the hand (`charuco.flip_bias`). It is removed from every sample of that level;
+  which turns with the hand (`flip_bias`). It is removed from every sample of that level;
 - `samples`: per corner, level and repeat, one approach from each direction (`strategies.approach`):
   straight up, a joint move to the lead point at the carry height, a horizontal leg along the direction,
   down fast to `SLOW_ABOVE_M` over the release height and slowly the rest, then still, then `looks`
@@ -61,9 +61,9 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from machinekind_twin_api import boards
 from machinekind_twin_api.strategy import Action, Observation, RunInfo
 
-from .. import charuco
 from ..approach_table import DIRECTIONS, ApproachTable, Hit, now_text, write_atomic
 from ..blocks import block
 from ..kinematics import inverse
@@ -148,6 +148,43 @@ SELF_CONTACT = "ramie uderzyloby samo w siebie"
 JOINT_CHECK_DEG = 2.0
 #: A joint move steps each joint at most this share of its speed limit per tick.
 JOINT_MOVE_SHARE = 0.5
+
+
+# ------------------------------------------------------------------ the TCP against a corner
+# The camera is rigid to the jaws, so the TCP sits at a fixed point `p` in the camera's axes. solvePnP on the
+# board gives the board's pose in the camera, so corner `k` lies at `c = R_cb @ b_k + t_cb`, and `c - p` is
+# the vector from the TCP to the corner. The board's yaw in the base frame turns it into base axes.
+#
+# A constant error `d` of `p` in the camera's axes (a mount or focal length error) adds `rot2(psi) @ b` to the
+# horizontal result of a hand pointing straight down with closing heading `psi`, where `b` is constant in the
+# hand's frame. Two looks at one point with headings half a turn apart give `b` (`flip_bias`).
+def rot2(angle: float) -> np.ndarray:
+    """The 2D rotation by `angle` [rad]."""
+    c, s = math.cos(angle), math.sin(angle)
+    return np.array([[c, -s], [s, c]])
+
+
+def tcp_to_corner(view: boards.BoardView, corner_obj: np.ndarray, p_cam: np.ndarray, R_base_board: np.ndarray
+                  ) -> np.ndarray:
+    """The vector from the TCP to a board corner in base axes (3,) [m].
+
+    `corner_obj` is the corner in the board frame, `p_cam` the TCP in the camera's axes and `R_base_board`
+    the board's axes in the base frame."""
+    c = view.R_cb @ np.asarray(corner_obj, float) + view.t_cb
+    return R_base_board @ (view.R_cb.T @ (c - np.asarray(p_cam, float)))
+
+
+def remove_bias(raw_xy: np.ndarray, psi: float, bias: np.ndarray | Sequence[float]) -> np.ndarray:
+    """A horizontal measurement without the hand-frame bias `bias` seen at closing heading `psi` [rad]."""
+    return np.asarray(raw_xy, float)[:2] - rot2(psi) @ np.asarray(bias, float)
+
+
+def flip_bias(raw_a: np.ndarray, raw_b: np.ndarray, psi_a: float) -> tuple[np.ndarray, np.ndarray]:
+    """From one point measured at heading `psi_a` and half a turn from it: the hand-frame bias, and the
+    measurement without it (their mean)."""
+    a, b = np.asarray(raw_a, float)[:2], np.asarray(raw_b, float)[:2]
+    return rot2(-psi_a) @ (a - b) / 2, (a + b) / 2
+
 
 Measure = Callable[["CalibrateApproachStrategy", Observation, "Planned"], "np.ndarray | str"]
 OnStill = Callable[["CalibrateApproachStrategy", Observation, "Planned"], None]
@@ -360,7 +397,7 @@ class CalibrateApproachStrategy(TouchStrategy):
                  schedule: Sequence[ProbeSpec | tuple[Any, ...]] | None = None,
                  on_still: OnStill | None = None, measure: bool | Measure = True):
         cfg = settings if settings is not None else CalibrateApproachSettings()
-        self.board = charuco.BoardSpec(cfg.squares_x, cfg.squares_y, cfg.square_m, cfg.marker_m,
+        self.board = boards.BoardSpec(cfg.squares_x, cfg.squares_y, cfg.square_m, cfg.marker_m,
                                        cfg.dictionary, cfg.thickness_m)
         self.board.check()
         if not cfg.table_file.strip() and measure is not False:
@@ -436,7 +473,7 @@ class CalibrateApproachStrategy(TouchStrategy):
         self._sightings: dict[int, dict[int, np.ndarray]] = {}
         self._corners: dict[int, np.ndarray] = {}
         self._targets: list[int] = []
-        self._fit: charuco.BoardFit | None = None
+        self._fit: boards.BoardFit | None = None
         self._existing: ApproachTable | None = None
         self._queue: list[Planned] = []
         self._phase_total = 0
@@ -450,10 +487,10 @@ class CalibrateApproachStrategy(TouchStrategy):
         self._still_t0 = 0.0
         self._q_prev: np.ndarray | None = None
         self._looks: list[np.ndarray] = []
-        self._look_views: list[charuco.BoardView] = []
+        self._look_views: list[boards.BoardView] = []
         self._captures: set[float] = set()
         self._look_problem = ""
-        self._views: list[charuco.BoardPoints] = []
+        self._views: list[boards.BoardPoints] = []
         self._view_normals: list[np.ndarray] = []
         self._samples: list[dict[str, Any]] = []
         self._pairs: dict[int, dict[str, Any]] = {}
@@ -467,7 +504,7 @@ class CalibrateApproachStrategy(TouchStrategy):
         self._failed = ""
         self._joint_goal: np.ndarray | None = None
         self._t_start = 0.0
-        self._intrinsics: charuco.Intrinsics | None = None
+        self._intrinsics: boards.Intrinsics | None = None
         self._moving = False
         self._safe_q: np.ndarray | None = None
         self._hub_q: list[np.ndarray] | None = None
@@ -494,7 +531,7 @@ class CalibrateApproachStrategy(TouchStrategy):
         return self._planned
 
     @property
-    def fit(self) -> charuco.BoardFit | None:
+    def fit(self) -> boards.BoardFit | None:
         return self._fit
 
     @property
@@ -552,7 +589,7 @@ class CalibrateApproachStrategy(TouchStrategy):
                 raise RuntimeError(f"calibrate_approach: camera {cfg.wrist_camera!r} is not in robot.yaml "
                                    f"`cameras` ({', '.join(spec.cameras) or 'none'})")
             self._cv2, self._camera = cv2, camera
-            self._cv_board, self._detector = charuco.charuco_detector(self.board, cv2, min_markers=1)
+            self._cv_board, self._detector = boards.charuco_detector(self.board, cv2, min_markers=1)
             home = dict(spec.home, **({spec.gripper: self._gripper} if spec.gripper else {}))
             self._p_cam = (inverse(kin.camera(cfg.wrist_camera, home)) @ kin.tcp(home))[:3, 3].copy()
         if self._measure is not False:
@@ -582,7 +619,7 @@ class CalibrateApproachStrategy(TouchStrategy):
     def _wait_corners(self, obs: Observation) -> Action | None:
         cfg = self.calib
         for key, pose in obs.objects.items():
-            k = charuco.corner_of(self.prefix, str(key))
+            k = boards.corner_of(self.prefix, str(key))
             if k is None or k >= self.board.n_corners:
                 continue
             if str(pose.source) not in CORNER_SOURCES or not float(pose.age_s) <= cfg.corner_max_age_s:
@@ -619,7 +656,7 @@ class CalibrateApproachStrategy(TouchStrategy):
         self._corners = {k: np.mean(list(self._sightings[k].values()), axis=0) for k in sorted(enough)}
         self._targets = [k for k in sorted(enough) if k in wanted]
         ids = sorted(self._corners)
-        fit = charuco.fit_board(self.board.corner_xy(ids), np.array([self._corners[k][:2] for k in ids]))
+        fit = boards.fit_board(self.board.corner_xy(ids), np.array([self._corners[k][:2] for k in ids]))
         self._fit = fit
         st = self.calibration
         st.corners = {k: (float(p[0]), float(p[1]), float(p[2])) for k, p in self._corners.items()}
@@ -709,7 +746,7 @@ class CalibrateApproachStrategy(TouchStrategy):
             whole = np.asarray(seen(squares, d).reshape(-1, 4).all(axis=1), bool)
             found = seen(corners, d) & (near & whole[None, :]).any(axis=1)
             n = int(found.sum())
-            counts.append(n if n >= charuco.MARKERS_BELOW else n + 4 * int(whole.sum()))
+            counts.append(n if n >= boards.MARKERS_BELOW else n + 4 * int(whole.sum()))
         return float(min(counts))
 
     def _heading_for(self, xy: np.ndarray, release_z: float) -> tuple[float, dict[str, float]] | None:
@@ -840,7 +877,7 @@ class CalibrateApproachStrategy(TouchStrategy):
                 if best is not None:
                     options.append(best)
             # The best seen corner first, then each next one farthest from those chosen.
-            good = sorted((o for o in options if o[0] >= charuco.MIN_POINTS or self._measure is not True),
+            good = sorted((o for o in options if o[0] >= boards.MIN_POINTS or self._measure is not True),
                           key=lambda o: -o[0])
             chosen: list[tuple[float, int, Planned]] = good[:1]
             while len(chosen) < min(cfg.mount_pairs, len(good)):
@@ -1313,21 +1350,21 @@ class CalibrateApproachStrategy(TouchStrategy):
         dilate = max(1, round(MASK_DILATE_PX * w / WORK_WIDTH_PX))
         mask = jaw_mask(self.kin, joints, K, T, (h, w), cv2, dilate)
         if planned.kind == VIEW:
-            pts = charuco.board_points(image, self._cv_board, self._detector, cv2, mask=mask,
+            pts = boards.board_points(image, self._cv_board, self._detector, cv2, mask=mask,
                                        all_markers=True)
             if len(pts.obj) < MIN_VIEW_POINTS:
                 return f"za malo punktow tablicy ({len(pts.obj)})"
             self._views.append(pts)
             return np.zeros(3)
-        pts = charuco.board_points(image, self._cv_board, self._detector, cv2, mask=mask)
-        view = charuco.board_pose(pts, K, self._dist, cv2)
+        pts = boards.board_points(image, self._cv_board, self._detector, cv2, mask=mask)
+        view = boards.board_pose(pts, K, self._dist, cv2)
         if not view.ok:
             return view.problem
         self._look_views.append(view)
         corner = self.board.corner_obj([planned.corner])[0] if planned.corner >= 0 else None
         if corner is None:
             return "brak rogu"
-        return charuco.tcp_to_corner(view, corner, self._p_cam, self._fit.R_base_board)
+        return tcp_to_corner(view, corner, self._p_cam, self._fit.R_base_board)
 
     def _finish_approach(self, raw: np.ndarray | None) -> Action | None:
         planned = self._planned
@@ -1371,7 +1408,7 @@ class CalibrateApproachStrategy(TouchStrategy):
         d[2] += tcp[2] - corner_z
         if bias is not None:
             psi = heading(self.kin, self.kin.from_q(self.q_cmd))
-            d[:2] = charuco.remove_bias(d[:2], psi, bias)
+            d[:2] = remove_bias(d[:2], psi, bias)
         return d
 
     def _record(self, planned: Planned, raw: np.ndarray) -> None:
@@ -1391,7 +1428,7 @@ class CalibrateApproachStrategy(TouchStrategy):
             # commanded TCP round the roll axis, so that move counts too.
             bias = self._bias.get(planned.level, np.zeros(2))
             missing = np.asarray(raw, float)[:2] + self.tcp_cmd[:2] - planned.xy
-            left = charuco.remove_bias(missing, psi, bias)
+            left = remove_bias(missing, psi, bias)
             error = float(np.linalg.norm(left))
             self._verify.append({"corner": planned.corner, "level": planned.level,
                                  "direction": planned.direction, "xy_m": planned.xy, "error_m": error,
@@ -1417,7 +1454,7 @@ class CalibrateApproachStrategy(TouchStrategy):
         assert cv2 is not None and self._camera is not None and self._size is not None
         W, H = self._size
         nominal = (H / 2) / math.tan(math.radians(self._camera.fovy_deg) / 2)
-        result = charuco.calibrate(self._views, (W, H), nominal, cv2)
+        result = boards.calibrate(self._views, (W, H), nominal, cv2)
         st = self.calibration
         st.k_rms_px, st.k_views, st.focal_px = result.rms_px, result.views, float(result.K[0, 0])
         self._intrinsics = result
@@ -1436,7 +1473,7 @@ class CalibrateApproachStrategy(TouchStrategy):
             if MOUNT_A not in got or MOUNT_B not in got:
                 continue
             a, b = got[MOUNT_A], got[MOUNT_B]
-            Ra, Rb = charuco.rot2(a["psi"]), charuco.rot2(b["psi"])
+            Ra, Rb = rot2(a["psi"]), rot2(b["psi"])
             M = Ra - Rb
             if abs(float(np.linalg.det(M))) < 1e-3:
                 continue
