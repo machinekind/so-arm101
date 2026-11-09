@@ -31,15 +31,16 @@ from machinekind_twin import scene as twin_scene  # noqa: E402
 from machinekind_twin.clock import VirtualClock  # noqa: E402
 from machinekind_twin.kinematics import inverse  # noqa: E402
 from machinekind_twin.runtime import Twin  # noqa: E402
+from machinekind_twin.stand_errors import Backlash  # noqa: E402
 from machinekind_twin.strategies import load_strategy  # noqa: E402
 from machinekind_twin.strategy import ObjectPose, StrategyRunner  # noqa: E402
 from machinekind_twin.workspace import Workspace  # noqa: E402
+from twin_stand import play_for  # noqa: E402
 
 from soarm_lab.blocks import block  # noqa: E402
 from soarm_lab.campaign import Run, jsonable, record, runs_per_scenario  # noqa: E402
 from soarm_lab.kinematics import RobotKinematics  # noqa: E402
 from soarm_lab.robot import load_robot  # noqa: E402
-from soarm_lab.stand_errors import Backlash, play_for  # noqa: E402
 from soarm_lab.strategies.wrist import WristGraspStrategy  # noqa: E402
 
 CLOCK_STEP = 0.01

@@ -42,9 +42,9 @@ dev = [
 ]
 torch = [{ name = "soarm-lab", extras = ["torch"], editable = "packages/soarm_lab" }]
 twin = [
-    { name = "machinekind-twin", git = "https://github.com/machinekind/twin.git?rev=44abb51e1c315d4ebdb6be53439b0d741e32cd76" },
-    { name = "machinekind-twin-cube", git = "https://github.com/machinekind/twin.git?subdirectory=examples%2Fdetectors%2Fcube&rev=44abb51e1c315d4ebdb6be53439b0d741e32cd76" },
-    { name = "machinekind-twin-llm", git = "https://github.com/machinekind/twin.git?subdirectory=packages%2Fmachinekind_twin_llm&rev=44abb51e1c315d4ebdb6be53439b0d741e32cd76" },
+    { name = "machinekind-twin", git = "https://github.com/machinekind/twin.git?rev=b1d606d4646c0df7146fb2d22656be00ec6fcc46" },
+    { name = "machinekind-twin-cube", git = "https://github.com/machinekind/twin.git?subdirectory=examples%2Fdetectors%2Fcube&rev=b1d606d4646c0df7146fb2d22656be00ec6fcc46" },
+    { name = "machinekind-twin-llm", git = "https://github.com/machinekind/twin.git?subdirectory=packages%2Fmachinekind_twin_llm&rev=b1d606d4646c0df7146fb2d22656be00ec6fcc46" },
 ]
 
 [[package]]
@@ -717,10 +717,8 @@ dependencies = [
     { name = "trimesh", marker = "python_full_version >= '3.11' and python_full_version < '3.14'" },
     { name = "typing-extensions", marker = "python_full_version >= '3.11' and python_full_version < '3.14'" },
     { name = "tyro", marker = "python_full_version >= '3.11' and python_full_version < '3.14'" },
-    { name = "viser", version = "0.2.23", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version == '3.11.*' and extra == 'extra-9-soarm-lab-dream') or (extra == 'extra-9-soarm-lab-dream' and extra == 'extra-9-soarm-lab-train')" },
-    { name = "viser", version = "1.1.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and python_full_version < '3.14' and extra == 'extra-9-soarm-lab-dream') or (python_full_version < '3.12' and extra == 'extra-9-soarm-lab-dream' and extra == 'extra-9-soarm-lab-train') or (python_full_version >= '3.14' and extra == 'extra-9-soarm-lab-dream' and extra == 'extra-9-soarm-lab-train')" },
-    { name = "websockets", version = "16.1.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and python_full_version < '3.14' and extra == 'extra-9-soarm-lab-dream') or (python_full_version < '3.12' and extra == 'extra-9-soarm-lab-dream' and extra == 'extra-9-soarm-lab-train') or (python_full_version >= '3.14' and extra == 'extra-9-soarm-lab-dream' and extra == 'extra-9-soarm-lab-train')" },
-    { name = "websockets", version = "17.2", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version == '3.11.*' and extra == 'extra-9-soarm-lab-dream') or (extra == 'extra-9-soarm-lab-dream' and extra == 'extra-9-soarm-lab-train')" },
+    { name = "viser", marker = "python_full_version >= '3.11' and python_full_version < '3.14'" },
+    { name = "websockets", version = "17.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11' and python_full_version < '3.14'" },
     { name = "yourdfpy", marker = "python_full_version >= '3.11' and python_full_version < '3.14'" },
 ]
 wheels = [
@@ -733,8 +731,7 @@ version = "1.0.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy", marker = "python_full_version >= '3.11' and python_full_version < '3.14'" },
-    { name = "websockets", version = "16.1.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and python_full_version < '3.14' and extra == 'extra-9-soarm-lab-dream') or (python_full_version < '3.12' and extra == 'extra-9-soarm-lab-dream' and extra == 'extra-9-soarm-lab-train') or (python_full_version >= '3.14' and extra == 'extra-9-soarm-lab-dream' and extra == 'extra-9-soarm-lab-train')" },
-    { name = "websockets", version = "17.2", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version == '3.11.*' and extra == 'extra-9-soarm-lab-dream') or (extra == 'extra-9-soarm-lab-dream' and extra == 'extra-9-soarm-lab-train')" },
+    { name = "websockets", version = "17.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11' and python_full_version < '3.14'" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/1d/ed/caf212b8d88b2079d257a78792c538c64d56358caea8588c1771739df736/dreamlabs_client-1.0.3-py3-none-any.whl", hash = "sha256:2a2afaaead696a5f76de5fb3a671dbf7ac85fa69c3311deae40f698f621af5c2", size = 458969, upload-time = "2026-10-20T04:45:46.705Z" },
@@ -1646,7 +1643,7 @@ name = "lazy-loader"
 version = "0.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "packaging", marker = "python_full_version == '3.11.*'" },
+    { name = "packaging", marker = "python_full_version >= '3.11' and python_full_version < '3.14'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/19/8c/0f2ff2a8b7513e68871a74740c17a504b0488c679b379e6445ebb7bd78dc/lazy_loader-0.6.tar.gz", hash = "sha256:2f4b7824d6401958639008a0cae20c776b61dff619accd6890693e2de8260167", size = 18438, upload-time = "2026-09-21T21:31:32.982Z" }
 wheels = [
@@ -1858,7 +1855,7 @@ wheels = [
 [[package]]
 name = "machinekind-twin"
 version = "0.1.0"
-source = { git = "https://github.com/machinekind/twin.git?rev=44abb51e1c315d4ebdb6be53439b0d741e32cd76#44abb51e1c315d4ebdb6be53439b0d741e32cd76" }
+source = { git = "https://github.com/machinekind/twin.git?rev=b1d606d4646c0df7146fb2d22656be00ec6fcc46#b1d606d4646c0df7146fb2d22656be00ec6fcc46" }
 dependencies = [
     { name = "machinekind-twin-api" },
     { name = "numpy" },
@@ -1869,8 +1866,8 @@ dependencies = [
 
 [[package]]
 name = "machinekind-twin-api"
-version = "0.1.4"
-source = { git = "https://github.com/machinekind/twin.git?subdirectory=packages%2Fmachinekind_twin_api&rev=44abb51e1c315d4ebdb6be53439b0d741e32cd76#44abb51e1c315d4ebdb6be53439b0d741e32cd76" }
+version = "0.1.6"
+source = { git = "https://github.com/machinekind/twin.git?subdirectory=packages%2Fmachinekind_twin_api&rev=b1d606d4646c0df7146fb2d22656be00ec6fcc46#b1d606d4646c0df7146fb2d22656be00ec6fcc46" }
 dependencies = [
     { name = "numpy" },
 ]
@@ -1878,7 +1875,7 @@ dependencies = [
 [[package]]
 name = "machinekind-twin-cube"
 version = "0.1.0"
-source = { git = "https://github.com/machinekind/twin.git?subdirectory=examples%2Fdetectors%2Fcube&rev=44abb51e1c315d4ebdb6be53439b0d741e32cd76#44abb51e1c315d4ebdb6be53439b0d741e32cd76" }
+source = { git = "https://github.com/machinekind/twin.git?subdirectory=examples%2Fdetectors%2Fcube&rev=b1d606d4646c0df7146fb2d22656be00ec6fcc46#b1d606d4646c0df7146fb2d22656be00ec6fcc46" }
 dependencies = [
     { name = "machinekind-twin-api" },
     { name = "numpy" },
@@ -1888,7 +1885,7 @@ dependencies = [
 [[package]]
 name = "machinekind-twin-llm"
 version = "0.1.0"
-source = { git = "https://github.com/machinekind/twin.git?subdirectory=packages%2Fmachinekind_twin_llm&rev=44abb51e1c315d4ebdb6be53439b0d741e32cd76#44abb51e1c315d4ebdb6be53439b0d741e32cd76" }
+source = { git = "https://github.com/machinekind/twin.git?subdirectory=packages%2Fmachinekind_twin_llm&rev=b1d606d4646c0df7146fb2d22656be00ec6fcc46#b1d606d4646c0df7146fb2d22656be00ec6fcc46" }
 dependencies = [
     { name = "machinekind-twin-api" },
     { name = "numpy" },
@@ -2541,8 +2538,8 @@ dependencies = [
     { name = "glfw" },
     { name = "numpy" },
     { name = "pyopengl" },
-    { name = "websockets", version = "16.1.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (python_full_version >= '3.12' and python_full_version < '3.14' and extra == 'extra-9-soarm-lab-dream') or (python_full_version == '3.11.*' and extra == 'extra-9-soarm-lab-dream' and extra == 'extra-9-soarm-lab-train') or (python_full_version >= '3.14' and extra == 'extra-9-soarm-lab-dream' and extra == 'extra-9-soarm-lab-train')" },
-    { name = "websockets", version = "17.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*' or python_full_version >= '3.14' or (python_full_version >= '3.12' and extra != 'extra-9-soarm-lab-dream') or (python_full_version < '3.11' and extra == 'extra-9-soarm-lab-dream' and extra == 'extra-9-soarm-lab-train') or (python_full_version >= '3.12' and extra == 'extra-9-soarm-lab-dream' and extra == 'extra-9-soarm-lab-train')" },
+    { name = "websockets", version = "16.1.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-9-soarm-lab-dream' and extra == 'extra-9-soarm-lab-train')" },
+    { name = "websockets", version = "17.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11' or (extra == 'extra-9-soarm-lab-dream' and extra == 'extra-9-soarm-lab-train')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/6c/32/23fe5a5818255c7e05124c4fa250589e978772677ba150cd5fac3ed65cdf/mujoco-3.14.0.tar.gz", hash = "sha256:f75a0731f6fd829387a1ba9c9a7891efec429000517a6c3f9af98f41735d3b6f", size = 6963412, upload-time = "2026-09-22T17:31:49.787Z" }
 wheels = [
@@ -3241,7 +3238,7 @@ name = "plyfile"
 version = "1.1.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", marker = "python_full_version == '3.11.*'" },
+    { name = "numpy", marker = "python_full_version >= '3.11' and python_full_version < '3.14'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/de/6b/986844e4b160718f0175a0f6650f9e0039e0bfbf4ad250b0903616af34d5/plyfile-1.1.5.tar.gz", hash = "sha256:c62b505062076d72ba67845066579301553baaa93c7d23d9ac1f43495158339c", size = 36237, upload-time = "2026-07-28T08:23:13.181Z" }
 wheels = [
@@ -4003,14 +4000,16 @@ name = "scikit-image"
 version = "0.26.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "imageio", marker = "python_full_version == '3.11.*'" },
-    { name = "lazy-loader", marker = "python_full_version == '3.11.*'" },
-    { name = "networkx", version = "3.6.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "numpy", marker = "python_full_version == '3.11.*'" },
-    { name = "packaging", marker = "python_full_version == '3.11.*'" },
-    { name = "pillow", marker = "python_full_version == '3.11.*'" },
-    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "tifffile", marker = "python_full_version == '3.11.*'" },
+    { name = "imageio", marker = "python_full_version >= '3.11' and python_full_version < '3.14'" },
+    { name = "lazy-loader", marker = "python_full_version >= '3.11' and python_full_version < '3.14'" },
+    { name = "networkx", version = "3.6.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version == '3.11.*' and extra == 'extra-9-soarm-lab-dream') or (extra == 'extra-9-soarm-lab-dream' and extra == 'extra-9-soarm-lab-train')" },
+    { name = "networkx", version = "3.7", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and python_full_version < '3.14' and extra == 'extra-9-soarm-lab-dream') or (python_full_version < '3.12' and extra == 'extra-9-soarm-lab-dream' and extra == 'extra-9-soarm-lab-train') or (python_full_version >= '3.14' and extra == 'extra-9-soarm-lab-dream' and extra == 'extra-9-soarm-lab-train')" },
+    { name = "numpy", marker = "python_full_version >= '3.11' and python_full_version < '3.14'" },
+    { name = "packaging", marker = "python_full_version >= '3.11' and python_full_version < '3.14'" },
+    { name = "pillow", marker = "python_full_version >= '3.11' and python_full_version < '3.14'" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version == '3.11.*' and extra == 'extra-9-soarm-lab-dream') or (extra == 'extra-9-soarm-lab-dream' and extra == 'extra-9-soarm-lab-train')" },
+    { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and python_full_version < '3.14' and extra == 'extra-9-soarm-lab-dream') or (python_full_version < '3.12' and extra == 'extra-9-soarm-lab-dream' and extra == 'extra-9-soarm-lab-train') or (python_full_version >= '3.14' and extra == 'extra-9-soarm-lab-dream' and extra == 'extra-9-soarm-lab-train')" },
+    { name = "tifffile", marker = "python_full_version >= '3.11' and python_full_version < '3.14'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a1/b4/2528bb43c67d48053a7a649a9666432dc307d66ba02e3a6d5c40f46655df/scikit_image-0.26.0.tar.gz", hash = "sha256:f5f970ab04efad85c24714321fcc91613fcb64ef2a892a13167df2f3e59199fa", size = 22729739, upload-time = "2025-12-20T17:12:21.824Z" }
 wheels = [
@@ -4414,7 +4413,7 @@ panel = [
 [package.metadata]
 requires-dist = [
     { name = "lerobot", extras = ["feetech"], marker = "python_full_version >= '3.12' and extra == 'lerobot'", specifier = ">=0.6,<0.7" },
-    { name = "machinekind-twin-api", git = "https://github.com/machinekind/twin.git?subdirectory=packages%2Fmachinekind_twin_api&rev=44abb51e1c315d4ebdb6be53439b0d741e32cd76" },
+    { name = "machinekind-twin-api", git = "https://github.com/machinekind/twin.git?subdirectory=packages%2Fmachinekind_twin_api&rev=b1d606d4646c0df7146fb2d22656be00ec6fcc46" },
     { name = "pyserial", marker = "extra == 'feetech'", specifier = ">=3.5" },
     { name = "pyserial", marker = "extra == 'panel'", specifier = ">=3.5" },
     { name = "pyyaml", marker = "extra == 'panel'", specifier = ">=6" },
@@ -4461,7 +4460,7 @@ requires-dist = [
     { name = "hydra-core", marker = "extra == 'train'", specifier = ">=1.3,<1.4" },
     { name = "jax", marker = "extra == 'train'", specifier = ">=0.6" },
     { name = "jax", extras = ["cuda12"], marker = "sys_platform == 'linux' and extra == 'train'", specifier = ">=0.6" },
-    { name = "machinekind-twin-api", git = "https://github.com/machinekind/twin.git?subdirectory=packages%2Fmachinekind_twin_api&rev=44abb51e1c315d4ebdb6be53439b0d741e32cd76" },
+    { name = "machinekind-twin-api", git = "https://github.com/machinekind/twin.git?subdirectory=packages%2Fmachinekind_twin_api&rev=b1d606d4646c0df7146fb2d22656be00ec6fcc46" },
     { name = "mujoco", specifier = ">=3.14,<3.15" },
     { name = "mujoco-warp", marker = "extra == 'train'", specifier = ">=3.14,<3.15" },
     { name = "numpy", specifier = ">=1.24" },
@@ -4517,7 +4516,7 @@ name = "tifffile"
 version = "2026.3.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", marker = "python_full_version == '3.11.*'" },
+    { name = "numpy", marker = "python_full_version >= '3.11' and python_full_version < '3.14'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/c5/cb/2f6d79c7576e22c116352a801f4c3c8ace5957e9aced862012430b62e14f/tifffile-2026.3.3.tar.gz", hash = "sha256:d9a1266bed6f2ee1dd0abde2018a38b4f8b2935cb843df381d70ac4eac5458b7", size = 388745, upload-time = "2026-03-03T19:14:38.134Z" }
 wheels = [
@@ -4932,53 +4931,27 @@ wheels = [
 name = "viser"
 version = "0.2.23"
 source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "python_full_version == '3.11.*'",
-]
 dependencies = [
-    { name = "imageio", marker = "python_full_version == '3.11.*'" },
-    { name = "msgspec", marker = "python_full_version == '3.11.*'" },
-    { name = "nodeenv", marker = "python_full_version == '3.11.*'" },
-    { name = "numpy", marker = "python_full_version == '3.11.*'" },
-    { name = "plyfile", marker = "python_full_version == '3.11.*'" },
-    { name = "psutil", marker = "python_full_version == '3.11.*'" },
-    { name = "rich", version = "15.0.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "scikit-image", marker = "python_full_version == '3.11.*'" },
-    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "tqdm", marker = "python_full_version == '3.11.*'" },
-    { name = "trimesh", marker = "python_full_version == '3.11.*'" },
-    { name = "tyro", marker = "python_full_version == '3.11.*'" },
-    { name = "websockets", version = "17.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "yourdfpy", marker = "python_full_version == '3.11.*'" },
+    { name = "imageio", marker = "python_full_version >= '3.11' and python_full_version < '3.14'" },
+    { name = "msgspec", marker = "python_full_version >= '3.11' and python_full_version < '3.14'" },
+    { name = "nodeenv", marker = "python_full_version >= '3.11' and python_full_version < '3.14'" },
+    { name = "numpy", marker = "python_full_version >= '3.11' and python_full_version < '3.14'" },
+    { name = "plyfile", marker = "python_full_version >= '3.11' and python_full_version < '3.14'" },
+    { name = "psutil", marker = "python_full_version >= '3.11' and python_full_version < '3.14'" },
+    { name = "rich", version = "14.3.4", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and python_full_version < '3.14' and extra == 'extra-9-soarm-lab-dream') or (python_full_version < '3.12' and extra == 'extra-9-soarm-lab-dream' and extra == 'extra-9-soarm-lab-train') or (python_full_version >= '3.14' and extra == 'extra-9-soarm-lab-dream' and extra == 'extra-9-soarm-lab-train')" },
+    { name = "rich", version = "15.0.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version == '3.11.*' and extra == 'extra-9-soarm-lab-dream') or (extra == 'extra-9-soarm-lab-dream' and extra == 'extra-9-soarm-lab-train')" },
+    { name = "scikit-image", marker = "python_full_version >= '3.11' and python_full_version < '3.14'" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version == '3.11.*' and extra == 'extra-9-soarm-lab-dream') or (extra == 'extra-9-soarm-lab-dream' and extra == 'extra-9-soarm-lab-train')" },
+    { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and python_full_version < '3.14' and extra == 'extra-9-soarm-lab-dream') or (python_full_version < '3.12' and extra == 'extra-9-soarm-lab-dream' and extra == 'extra-9-soarm-lab-train') or (python_full_version >= '3.14' and extra == 'extra-9-soarm-lab-dream' and extra == 'extra-9-soarm-lab-train')" },
+    { name = "tqdm", marker = "python_full_version >= '3.11' and python_full_version < '3.14'" },
+    { name = "trimesh", marker = "python_full_version >= '3.11' and python_full_version < '3.14'" },
+    { name = "tyro", marker = "python_full_version >= '3.11' and python_full_version < '3.14'" },
+    { name = "websockets", version = "17.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11' and python_full_version < '3.14'" },
+    { name = "yourdfpy", marker = "python_full_version >= '3.11' and python_full_version < '3.14'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/bf/b5/98660e835b63640008aa2c26a496477168e528b7726e9d2e3c291b859c42/viser-0.2.23.tar.gz", hash = "sha256:07610453da9f01c37eebb03f9611d3a3b18b20e302ca6a00fac36b8fa9bdad57", size = 28829986, upload-time = "2025-01-30T02:33:44.051Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/59/0f/1bc122f37a7483b3bfce9097327632203f74648ad94f200e2b0226a7ae8e/viser-0.2.23-py3-none-any.whl", hash = "sha256:36e3e60ef61024fec4404857897c1b301695b29350a17451c2ca769e6b26de00", size = 28887713, upload-time = "2025-01-30T02:33:38.602Z" },
-]
-
-[[package]]
-name = "viser"
-version = "1.1.1"
-source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "python_full_version == '3.13.*'",
-    "python_full_version == '3.12.*'",
-]
-dependencies = [
-    { name = "imageio", marker = "python_full_version >= '3.12' and python_full_version < '3.14'" },
-    { name = "msgspec", marker = "python_full_version >= '3.12' and python_full_version < '3.14'" },
-    { name = "numpy", marker = "python_full_version >= '3.12' and python_full_version < '3.14'" },
-    { name = "requests", marker = "python_full_version >= '3.12' and python_full_version < '3.14'" },
-    { name = "rich", version = "14.3.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' and python_full_version < '3.14'" },
-    { name = "tqdm", marker = "python_full_version >= '3.12' and python_full_version < '3.14'" },
-    { name = "trimesh", marker = "python_full_version >= '3.12' and python_full_version < '3.14'" },
-    { name = "typing-extensions", marker = "python_full_version >= '3.12' and python_full_version < '3.14'" },
-    { name = "websockets", version = "16.1.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' and python_full_version < '3.14'" },
-    { name = "zstandard", marker = "python_full_version >= '3.12' and python_full_version < '3.14'" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/6a/e5/493ae325f825e9853c2be91b31a35ef8ae54aa229b5082fc8b2372314425/viser-1.1.1.tar.gz", hash = "sha256:0a7ba97dab32b8a7106a2dd216fe1373f2e66e17529b5b43502d33d9b9ac9352", size = 3462064, upload-time = "2026-09-15T08:02:05.297Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/70/6f/6a07b4c90451d6dcd40e1d6e5264f93ff4a03d92c071b1e8a06ec8da5004/viser-1.1.1-py3-none-any.whl", hash = "sha256:f528877553c56e1c01d43b861a1434920a2e7ba4fdc7b2e7ff03721e3c3f5b3d", size = 3623619, upload-time = "2026-09-15T08:02:03.635Z" },
 ]
 
 [[package]]
@@ -5047,8 +5020,6 @@ source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version < '3.11' and sys_platform == 'linux' and extra != 'extra-9-soarm-lab-dream' and extra == 'extra-9-soarm-lab-train'",
     "python_full_version < '3.11' and sys_platform != 'linux' and extra != 'extra-9-soarm-lab-dream' and extra == 'extra-9-soarm-lab-train'",
-    "python_full_version == '3.13.*' and extra == 'extra-9-soarm-lab-dream' and extra != 'extra-9-soarm-lab-train'",
-    "python_full_version == '3.12.*' and extra == 'extra-9-soarm-lab-dream' and extra != 'extra-9-soarm-lab-train'",
     "python_full_version < '3.11' and extra == 'extra-9-soarm-lab-dream' and extra != 'extra-9-soarm-lab-train'",
     "python_full_version < '3.11' and extra != 'extra-9-soarm-lab-dream' and extra != 'extra-9-soarm-lab-train'",
 ]
@@ -5178,6 +5149,8 @@ resolution-markers = [
     "python_full_version == '3.11.*' and sys_platform == 'linux' and extra != 'extra-9-soarm-lab-dream' and extra == 'extra-9-soarm-lab-train'",
     "python_full_version == '3.11.*' and sys_platform != 'linux' and extra != 'extra-9-soarm-lab-dream' and extra == 'extra-9-soarm-lab-train'",
     "python_full_version >= '3.14' and extra == 'extra-9-soarm-lab-dream' and extra != 'extra-9-soarm-lab-train'",
+    "python_full_version == '3.13.*' and extra == 'extra-9-soarm-lab-dream' and extra != 'extra-9-soarm-lab-train'",
+    "python_full_version == '3.12.*' and extra == 'extra-9-soarm-lab-dream' and extra != 'extra-9-soarm-lab-train'",
     "python_full_version == '3.11.*' and extra == 'extra-9-soarm-lab-dream' and extra != 'extra-9-soarm-lab-train'",
     "python_full_version >= '3.12' and extra != 'extra-9-soarm-lab-dream' and extra != 'extra-9-soarm-lab-train'",
     "python_full_version == '3.11.*' and extra != 'extra-9-soarm-lab-dream' and extra != 'extra-9-soarm-lab-train'",

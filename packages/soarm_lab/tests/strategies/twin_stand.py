@@ -12,7 +12,7 @@ the arm's joints have:
   near (0.2, 0) and turned by up to 10 degrees, as `calib.intrinsics.simulate` lays out its board;
 - `shift_wrist_camera` moves the rendered wrist camera by `mount_m` in a seeded direction, so the strategy's
   camera model is off by that much;
-- `play()` is `stand_errors.play_for(play_m)`, for `Backlash`;
+- `play()` is `play_for(play_m)`, for the twin's `stand_errors.Backlash`;
 - `block_error(half_height)` is the same error for the blocks of the pick_place and build tests, whose fake
   cameras see each block's top.
 
@@ -43,19 +43,22 @@ from machinekind_twin.detection import DetectorRunner, Perception
 from machinekind_twin.detectors import load_detector
 from machinekind_twin.kinematics import inverse
 from machinekind_twin.runtime import Twin
+from machinekind_twin.stand_errors import Backlash, CameraPoseError, tilted, uniform
+from machinekind_twin.stand_errors import play_for as twin_play_for
 from machinekind_twin.strategy import StrategyRunner
 from machinekind_twin.workspace import CameraRecord, Workspace
+from machinekind_twin_api.boards import BoardSpec
 
 from soarm_lab.approach_table import ApproachTable
-from soarm_lab.charuco import BoardSpec
-from soarm_lab.kinematics import pose
-from soarm_lab.stand_errors import Backlash, CameraPoseError, play_for, tilted, uniform
+from soarm_lab.kinematics import RobotKinematics, pose
+from soarm_lab.robot import load_robot
 from soarm_lab.strategies.calibrate_approach import (
     CORNERS,
     CalibrateApproachSettings,
     CalibrateApproachStrategy,
     Planned,
 )
+from soarm_lab.strategies.grasp import top_down
 
 CAMERA = "kamera1"
 SIZE = (1280, 720)
@@ -82,6 +85,8 @@ DETECT_EVERY_S = 0.5
 TABLES = "tables"
 #: A calibration's simulated time limit [s].
 CALIBRATION_S = 3600.0
+#: The arm joints that place the hand, and so carry play.
+PLAY_JOINTS = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex")
 
 
 @dataclass
@@ -89,6 +94,20 @@ class Clock:
     """Simulated time shared by the runner, the detector and the trackers [s]."""
 
     t: float = 0.0
+
+
+@functools.lru_cache(maxsize=1)
+def _kinematics() -> RobotKinematics:
+    return RobotKinematics(load_robot())
+
+
+def play_for(metres: float, xy: tuple[float, float] = (0.2, 0.0)) -> dict[str, float]:
+    """Play per joint [deg] that moves the hand `metres` across its whole width, at a grasp over `xy`."""
+    kin = _kinematics()
+    home = dict(kin.spec.home, gripper=0.0)
+    sol = kin.ik(np.array([*xy, 0.02]), top_down(0.0), seed=home)
+    assert sol.ok
+    return twin_play_for(metres, kin.tcp, sol.joints, PLAY_JOINTS)
 
 
 def look_at(eye: np.ndarray, target: np.ndarray) -> np.ndarray:
@@ -128,7 +147,7 @@ class Stand:
             a = float(rng.uniform(0.0, 2 * math.pi))
             self.error = uniform(self.K, SIZE, T_true, camera_m * np.array([math.cos(a), math.sin(a)]))
         elif camera == "tilted" and camera_m:
-            self.error = tilted(self.K, SIZE, T_true, camera_m, rng)
+            self.error = tilted(self.K, SIZE, T_true, camera_m, rng, LOOK_AT)
         elif camera in ("none", "uniform", "tilted"):
             self.error = CameraPoseError(self.K, SIZE, T_true, T_true.copy())
         else:

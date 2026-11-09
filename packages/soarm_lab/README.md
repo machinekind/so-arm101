@@ -166,7 +166,7 @@ build:
   planner_cli: codex         # or claude
   judge: none                # and every other pick_place setting, for each step
   wrist_camera: wrist
-charuco:                     # the detector: start it in the Detectors tab
+charuco:                     # the twin's detector: start it in the Detectors tab
   square_m: 0.045            # as measured on the print
   marker_m: 0.035
 calibrate_approach:
@@ -210,7 +210,7 @@ See [policy settings](soarm_lab/strategies/policy.py),
 [pick_place settings](soarm_lab/strategies/pick_place.py),
 [build settings](soarm_lab/strategies/build.py),
 [calibrate_approach settings](soarm_lab/strategies/calibrate_approach.py),
-[the charuco detector](soarm_lab/detectors/charuco.py) and
+[the twin's charuco detector](https://github.com/machinekind/twin/blob/main/docs/DETECTORS.md#charuco-detector) and
 [conventions](../../docs/conventions.md) for the full interfaces.
 
 ## Jev in the touch loop
@@ -762,8 +762,8 @@ height and side. It holds the fixed camera's error, sag and gear play together.
 
 ### On the stand
 
-1. Print the board: `uv run soarm-lab charuco-board --out board.png`, at 100 % scale. Measure one
-   square and one marker with a ruler; the defaults are 45 mm and 35 mm.
+1. Print the board from the twin: `uv run twin board --layout 3x5 --square-mm 45 --out board.png`,
+   at 100 % scale. Measure one square and one marker with a ruler; the defaults are 45 mm and 35 mm.
 2. Tape the board flat about 20 cm in front of the arm, long side across the arm, where the towers go.
    Clear all blocks off the table.
 3. In `configs/local.yaml` set the measured sizes under both `charuco:` and `calibrate_approach:`, and
@@ -771,7 +771,8 @@ height and side. It holds the fixed camera's error, sag and gear play together.
    Under `pick_place:` and `build:` set `approach_file` to the same file.
 4. Reinstall soarm-lab in the twin's environment and start the twin. Turn the arm aside, so `kamera1`
    sees the whole board.
-5. In the Detectors tab, start `charuco`. Eight points `charuco c0` to `charuco c7` appear on the board.
+5. In the Detectors tab, start `charuco` (the twin brings it). Eight points `charuco c0` to `charuco c7`
+   appear on the board.
 6. In the Strategies tab, start `calibrate_approach` and leave the table alone. It takes about 25 min:
    tilted looks for the wrist camera's lens (about 2 min), wrist turns that measure the camera's mount
    (about 2 min), 4 sides x 3 heights x 2 repeats per corner (about 18 min) and a self-check (about

@@ -10,9 +10,11 @@ The twin and `soarm_lab` meet only through data and entry points:
 
 - the twin exports the measured station as a folder (`twin export`): `scene.xml`, `assets/`, `station.json`;
 - the twin finds the lab's strategies under the `machinekind_twin.strategies` entry point and runs them through its `StrategyRunner`;
-- the twin finds the lab's detectors under the `machinekind_twin.detectors` entry point and places what they see with its own camera models.
+- the twin's detectors report what the cameras see, and the twin places it with its own camera models.
 
-The contracts are a base dependency of both packages, `machinekind-twin-api>=0.1.4,<0.2`. They need only numpy.
+The contracts are a base dependency of both packages. `soarm` needs `machinekind-twin-api>=0.1.4,<0.2`.
+`soarm_lab` needs `>=0.1.6,<0.2`, which brings the ChArUco board module `machinekind_twin_api.boards`.
+The contracts need only numpy.
 The twin is a dev dependency. Tests that run a package through the twin's loaders, factory and runner are
 marked `twin` and skip when it is not installed. A test that imports only `machinekind_twin_api` needs no marker.
 Each package's `tests/test_dependency_rule.py` checks every import in the package's source, also one under
@@ -113,10 +115,10 @@ The plugin contracts are the package `machinekind-twin-api` (see the root README
 - `machinekind_twin_api.entry_points` names the entry point groups: `ROBOTS`, `BACKENDS`, `STRATEGIES` and `DETECTORS`.
   `packages/soarm/pyproject.toml` registers the robot folder under `machinekind_twin.robots` (`ROBOTS`)
   and the backend factories under `machinekind_twin.backends` (`BACKENDS`).
-  `packages/soarm_lab/pyproject.toml` registers one detector under `machinekind_twin.detectors` (`DETECTORS`):
-  `charuco`, `soarm_lab.detectors.charuco.CharucoDetector`, which reports each corner of a ChArUco board as a pixel
-  labelled `charuco c<id>`. The twin places what a detector sees in the base frame, through the same calibrated
-  cameras as the blocks, and hands strategies `Observation.objects`. The detector imports OpenCV only in `start`.
+  The lab registers no detector. `calibrate_approach` reads the twin's built-in `charuco` detector, which reports
+  each corner of a ChArUco board as a pixel labelled `charuco c<id>`. The twin places what a detector sees in the
+  base frame, through the same calibrated cameras as the blocks, and hands strategies `Observation.objects`. The
+  board's geometry, detection and the wrist camera's intrinsics come from `machinekind_twin_api.boards`.
 - The strategy contract is `machinekind_twin_api.strategy`: `Strategy`, `RunInfo`, `Observation`, `ObjectPose` and `Action`.
   The twin builds a strategy's settings dataclass strictly (`machinekind_twin.strategies`).
   Every strategy here subclasses `Strategy[ItsSettings]`, and `uv run pyright` checks it against the contract.

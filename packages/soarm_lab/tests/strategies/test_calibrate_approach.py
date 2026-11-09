@@ -13,11 +13,11 @@ from typing import Any
 
 import numpy as np
 import pytest
+from machinekind_twin_api.boards import BoardSpec, BoardView, board_rotation
 from machinekind_twin_api.strategy import ObjectPose, Observation, RunInfo
 
 import soarm
 from soarm_lab.approach_table import ApproachTable
-from soarm_lab.charuco import BoardSpec, board_rotation
 from soarm_lab.kinematics import RobotKinematics
 from soarm_lab.robot import load_robot
 from soarm_lab.strategies.approach import (
@@ -34,6 +34,10 @@ from soarm_lab.strategies.calibrate_approach import (
     CalibrateApproachSettings,
     CalibrateApproachStrategy,
     ProbeSpec,
+    flip_bias,
+    remove_bias,
+    rot2,
+    tcp_to_corner,
 )
 from soarm_lab.strategies.grasp import wrap
 from soarm_lab.strategies.pick_place import GRIP_SLIP_M, MIN_CARRY_CLEAR_M, TABLE_TOP_M
@@ -329,3 +333,33 @@ def test_a_stop_mid_run_keeps_what_was_measured(tmp_path):
     data = json.loads((tmp_path / "approach.json.partial.json").read_text())
     assert data["complete"] is False and len(data["samples"]) >= 2
     assert strategy.calibration.phase == CORNERS or strategy.status.phase == "done"
+
+
+# --------------------------------------------------------------------------- the TCP against a corner
+def test_the_tcp_to_corner_vector_comes_in_base_axes():
+    """A camera 0.1 m above a corner looking straight down, the TCP 30 mm under the camera and 2 mm aside."""
+    yaw = math.radians(20.0)
+    R_base_board = board_rotation(yaw)
+    corner_base = np.array([0.2, 0.05, 0.0])
+    corner_obj = np.array([0.045, 0.09, 0.0])
+    # The camera looks down: its z is the base's -z.
+    R_base_cam = np.array([[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]])
+    cam = corner_base + np.array([0.004, -0.003, 0.1])
+    R_cb = R_base_cam.T @ R_base_board
+    t_cb = R_base_cam.T @ (corner_base - cam) - R_cb @ corner_obj
+    view = BoardView(R_cb, t_cb, 0.1, 8, 8, 0)
+    tcp = cam + np.array([0.002, 0.0, -0.03])
+    p_cam = R_base_cam.T @ (tcp - cam)
+    got = tcp_to_corner(view, corner_obj, p_cam, R_base_board)
+    assert got == pytest.approx(corner_base - tcp, abs=1e-12)
+
+
+def test_a_flip_recovers_the_hand_frame_bias_and_the_true_measurement():
+    bias = np.array([0.0021, -0.0013])
+    truth = np.array([0.004, -0.007])
+    psi = math.radians(37.0)
+    a = truth + rot2(psi) @ bias
+    b = truth + rot2(psi + math.pi) @ bias
+    got, mean = flip_bias(a, b, psi)
+    assert got == pytest.approx(bias) and mean == pytest.approx(truth)
+    assert remove_bias(a, psi, got) == pytest.approx(truth)

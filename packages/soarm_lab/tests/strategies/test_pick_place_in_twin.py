@@ -35,6 +35,7 @@ from machinekind_twin.clock import VirtualClock  # noqa: E402
 from machinekind_twin.kinematics import inverse  # noqa: E402
 from machinekind_twin.perception import CubeDetection, ObjectTracker  # noqa: E402
 from machinekind_twin.runtime import Twin  # noqa: E402
+from machinekind_twin.stand_errors import Backlash  # noqa: E402
 from machinekind_twin.strategies import load_strategy, strategies  # noqa: E402
 from machinekind_twin.strategy import ObjectPose, StrategyRunner  # noqa: E402
 from machinekind_twin.workspace import Workspace  # noqa: E402
@@ -46,7 +47,6 @@ from soarm_lab.kinematics import RobotKinematics  # noqa: E402
 from soarm_lab.planner import Place, Step, TargetPose, holds, resolve, world_state  # noqa: E402
 from soarm_lab.planner.schema import SIDE_VECTORS  # noqa: E402
 from soarm_lab.robot import load_robot  # noqa: E402
-from soarm_lab.stand_errors import Backlash  # noqa: E402
 from soarm_lab.strategies.grasp import wrap  # noqa: E402
 from soarm_lab.strategies.grasp_jev import HELD_OPTIONS, NEXT_OPTIONS  # noqa: E402
 from soarm_lab.strategies.jev import KEY_ENV  # noqa: E402
