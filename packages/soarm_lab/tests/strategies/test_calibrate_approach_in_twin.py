@@ -33,6 +33,7 @@ pytest.importorskip("mujoco")
 pytest.importorskip("machinekind_twin")
 cv2 = pytest.importorskip("cv2")
 
+from machinekind_twin.stand_errors import Backlash  # noqa: E402
 from machinekind_twin.strategy import StrategyRunner  # noqa: E402
 from machinekind_twin_api.strategy import Observation, RunInfo  # noqa: E402
 from twin_stand import THICKNESS_M, Clock, Stand, calibrate, drive, truth_tcp  # noqa: E402
@@ -41,7 +42,6 @@ from soarm_lab.approach_table import ApproachTable, Hit  # noqa: E402
 from soarm_lab.campaign import Run, campaign_dir, record, runs_per_scenario  # noqa: E402
 from soarm_lab.kinematics import RobotKinematics  # noqa: E402
 from soarm_lab.robot import load_robot  # noqa: E402
-from soarm_lab.stand_errors import Backlash  # noqa: E402
 from soarm_lab.strategies.approach import bearing  # noqa: E402
 from soarm_lab.strategies.calibrate_approach import (  # noqa: E402
     CalibrateApproachSettings,
