@@ -85,6 +85,9 @@ With this package installed alongside the twin, its Strategies tab offers:
 - `build`: builds from a sentence, planned by the claude or codex CLI, or from a fixed plan: one
   `pick_place` run per step, a check after each, and a new plan when a step fails; see
   [Build from a plan](#build-from-a-plan).
+- `calibrate_approach`: the arm approaches the corners of a printed board from four sides and at three
+  heights, and the wrist camera measures where the jaws really ended up. `pick_place` and `build` use
+  the result; see [Calibrate the approach](#calibrate-the-approach).
 - `dream`: runs Dream Labs' Dream-1 model from a prompt and the cameras; see [Dream Labs](#dream-labs).
 
 All send joint targets through the twin's safety supervisor. Read the
@@ -152,12 +155,26 @@ pick_place:
   wrist_camera: wrist        # empty: no wrist look
   max_tilt_deg: 30           # 0 keeps the hand straight down
   place_retries: 2           # picks of a block that fell off the target or out of the jaw
+  approach_file: ""          # the stand's approach table, e.g. ~/stands/desk/approach.json
+  approach_direction: ""     # out, in, ccw or cw; empty: the table's preferred side
+  pick_shift: always         # auto: only with a table set; off: never
+  table_check_m: 0.006       # the pick's own correction may differ from the table this much...
+  table_check_runs: 2        # ...before this many picks in a row stop the table's use
 build:
   task: "a tower of the three cubes, blue at the bottom"
   plan_json: ""              # a fixed plan: no model is asked
   planner_cli: codex         # or claude
   judge: none                # and every other pick_place setting, for each step
   wrist_camera: wrist
+charuco:                     # the detector: start it in the Detectors tab
+  square_m: 0.045            # as measured on the print
+  marker_m: 0.035
+calibrate_approach:
+  square_m: 0.045            # the same two values as `charuco:`
+  marker_m: 0.035
+  table_file: ~/stands/desk/approach.json
+  wrist_camera: wrist
+  rotate_180: false          # as in grasp_wrist
 ```
 
 Goals use metres in the robot's base frame. Enable the panel's 3D goal handle
@@ -191,7 +208,9 @@ See [policy settings](soarm_lab/strategies/policy.py),
 [grasp_jev settings](soarm_lab/strategies/grasp_jev.py),
 [grasp_wrist settings](soarm_lab/strategies/wrist.py),
 [pick_place settings](soarm_lab/strategies/pick_place.py),
-[build settings](soarm_lab/strategies/build.py) and
+[build settings](soarm_lab/strategies/build.py),
+[calibrate_approach settings](soarm_lab/strategies/calibrate_approach.py),
+[the charuco detector](soarm_lab/detectors/charuco.py) and
 [conventions](../../docs/conventions.md) for the full interfaces.
 
 ## Jev in the touch loop
@@ -589,6 +608,41 @@ hand is away. A shift over `place_tol_m` sets `place.support_moved` and is added
 and a put-back then follows that block. A regrasp after a drop counts from where the block landed,
 on the table or on a block.
 
+### With an approach table
+
+The fixed cameras and the arm are both a little off: the cameras by up to a centimetre where their
+calibration is off, the arm by a few millimetres of gear play and sag that depend on the side the hand
+comes from. A block placed where the cameras see the target lands off by both. `calibrate_approach`
+measures how far, per spot, height and side, into an approach table (see
+[Calibrate the approach](#calibrate-the-approach)). With `approach_file` set, `pick_place` uses it:
+
+- the hand always comes into its last hover from one side: the last 3 cm (`approach_lead_m`) run
+  straight along `approach_direction`, or the table's preferred side when that is empty. At the pick
+  that is the hover the jaw opens over; after a wrist look or a correction moves the aim, the hand goes
+  back and runs the leg again before it goes down. At the place it is the hover over the target;
+- the place's hover and release move by the table's correction at that spot, height and side. The pick's
+  first aim moves by it too, and so does a pick again after a drop or a fall. The look between the jaw tips may then move the aim again, but it measures
+  through the arm's own play, so the place counts the held block across the jaws where the table's aim
+  put it (`place.hand_shift_m` says how far that is from the look's aim);
+- what the run compares stays in camera poses: the latch on the target, the jaw clearances and the
+  check after the release. `place.target_xy` is still where the cameras see the target.
+
+Where the table has no answer (outside its corners by more than 3 cm, at another height, with the hand
+tilted, or when the leg's start is out of reach), the place takes the pick's own correction instead: the
+aim the wrist camera centred the jaws on, minus where the cameras saw the block. With the wrist camera
+and no table, `pick_shift: always` (the default) does the same everywhere; `auto` does it only with a
+table set, `off` never. The pick's correction cannot tell a camera error from a block pushed after the
+wrist look: it carries such a push to the place too. The pick's own correction also carries the look's
+error, so it differs from a good table by a few millimetres. When the two differ by more than
+`table_check_m` (6 mm), the panel says "chwyt rozni sie od tablicy o 7 mm (1 raz z rzedu) - zostaje
+tablica" and the run keeps the table: one push of the block does that too. When `table_check_runs` (2)
+picks in a row with the same table differ by more, as after a fixed camera was moved, the run stops
+trusting the table and says "tablica nie zgadza sie z chwytem 2 razy z rzedu". The count lasts while the
+twin runs and starts again with a rewritten table. A put-back takes no correction. `place.correction_m`, `place.correction_from` (`table`, `pick` or empty) and
+`place.table_miss` say what the run did; the panel adds "poprawka z tablicy 7 mm (ccw)" or "poprawka z
+chwytu 10 mm - cel poza tablica" to the carry note. A table file that cannot be used leaves
+`place.table_problem` and the run goes on without it.
+
 `PlaceStatus.outcome` names how the run ended:
 
 | outcome | meaning | block |
@@ -663,7 +717,7 @@ A bridge: green beside blue, then the cuboid across both.
 ```
 
 Each step is one `pick_place` run inside this run, with this run's settings (judge, wrist camera,
-speeds, tilt) and its own `step_time_limit_s`. "on" names the block to put it on; the other
+speeds, tilt, approach table) and its own `step_time_limit_s`. "on" names the block to put it on; the other
 relations become a pose (`place_x_m`, `place_y_m`, `place_z_m`, `place_yaw_deg`), and a bridge's two
 blocks are its `supports`. Before each step the arm turns back to the pose it
 started the run in, so the step starts as a fresh `pick_place` run would. After each step the run
@@ -692,6 +746,63 @@ unreachable twice in a row. At most `max_replans` new plans, `max_steps` steps p
 Known gaps: plans count reach with the hand straight down, so they refuse some places a tilted hand
 would reach. Moves do not go around other blocks.
 
+## Calibrate the approach
+
+TL;DR: print a board, tape it on the table, run `calibrate_approach` for about 25 minutes, then set
+`approach_file` for `pick_place` and `build`. Blocks then land within a few millimetres of where the
+target really is, even with a fixed camera a centimetre off and gear play in the arm.
+
+The routine sees the board's corners through the stand's own cameras and detector, the same way it
+sees blocks, so each corner carries the same camera error a block would. The arm then approaches a
+corner the way `pick_place` approaches a place: up to the carry height, a straight 3 cm leg from one
+side, then down to where a held cube is released on the first, second or third tower level. Once the
+arm stands still, the wrist camera measures the corner against the jaw tips. The camera is fixed to the
+jaws, so no joint reading goes into the measurement. The difference is the correction for that spot,
+height and side. It holds the fixed camera's error, sag and gear play together.
+
+### On the stand
+
+1. Print the board: `uv run soarm-lab charuco-board --out board.png`, at 100 % scale. Measure one
+   square and one marker with a ruler; the defaults are 45 mm and 35 mm.
+2. Tape the board flat about 20 cm in front of the arm, long side across the arm, where the towers go.
+   Clear all blocks off the table.
+3. In `configs/local.yaml` set the measured sizes under both `charuco:` and `calibrate_approach:`, and
+   `table_file`, `wrist_camera` and `rotate_180` under `calibrate_approach:` (see the example above).
+   Under `pick_place:` and `build:` set `approach_file` to the same file.
+4. Reinstall soarm-lab in the twin's environment and start the twin. Turn the arm aside, so `kamera1`
+   sees the whole board.
+5. In the Detectors tab, start `charuco`. Eight points `charuco c0` to `charuco c7` appear on the board.
+6. In the Strategies tab, start `calibrate_approach` and leave the table alone. It takes about 25 min:
+   tilted looks for the wrist camera's lens (about 2 min), wrist turns that measure the camera's mount
+   (about 2 min), 4 sides x 3 heights x 2 repeats per corner (about 18 min) and a self-check (about
+   3 min). It stops early if the corners do not fit the board's size ("rogi tablicy nie pasuja do jej
+   wymiarow"): fix the sizes in both places.
+7. Read the end note. Good: a self-check median of 1.5 mm or less and a side spread under 1 mm.
+   `uv run soarm-lab approach-table ~/stands/desk/approach.json` shows the details, and a suggested
+   `focal_px` and tip pixel for `grasp_wrist`.
+8. Optional: move the board to another area and run again. The samples add up in the same file.
+9. Run it again after moving or recalibrating a fixed camera, or after re-zeroing the servos. When runs
+   keep saying "tablica nie zgadza sie z chwytem 2 razy z rzedu", check first that no fixed camera moved
+   and that the blocks are not pushed during the pick; then run it again. A single "chwyt rozni sie od
+   tablicy" needs nothing.
+
+### The table
+
+The file is JSON, written whole each time, with the date, the board, the protocol, the wrist camera's
+calibration and mount, every sample, and how much the two repeats of each side differ. The side with
+the smallest difference becomes the preferred one. A run that stops writes `<table_file>.partial.json`,
+which `pick_place` does not use. `max_table_age_days` makes `pick_place` ignore an old table.
+
+Known gaps: the board covers about 4.5 x 13.5 cm; places further than 3 cm outside its corners take the
+pick's correction. Corners are seen at table height, blocks a few centimetres higher, which leaves up to
+about 1 mm of a camera tilt error. Each corner is measured at the heading the wrist camera sees it best
+from, while a place turns the hand to the target's yaw; in the simulation the landing error after the leg
+changed little with the heading or with the way the hand came, and the table holds no heading. The
+table's height correction is stored but not used: a release can
+still start a few millimetres higher or lower than planned. In the simulation the radial sides (`out`,
+`in`) repeat worse than the tangential ones, as the leg moves only some of the joints; the preferred
+side came out `ccw` or `cw` on every simulated stand.
+
 ## Simulation campaign
 
 `jobs/overnight.sh` runs seeded scenarios in the twin's simulation, keeps one JSON file per run and
@@ -699,13 +810,23 @@ writes `report.md`: per scenario the runs, the successes, how many attempts and 
 they took, the final offset's median and 90th percentile, why runs failed and any simulation artefacts.
 No arm moves and no model is asked.
 
+- approach: simulated stands with a ChArUco board, 6 mm of gear play and the fixed camera's pose tilted
+  so it sees 10 mm off; each runs the whole calibration, then the table's correction is checked against
+  the simulation's truth at points it did not measure, approached as `pick_place` approaches a place:
+  after a stop at a pick spot, by a straight carry that turns the hand to a heading drawn over the whole
+  turn. The report splits the error by direction, level and heading.
 - grasp: `grasp_wrist` with the detector 1.5 cm off; the same with 6 mm of hidden joint backlash; the
   same with the cube nudged 5 mm after the hover look.
 - pick_place: a cube on a cube, with and without the wrist camera, and with every camera 5, 10 and
-  15 mm off; a cuboid across two cubes; a cube next to a cube.
+  15 mm off (5 mm also with `pick_shift: auto`); on simulated stands with 6 mm of play and the camera
+  10 mm off, with the stand's approach table (camera tilted, and shifted), with the pick's correction
+  only and with none; a cuboid across two cubes; a cube next to a cube. Each run onto a block keeps the
+  simulation's truth on the corrections in use under `in_use`: at the pick, how far the table's and the
+  pick's own correction lay from the one needed; at the release, how far the TCP and the block in the
+  hand were from where the plan needed them.
 - build: a tower of three cubes from a fixed plan and from a scripted planner; from the fixed plan with
-  the wrist camera, also with every camera 5 mm off; both plans again with the middle cube knocked off
-  mid-build; a bridge.
+  the wrist camera, also with every camera 5 mm off, and on the simulated stands with and without the
+  approach table; both plans again with the middle cube knocked off mid-build; a bridge.
 
 The pick_place and build scenarios step the physics every 1 ms, not the twin's own 5 ms, so a block let
 go a few millimetres above another lands without sinking into it. They check at every physics step that
@@ -718,8 +839,9 @@ uv run soarm-lab campaign report workspace/campaign/tonight
 
 The scenarios are the tests marked `campaign`. `SOARM_CAMPAIGN_RUNS` sets the seeds per scenario and
 `SOARM_CAMPAIGN_DIR` the folder for the runs. Without them the test suite runs the grasp and the
-pick_place scenarios at their default size, and skips the build campaign and the runs with a camera
-error.
+pick_place scenarios at their default size, and skips the approach and build campaigns, the stand runs
+and the runs that only measure. The stand runs share a stand by tens; each stand is calibrated once, in
+about 3 minutes, and its table kept under `tables/` in the campaign folder.
 
 ## Dream Labs
 

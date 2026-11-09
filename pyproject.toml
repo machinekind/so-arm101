@@ -37,18 +37,21 @@ torch = ["soarm-lab[torch]"]
 # The application stays optional; the base packages depend only on its API.
 twin = ["machinekind-twin", "machinekind-twin-cube", "machinekind-twin-llm"]
 
-# Type-check the twin contract implementations, grasp library, planner, campaign records and test panel.
+# Type-check the twin contract implementations, grasp library, planner, campaign records, the approach
+# calibration's modules and test panel.
 [tool.pyright]
 include = ["packages/soarm_lab/soarm_lab/strategies", "packages/soarm_lab/soarm_lab/grasp_library.py",
            "packages/soarm_lab/soarm_lab/planner", "packages/soarm_lab/soarm_lab/campaign.py",
+           "packages/soarm_lab/soarm_lab/detectors", "packages/soarm_lab/soarm_lab/charuco.py",
+           "packages/soarm_lab/soarm_lab/approach_table.py", "packages/soarm_lab/soarm_lab/stand_errors.py",
            "packages/soarm/soarm/panel.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["packages/soarm/tests", "packages/soarm_lab/tests"]
 # importlib: same-named test modules in the two packages (test_entry_points.py, conftest.py) do not collide.
 addopts = ["--import-mode=importlib"]
-# For the test helper fake_bus.py.
-pythonpath = ["packages/soarm/tests"]
+# For the test helpers fake_bus.py and twin_stand.py.
+pythonpath = ["packages/soarm/tests", "packages/soarm_lab/tests/strategies"]
 markers = [
     "twin: needs the digital twin (machinekind_twin) installed; skipped otherwise",
     "render: renders frames through MuJoCo/OpenGL; skipped where no OpenGL context can be made",

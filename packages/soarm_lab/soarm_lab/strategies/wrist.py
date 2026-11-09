@@ -53,7 +53,8 @@ hover with a new look, within `max_attempts`. Skipped looks close as before.
 
 With `residual_file` set, a successful lift adds the camera-corrected aim at the close minus the
 detector's first aim to a running mean over the last `RESIDUAL_RUNS` runs, and the next run's first aim
-adds that mean. A missing file starts empty; an unreadable one is ignored and rewritten.
+adds that mean. A missing file starts empty; an unreadable one is ignored and rewritten. A subclass may
+give the first aim's correction itself (`_first_shift`); the residual then neither applies nor saves.
 """
 
 from __future__ import annotations
@@ -722,6 +723,8 @@ class WristGraspStrategy(GraspStrategy):
         #: The aim at that close came from a look that centred the jaws.
         self._closed_seen = False
         self._residual_saved = False
+        #: The correction the first aim took [m, base frame]; zero when it took none or did not reach.
+        self._first_shifted = np.zeros(2)
 
     def start(self, run: RunInfo, obs: Observation) -> None:
         """Initialize grasp and validate the named camera and OpenCV before motion.
@@ -1068,20 +1071,27 @@ class WristGraspStrategy(GraspStrategy):
         return self.hold(text)
 
     # ------------------------------------------------------------------ the residual
+    def _first_shift(self, xy: np.ndarray) -> np.ndarray:
+        """The correction [m, base frame] the run's first aim, the detector's `xy`, takes: the stand's
+        residual."""
+        return self._residual
+
     def _aim(self, xy: np.ndarray, *, strict: bool = False) -> None:
-        """Add the stand's residual to the run's first aim, from the detector; the plain aim if it does not
-        reach."""
+        """Add `_first_shift` to the run's first aim, the detector's; the plain aim if it does not reach."""
         first = self.grasp.block_xy is None
         xy = np.asarray(xy, float)
-        if first and np.any(self._residual):
+        shift = np.asarray(self._first_shift(xy), float) if first else np.zeros(2)
+        if np.any(shift):
             try:
-                super()._aim(xy + self._residual, strict=strict)
+                super()._aim(xy + shift, strict=strict)
             except RuntimeError:
                 super()._aim(xy, strict=strict)
+                shift = np.zeros(2)
         else:
             super()._aim(xy, strict=strict)
         if first:
             self._detector_xy = xy.copy()
+            self._first_shifted = shift.copy()
 
     def _enter(self, phase: str) -> None:
         if phase == CLOSE and self.grasp.block_xy is not None:
@@ -1098,7 +1108,7 @@ class WristGraspStrategy(GraspStrategy):
         camera-centred close."""
         cfg = self.wrist_settings
         if (not cfg.residual_file or self._residual_saved or self.grasp.recoveries or not self._closed_seen
-                or self._detector_xy is None or self._closed_aim is None):
+                or self._detector_xy is None or self._closed_aim is None or not self._saves_residual):
             return
         self._residual_saved = True
         sample = self._closed_aim - self._detector_xy
@@ -1114,6 +1124,22 @@ class WristGraspStrategy(GraspStrategy):
             logger.warning("Nie zapisano poprawki celu do %s: %s", cfg.residual_file, exc)
             return
         logger.info("Poprawka celu: %.1f, %.1f mm (srednia z %d)", mean[0] * 1000, mean[1] * 1000, runs)
+
+    @property
+    def _saves_residual(self) -> bool:
+        """Whether this run's correction goes to `residual_file`: not when the first aim's correction came
+        from elsewhere than the residual."""
+        return True
+
+    def pick_shift(self) -> np.ndarray | None:
+        """The camera-corrected aim at the close minus the detector's first aim [m, base frame], or None when
+        the close was not centred by a look, the block was picked again after a drop, or it is implausibly
+        large (`RESIDUAL_MAX_M`)."""
+        if (not self._closed_seen or self.grasp.recoveries or self._detector_xy is None
+                or self._closed_aim is None):
+            return None
+        shift = self._closed_aim - self._detector_xy
+        return shift.copy() if float(np.linalg.norm(shift)) <= RESIDUAL_MAX_M else None
 
     def _close_summary(self) -> str:
         final = self.wrist.final_offset_m

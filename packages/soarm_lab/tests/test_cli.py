@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 
+import numpy as np
 import pytest
 
 pytest.importorskip("mujoco")
@@ -174,3 +175,40 @@ def test_grasps_show_lists_the_bundled_cube_library(capsys):
     assert grasps[0] == ("#0 score 0.92 pad (0.0, 0.0, 0.0) mm approach (0.00, 0.00, -1.00) "
                          "closing (0.00, 1.00, 0.00) width 29.0 mm")
     assert grasps[4].startswith("#4 score 0.85 pad (5.0, 0.0, 8.5) mm")
+
+
+def test_charuco_board_draws_a_printable_board_its_detector_finds(tmp_path, capsys):
+    cv2 = pytest.importorskip("cv2")
+    if not hasattr(cv2, "aruco"):
+        pytest.skip("OpenCV without the aruco module")
+    from soarm_lab.charuco import BoardSpec, charuco_detector, detect_corners
+
+    out = tmp_path / "board.png"
+    assert main(["charuco-board", "--out", str(out), "--dpi", "150"]) == 0
+    assert "A4 at 150 dpi, board 135 x 225 mm, 8 inner corners" in capsys.readouterr().out
+    sheet = cv2.imread(str(out), cv2.IMREAD_GRAYSCALE)
+    assert sheet.shape == (round(0.297 * 150 / 0.0254), round(0.210 * 150 / 0.0254))
+    _, detector = charuco_detector(BoardSpec(), cv2)
+    ids, pixels = detect_corners(sheet, detector, cv2)
+    assert sorted(ids) == list(range(8))
+    # A square is 45 mm on the sheet: neighbouring corners lie 45 mm apart at 150 dpi.
+    by_id = dict(zip(ids.tolist(), pixels, strict=True))
+    assert np.linalg.norm(by_id[1] - by_id[0]) == pytest.approx(45 / 25.4 * 150, abs=1.0)
+    with pytest.raises(SystemExit, match="does not fit"):
+        main(["charuco-board", "--out", str(out), "--square-mm", "80", "--marker-mm", "60"])
+
+
+def test_approach_table_summarises_a_table(tmp_path, capsys):
+    from soarm_lab.approach_table import ApproachTable
+
+    table = ApproachTable.new(robot="so101", stand="desk", board={"squares": [3, 5]}, protocol={},
+                              wrist={"camera": "wrist"}, levels=[{"surface_m": 0.0, "tcp_z_m": 0.022}])
+    table.data["complete"] = True
+    path = table.save(tmp_path / "approach.json")
+    assert main(["approach-table", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("approach table: robot so101, stand desk, complete")
+    assert "level 1: surface 0 mm, TCP at 22.0 mm" in out
+    (tmp_path / "bad.json").write_text("{}")
+    with pytest.raises(ValueError, match="not an approach table"):
+        main(["approach-table", str(tmp_path / "bad.json")])

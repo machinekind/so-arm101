@@ -4,7 +4,7 @@ import dataclasses
 from importlib import metadata
 
 import pytest
-from machinekind_twin_api.entry_points import STRATEGIES
+from machinekind_twin_api.entry_points import DETECTORS, STRATEGIES
 from machinekind_twin_api.strategy import Action, Observation, RunInfo
 
 import soarm
@@ -23,6 +23,9 @@ EXPECTED = {
         (STRATEGIES, "grasp_wrist"): "soarm_lab.strategies.wrist:WristGraspStrategy",
         (STRATEGIES, "pick_place"): "soarm_lab.strategies.pick_place:PickPlaceStrategy",
         (STRATEGIES, "build"): "soarm_lab.strategies.build:BuildStrategy",
+        (STRATEGIES, "calibrate_approach"):
+            "soarm_lab.strategies.calibrate_approach:CalibrateApproachStrategy",
+        (DETECTORS, "charuco"): "soarm_lab.detectors.charuco:CharucoDetector",
         ("console_scripts", "soarm-lab"): "soarm_lab.cli:main",
     },
 }
@@ -34,7 +37,8 @@ STRATEGY_NAMES = [name for group, name in EXPECTED["soarm-lab"] if group == STRA
 #: test_wrist.py checks the protocol without a camera and with defaults when OpenCV is available.
 #: `pick_place` needs both by default. test_pick_place.py checks it with `judge: none` and no camera.
 #: `build` needs a task and a planning CLI, or a fixed plan; test_build.py checks it with fakes.
-NEEDS_MORE = ("dream", "touch_jev", "grasp_jev", "grasp_wrist", "pick_place", "build")
+#: `calibrate_approach` needs a table file and OpenCV; test_calibrate_approach.py checks it with a fake feed.
+NEEDS_MORE = ("dream", "touch_jev", "grasp_jev", "grasp_wrist", "pick_place", "build", "calibrate_approach")
 OFFLINE_STRATEGIES = [name for name in STRATEGY_NAMES if name not in NEEDS_MORE]
 
 
@@ -81,3 +85,14 @@ def test_the_strategy_follows_the_strategy_protocol(name: str) -> None:
     assert isinstance(action, Action)
     assert set(action.target) == set(spec.joints) and not action.done
     strategy.stop("zatrzymana")
+
+
+def test_the_detector_entry_point_is_a_class_with_settings_and_detect() -> None:
+    """What the twin's loader checks (`machinekind_twin.detectors.load_detector`), without the twin."""
+    cls = own_entry_points("soarm-lab")[(DETECTORS, "charuco")].load()
+    assert isinstance(cls, type) and callable(getattr(cls, "detect", None))
+    assert dataclasses.is_dataclass(cls.settings)
+    kinds = {f.name: f.type for f in dataclasses.fields(cls.settings)}
+    assert set(kinds.values()) <= {"str", "int", "float", "bool"}
+    detector = cls(cls.settings())
+    assert detector.interval_s > 0 and detector.pixel_error_px > 0
