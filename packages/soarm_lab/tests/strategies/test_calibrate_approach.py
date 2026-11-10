@@ -363,3 +363,21 @@ def test_a_flip_recovers_the_hand_frame_bias_and_the_true_measurement():
     got, mean = flip_bias(a, b, psi)
     assert got == pytest.approx(bias) and mean == pytest.approx(truth)
     assert remove_bias(a, psi, got) == pytest.approx(truth)
+
+
+def test_a_weaker_wrist_lens_fit_is_used_and_only_a_broken_one_stops_the_run() -> None:
+    """A residual or view count over the verdict's limits no longer stops the routine: only a fit that did
+    not happen or a focal length far off the nominal one does."""
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from soarm_lab.strategies.calibrate_approach import _lens_unusable
+
+    def fit(rms: float, f: float) -> SimpleNamespace:
+        return SimpleNamespace(rms_px=rms, K=np.array([[f, 0, 640], [0, f, 360], [0, 0, 1.0]]),
+                               reason="residuum 1.23 px > 1.0 px")
+
+    assert _lens_unusable(fit(1.23, 500.0), 490.0) == ""
+    assert _lens_unusable(fit(float("nan"), 490.0), 490.0) == "residuum 1.23 px > 1.0 px"
+    assert "ogniskowa" in _lens_unusable(fit(0.4, 1500.0), 490.0)

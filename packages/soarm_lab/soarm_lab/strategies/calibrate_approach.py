@@ -108,6 +108,10 @@ SIGHTING_S = 0.02
 #: The board fit may miss its corners by this much [m, RMS] and its scale may be off by this share.
 FIT_MAX_RMS_M = 0.004
 FIT_MAX_SCALE = 0.03
+#: Wrist camera to board distance at which the note puts a lens residual in millimetres [m].
+LENS_NOTE_DISTANCE_M = 0.12
+#: A wrist lens fit whose focal length lies this far off the nominal one is wrong, not just weaker.
+LENS_MAX_FOCAL_FACTOR = 2.0
 #: The jaw's lowest point stays this far above the board at every level [m].
 JAW_BOARD_CLEAR_M = 0.005
 #: Looks of one approach may spread this much [m].
@@ -350,6 +354,8 @@ class CalibrationStatus:
     frame_size: tuple[int, int] = (0, 0)
     focal_px: float = math.nan
     k_rms_px: float = math.nan
+    #: What a weaker wrist lens fit costs, in plain words; '' when the fit met every check.
+    lens_note: str = ""
     k_views: int = 0
     #: The mount bias per level [m, hand frame] and its spread over pairs [m].
     mount_bias_m: dict[int, tuple[float, float]] = field(default_factory=dict)
@@ -1458,8 +1464,15 @@ class CalibrateApproachStrategy(TouchStrategy):
         st = self.calibration
         st.k_rms_px, st.k_views, st.focal_px = result.rms_px, result.views, float(result.K[0, 0])
         self._intrinsics = result
+        unusable = _lens_unusable(result, nominal)
+        if unusable:
+            return self._fail(f"kalibracja kamery nadgarstka nieudana: {unusable}")
         if not result.trusted:
-            return self._fail(f"kalibracja kamery nadgarstka nieudana: {result.reason}")
+            # A weaker fit is still used; the note says what it costs at the board instead of stopping.
+            mm = result.rms_px / float(result.K[0, 0]) * LENS_NOTE_DISTANCE_M * 1000
+            st.lens_note = (f"soczewka kamery nadgarstka: {result.reason} - ok. {mm:.1f} mm na tablicy "
+                            f"z {LENS_NOTE_DISTANCE_M * 100:.0f} cm, uzyta")
+            logger.warning("%s", st.lens_note)
         self._K, self._dist = result.K, result.dist
         return self._after_intrinsics()
 
@@ -1592,7 +1605,8 @@ class CalibrateApproachStrategy(TouchStrategy):
         spread = st.spread_m.get(st.preferred, math.nan)
         check = f", sprawdzenie {np.median(st.verify_m) * 1000:.1f} mm" if st.verify_m else ""
         st.note = (f"zapisano tablice podejscia: {st.samples} z {planned} pomiarow, "
-                   f"kierunek {st.preferred or '-'} (rozrzut {spread * 1000:.1f} mm){check}")
+                   f"kierunek {st.preferred or '-'} (rozrzut {spread * 1000:.1f} mm){check}"
+                   + (f"; {st.lens_note}" if st.lens_note else ""))
         logger.info("%s -> %s", st.note, path)
         return self._begin_park()
 
@@ -1752,3 +1766,13 @@ def _optional(name: str) -> Any:
 
 
 __all__ = ["CalibrateApproachSettings", "CalibrateApproachStrategy", "CalibrationStatus", "Planned"]
+
+def _lens_unusable(result: Any, nominal_f: float) -> str:
+    """Why a wrist lens fit cannot be used at all ("" = it can): no fit, or a focal length far off."""
+    if not math.isfinite(result.rms_px):
+        return result.reason or "brak dopasowania"
+    fx, fy = float(result.K[0, 0]), float(result.K[1, 1])
+    lo, hi = nominal_f / LENS_MAX_FOCAL_FACTOR, nominal_f * LENS_MAX_FOCAL_FACTOR
+    if not (lo <= fx <= hi and lo <= fy <= hi):
+        return f"nieprawdopodobna ogniskowa fx {fx:.0f}, fy {fy:.0f} px (oczekiwane okolo {nominal_f:.0f} px)"
+    return ""
