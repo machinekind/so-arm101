@@ -25,6 +25,7 @@ from soarm_lab.grasp_library import GraspLibrary, save_library  # noqa: E402
 from soarm_lab.kinematics import IKSolution, RobotKinematics  # noqa: E402
 from soarm_lab.robot import load_robot  # noqa: E402
 from soarm_lab.strategies.grasp import (  # noqa: E402
+    GRIP_STRENGTH,
     IN_HAND,
     JAW_REACH_M,
     MIN_BITE_M,
@@ -437,6 +438,24 @@ def test_the_probe_height_comes_from_the_block_and_touch_z_zero_means_automatic(
 def test_settings_are_validated(settings: dict, match: str):
     with pytest.raises(ValueError, match=match):
         GraspStrategy(GraspSettings(**settings))
+
+
+def test_grip_strength_defaults_to_a_gentle_squeeze_and_zero_keeps_the_stands_own():
+    from soarm_lab.strategies.grasp_jev import GraspJevStrategy
+    from soarm_lab.strategies.pick_place import PickPlaceStrategy
+    from soarm_lab.strategies.wrist import WristGraspStrategy
+
+    assert GraspSettings().grip_strength == GRIP_STRENGTH == 8
+    for cls in (GraspStrategy, WristGraspStrategy, GraspJevStrategy, PickPlaceStrategy):
+        assert cls().grip_strength == 8
+    assert GraspStrategy(GraspSettings(grip_strength=0)).grip_strength is None
+    assert GraspStrategy(GraspSettings(grip_strength=254)).grip_strength == 254
+
+
+@pytest.mark.parametrize("value", [-1, 255, 8.5, True, "8"])
+def test_a_grip_strength_outside_the_servo_range_is_refused(value):
+    with pytest.raises(ValueError, match=r"grasp: grip_strength must be a whole number from 0 .* to 254"):
+        GraspStrategy(GraspSettings(grip_strength=value))
 
 
 def test_without_the_probe_its_touch_z_and_close_jaw_are_not_checked():

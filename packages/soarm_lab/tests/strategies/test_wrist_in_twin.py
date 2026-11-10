@@ -39,7 +39,7 @@ NAME = "grasp_wrist"
 TOUCH_FIELDS = ["label", "touch_z", "hover_m", "wait_for_pose_s", "max_pose_age_s", "close_jaw",
                 "need_contact", "hz", "speed_mps", "descend_speed_mps", "contact_gap_m", "contact_band_m",
                 "max_tracking_deg", "sag_m", "stall_s", "time_limit_s"]
-GRASP_FIELDS = TOUCH_FIELDS + ["block", "probe", "open_margin_m", "squeeze_m", "grasp_depth",
+GRASP_FIELDS = TOUCH_FIELDS + ["block", "probe", "open_margin_m", "squeeze_m", "grip_strength", "grasp_depth",
                                "straddle_push_m", "close_on_stall_m", "lift_m",
                                "hold_s", "max_attempts", "carry_s", "release", "wait_s", "recover_m",
                                "grasp_source", "library_dir", "min_score", "max_tilt_deg",

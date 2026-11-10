@@ -117,6 +117,7 @@ grasp:
   grasp_source: geometry   # or library
   open_margin_m: 0.008
   squeeze_m: 0.008
+  grip_strength: 8         # the gripper servo's P while the run has the arm; 0 keeps the stand's own
   grasp_depth: 0.5
   straddle_push_m: 0.004   # how far the straddle pushes past a light touch
   close_on_stall_m: 0.003  # a stall with both tips this far below the top closes there; 0: off
@@ -339,6 +340,10 @@ probe bottom from the block dimensions. An explicit `touch_z` overrides it.
 Without the probe, `close_jaw`, `touch_z` and `need_contact` have no effect.
 
 `open_margin_m` adds clearance on each side and `squeeze_m` sets how much tighter to close.
+`grip_strength` sets how hard the jaw squeezes for as long as the run has the arm. It is the gripper
+servo's P gain, 8 by default, and the squeeze grows with both P and `squeeze_m`. The twin puts the stand's
+own grip back when the run ends, and 0 keeps the stand's own throughout. `grasp_wrist`, `grasp_jev`,
+`pick_place` and `build` have the same setting.
 `grasp_depth` sets tip depth as a fraction of block height. `lift_m` sets lift distance and
 `hold_s` sets the verified hold duration before carry.
 
