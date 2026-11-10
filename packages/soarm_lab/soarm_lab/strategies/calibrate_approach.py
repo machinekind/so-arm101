@@ -1212,7 +1212,10 @@ class CalibrateApproachStrategy(TouchStrategy):
             wp = self._path[self._wp]
             if wp.joints is not None:
                 return self._transit(obs, wp)
-            done = self._settled(wp.point) if wp.settle else self._arrived(wp.point)
+            # A sagging arm counts as there, and an arm that stops short only skips this measurement after
+            # `move_timeout_s` instead of ending the run: the wrist camera measures where the hand really is.
+            done = (self._settled(wp.point, sag=True, watch=False) if wp.settle
+                    else self._arrived(wp.point, sag=True, watch=False))
             if done and self._turned(wp):
                 self._wp += 1
                 self._wp_t0 = self._t
@@ -1641,7 +1644,8 @@ class CalibrateApproachStrategy(TouchStrategy):
     def _park(self, obs: Observation) -> Action | None:
         if self._park_route is None:
             wp = self._path[0]
-            if not (self._arrived(wp.point) or self._t - self._wp_t0 > self.calib.move_timeout_s):
+            arrived = self._arrived(wp.point, sag=True, watch=False)
+            if not (arrived or self._t - self._wp_t0 > self.calib.move_timeout_s):
                 self._moving = True
                 try:
                     action = self._drive(wp.point, wp.step_m, rotation=wp.rotation)
