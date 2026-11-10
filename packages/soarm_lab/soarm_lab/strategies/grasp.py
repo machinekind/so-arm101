@@ -90,6 +90,8 @@ from pathlib import Path
 import numpy as np
 from machinekind_twin_api.strategy import Action, Observation, RunInfo
 
+from soarm.feetech import GAIN_MAX
+
 from ..blocks import BlockSpec, block
 from ..blocks.classic_world import BLOCKS
 from ..grasp_library import GraspLibrary, compose, load_library, rejections_text, roll_axis, select, wrap
@@ -194,6 +196,9 @@ GRASP_PHASE_NAMES = {**PHASE_NAMES, RISE: "w gore znad bloku", OPEN: "nad blok",
                      CHECK: "trzymam blok", CARRY: "niose blok", RECOVER: "blok wypadl",
                      RELEASE: "oddaje blok", REOPEN: "otwieram szczeke"}
 
+#: The block strategies' grip strength: the gripper servo's P gain, gentle on a hard block.
+GRIP_STRENGTH = 8
+
 #: Consecutive empty readings required to declare a drop. Ignore an isolated bad reading.
 EMPTY_TICKS = 2
 #: Minimum delay from drop declaration to a usable capture [s], allowing the block to land.
@@ -221,6 +226,14 @@ VERDICTS = {
     "edge": "szczeka chwycila blok za krawedz",
     "off": "kamera widzi blok poza srodkiem szczek",
 }
+
+
+def grip_strength(value: int, where: str) -> int | None:
+    """A `grip_strength` setting as `Strategy.grip_strength` takes it: 0 becomes None, the stand's own."""
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= GAIN_MAX:
+        raise ValueError(f"{where}: grip_strength must be a whole number from 0 (the stand's own) to "
+                         f"{GAIN_MAX}, is {value!r}")
+    return value or None
 
 
 @dataclass(frozen=True)
@@ -264,6 +277,9 @@ class GraspSettings(TouchSettings):
     open_margin_m: float = 0.008
     #: Squeeze below the block's short side [m]. It must exceed the jaw rule's holding margin.
     squeeze_m: float = 0.008
+    #: How hard the gripper squeezes while the run has the arm: the gripper servo's P gain (Feetech register
+    #: 21, 1..254). The stand's own (`feetech: p_gain: gripper`) comes back when the run ends; 0 keeps it.
+    grip_strength: int = GRIP_STRENGTH
     #: Depth of the tip centres below the top as a fraction of block height (0, 1].
     grasp_depth: float = 0.5
     #: How far the straddle may push past a light touch before it counts as a stall [m].
@@ -461,6 +477,8 @@ class GraspStrategy(TouchStrategy):
         self._reach_m = JAW_REACH_M
         #: Original settings. `config` holds the resolved probe height and label.
         self.grasp_settings = config
+        #: The twin's runner reads it once, after `start`, and puts the stand's own grip back after the run.
+        self.grip_strength = grip_strength(config.grip_strength, "grasp")
         # Without the probe, block dimensions set the hover reference.
         self._auto_touch_z = config.touch_z == 0 or not config.probe
         label = normalised(config.label) or config.block

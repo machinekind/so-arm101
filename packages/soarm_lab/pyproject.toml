@@ -14,7 +14,7 @@ license-files = ["LICENSE", "NOTICE"]
 dependencies = [
     "soarm",
     # The twin's plugin contracts (numpy only); never the twin itself.
-    "machinekind-twin-api>=0.1.6,<0.2",
+    "machinekind-twin-api>=0.1.7,<0.2",
     "numpy>=1.24",
     "PyYAML>=6.0",
     "mujoco>=3.14,<3.15",

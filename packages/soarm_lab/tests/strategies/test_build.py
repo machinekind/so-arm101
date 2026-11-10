@@ -699,6 +699,14 @@ def test_settings_need_a_task_or_a_plan_and_a_valid_plan() -> None:
     assert BuildStrategy(BuildSettings(plan_json=TOWER_JSON)).time_limit_s == 600.0
 
 
+def test_every_step_grips_with_the_builds_grip_strength() -> None:
+    assert BuildStrategy(BuildSettings(plan_json=TOWER_JSON)).grip_strength == 8
+    assert BuildStrategy(BuildSettings(plan_json=TOWER_JSON, grip_strength=12)).grip_strength == 12
+    assert BuildStrategy(BuildSettings(plan_json=TOWER_JSON, grip_strength=0)).grip_strength is None
+    with pytest.raises(ValueError, match="build: grip_strength must be a whole number"):
+        BuildStrategy(BuildSettings(plan_json=TOWER_JSON, grip_strength=300))
+
+
 def test_the_planner_settings_reach_the_cli() -> None:
     strategy = BuildStrategy(BuildSettings(task="x", planner_cli="claude", planner_model="sonnet",
                                            planner_effort="", planner_timeout_s=30.0))
