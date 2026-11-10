@@ -453,6 +453,95 @@ def test_read_only_never_writes_gains_but_logs_them(so101_context, caplog):
     assert any("przy polaczeniu" in r.getMessage() for r in caplog.records)
 
 
+# ------------------------------------------------------------------ grip strength
+GRIPPER_ID = 6
+
+
+def test_grip_strength_writes_the_gripper_p_and_none_puts_the_configured_one_back(so101_context):
+    arm, link = connected(so101_context(p_gain={"shoulder_lift": 40, "gripper": 8}))
+    link.log.clear()
+
+    assert arm.set_grip_strength(16) is True
+    assert gain_writes(link) == [(GRIPPER_ID, ADDR_P_GAIN, 16)]
+    assert ("read", GRIPPER_ID, ADDR_P_GAIN, None) in link.log            # read back
+    assert gains_in(link, GRIPPER_ID) == (16, 32, 0)
+    assert link.registers[2][ADDR_P_GAIN] == 40                           # only the gripper
+    assert link.registers[GRIPPER_ID][ADDR_TORQUE_ENABLE] == 1            # torque stays on
+
+    assert arm.set_grip_strength(None) is True
+    assert gain_writes(link)[-1] == (GRIPPER_ID, ADDR_P_GAIN, 8)
+
+
+def test_without_a_configured_gripper_p_none_puts_back_what_the_servo_had_at_connect(so101_context):
+    link = FakeBusLink()
+    link.registers[GRIPPER_ID][ADDR_P_GAIN] = 12
+    arm, _ = connected(so101_context(), link)
+
+    assert arm.set_grip_strength(20) and link.registers[GRIPPER_ID][ADDR_P_GAIN] == 20
+    assert arm.set_grip_strength(None) and link.registers[GRIPPER_ID][ADDR_P_GAIN] == 12
+
+
+@pytest.mark.parametrize("strength", [0, 255, -1, 8.5, True, "16"])
+def test_a_grip_strength_out_of_range_is_skipped_with_a_warning(arm_ctx, caplog, strength):
+    arm, link = connected(arm_ctx)
+    link.log.clear()
+    with caplog.at_level(logging.WARNING, logger="soarm.feetech"):
+        assert arm.set_grip_strength(strength) is False
+    assert gain_writes(link) == []
+    assert any("poza zakresem" in r.getMessage() for r in caplog.records)
+
+
+def test_grip_strength_is_refused_by_a_read_only_disconnected_or_silent_arm(so101_context):
+    ctx = dataclasses.replace(so101_context(), read_only=True)
+    link = FakeBusLink()
+    bus = FeetechBus("COM_TEST", read_only=True)
+    bus.open(link=link)
+    watched = FeetechArm(ctx, bus=bus)
+    watched.connect()
+    assert watched.set_grip_strength(16) is False
+    assert not link.ops("write")
+
+    arm, link = connected(so101_context())
+    link.silent = True
+    arm.read_joints()
+    assert arm.set_grip_strength(16) is False
+    link.silent = False
+    arm.disconnect()
+    assert arm.set_grip_strength(16) is False
+    assert gain_writes(link) == []
+
+
+def test_a_gripper_that_does_not_keep_the_p_is_tried_again_then_warned_about(arm_ctx, caplog):
+    link = FakeBusLink()
+    real_write = link.write
+
+    def deaf(data: bytes) -> int:
+        n = real_write(data)
+        if data[4] == INST_WRITE and data[2] == GRIPPER_ID and data[5] == ADDR_P_GAIN:
+            link.registers[GRIPPER_ID][ADDR_P_GAIN] = LEROBOT_GAINS[0]
+        return n
+
+    link.write = deaf
+    arm, _ = connected(arm_ctx, link)
+    link.log.clear()
+    with caplog.at_level(logging.WARNING, logger="soarm.feetech"):
+        assert arm.set_grip_strength(20) is False
+    assert gain_writes(link) == [(GRIPPER_ID, ADDR_P_GAIN, 20)] * feetech.GRIP_WRITE_TRIES
+    assert any("nie potwierdzilo P 20" in r.getMessage() for r in caplog.records)
+
+
+def test_a_bus_error_on_grip_strength_is_logged_and_never_raised(arm_ctx, caplog):
+    arm, link = connected(arm_ctx)
+
+    def broken(data: bytes) -> int:
+        raise OSError("port zamkniety")
+
+    link.write = broken
+    with caplog.at_level(logging.ERROR, logger="soarm.feetech"):
+        assert arm.set_grip_strength(20) is False
+    assert any("P chwytaka" in r.getMessage() for r in caplog.records)
+
+
 @pytest.mark.parametrize("settings, error, match", [
     ({"p_gain": {"shoulder": 40}}, ValueError, r"feetech\.p_gain: nieznany staw 'shoulder'"),
     ({"d_gain": {"elbow_flex": 255}}, ValueError, r"feetech\.d_gain\.elbow_flex: .*0\.\.254, dostalem 255"),

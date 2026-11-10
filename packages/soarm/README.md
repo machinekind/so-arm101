@@ -74,6 +74,25 @@ gains each servo had at connect and the ones it set, and warns when a servo did 
 A read-only arm only logs them. `soarm-panel` and `soarm-zero` use the same section with
 `--config twin.yaml`.
 
+### Grip strength
+
+The gripper's P is also how hard it squeezes a held object. The gripper's `p_gain` is the stand's own
+grip, and the panel's manual gripper always uses it. A task can set its own grip for as long as it has
+the arm. The twin's calibration wave reads it from `wave: grip_strength:` and the block strategies from
+`grip_strength:` in their own sections. The backend writes it to the gripper servo's P register (21)
+when the task takes the arm. It writes the stand's own back when the task ends, stops, fails or is
+replaced. Set the stand's own to the softest grip any task needs, such as 8:
+
+```yaml
+feetech:
+  p_gain: {gripper: 8}   # the stand's own grip: gentle on hard blocks
+wave:
+  grip_strength: 16      # firm: the calibration card does not turn in the jaws
+```
+
+Without a gripper `p_gain` the stand's own grip is the P the servo had at connect. The `lerobot`
+backend does not change the grip, and the twin logs that it skipped it.
+
 ## Integration and dependencies
 
 The twin discovers robot `so101` and backends `feetech` and `lerobot` through

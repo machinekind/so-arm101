@@ -28,6 +28,13 @@ Each servo runs its own position loop with the P, D and I gains stored in its me
 every start, after the goal and before torque, and never touches the EEPROM lock. A joint the
 config leaves out keeps its servo's value. `connect` logs the gains every servo had before the write.
 
+Grip strength
+-------------
+The gripper's P gain is how hard it squeezes a held object. The config's `p_gain` for the gripper is
+the stand's own grip. A task such as the twin's calibration wave or a block strategy sets its own
+through `set_grip_strength` for as long as it has the arm, and the twin puts the stand's own back
+after it. Without a configured gripper P, the stand's own is what the servo had at connect.
+
 Read-only
 ---------
 The twin may open an arm it only watches (`BackendContext.read_only`). The bus then goes through
@@ -88,6 +95,8 @@ GAINS: tuple[tuple[str, str, int], ...] = (
 )
 #: Highest gain accepted, as in the STS memory table.
 GAIN_MAX = 254
+#: Writes of the gripper's P before `set_grip_strength` gives up on a servo that does not confirm it.
+GRIP_WRITE_TRIES = 2
 
 
 #: Below this voltage the servo answers (the board is powered over USB) but has nothing
@@ -638,6 +647,42 @@ class FeetechArm(RobotBackend):
                 "Serwa nie potwierdzily wzmocnien z konfiguracji (zapis, odczyt po zapisie):\n  %s",
                 "\n  ".join(lost),
             )
+
+    def set_grip_strength(self, strength: int | None) -> bool:
+        """The gripper servo's P gain (register 21) from now on; None puts the stand's own back.
+
+        Written while torque is on and read back. False, with a warning, when the arm is read-only, not
+        connected or silent, the value is outside 1..GAIN_MAX, or the servo does not confirm it. Never raises.
+        """
+        name = self.gripper
+        if self.read_only or not self._connected or self._link_silent or name not in self.ids:
+            return False
+        value = self._own_grip() if strength is None else strength
+        if value is None:
+            logger.warning("Chwytak: nieznane wlasne P serwa (brak odczytu przy polaczeniu) - zostaje obecne")
+            return False
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= GAIN_MAX:
+            logger.warning("Sila chwytaka %r poza zakresem P 1..%d - pominieta", value, GAIN_MAX)
+            return False
+        dev_id = self.ids[name]
+        try:
+            for _ in range(GRIP_WRITE_TRIES):
+                self.bus.write(dev_id, ADDR_P_GAIN, value, 1)
+                if self.bus.read(dev_id, ADDR_P_GAIN, 1) == value:
+                    return True
+        except Exception:  # the twin's control loop calls this
+            logger.exception("Nie udalo sie zapisac P chwytaka (%d)", value)
+            return False
+        logger.warning("Serwo chwytaka nie potwierdzilo P %d", value)
+        return False
+
+    def _own_grip(self) -> int | None:
+        """The stand's own gripper P: the configured one, else the servo's at connect; None if unknown."""
+        configured = self.gains.get(self.gripper or "", {}).get(ADDR_P_GAIN)
+        if configured is not None:
+            return configured
+        read = self.servo_gains.get(self.gripper or "")
+        return None if read is None else read[0]
 
     def _read_start_positions(self) -> dict[str, int]:
         """Start position from TWO matching reads of each joint.

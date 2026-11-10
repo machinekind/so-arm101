@@ -212,8 +212,8 @@ def test_the_twin_finds_grasp_through_its_entry_point():
 def test_its_settings_become_the_panel_form():
     fields = {field.name: field for field in load_strategy(NAME).fields}
 
-    assert list(fields) == TOUCH_FIELDS + ["block", "probe", "open_margin_m", "squeeze_m", "grasp_depth",
-                                           "straddle_push_m", "close_on_stall_m",
+    assert list(fields) == TOUCH_FIELDS + ["block", "probe", "open_margin_m", "squeeze_m", "grip_strength",
+                                           "grasp_depth", "straddle_push_m", "close_on_stall_m",
                                            "lift_m", "hold_s", "max_attempts", "carry_s", "release", "wait_s",
                                            "recover_m", "grasp_source", "library_dir", "min_score",
                                            "max_tilt_deg", "jaw_gap_offset_m",
@@ -228,13 +228,14 @@ def test_its_settings_become_the_panel_form():
     assert fields["label"].default == "" and fields["touch_z"].default == 0.0
     assert fields["hover_m"].default == 0.04 and fields["time_limit_s"].default == 120.0
     assert fields["max_attempts"].kind is int
+    assert fields["grip_strength"].kind is int and fields["grip_strength"].default == 8
     assert fields["close_jaw"].kind is bool and fields["need_contact"].kind is bool
     assert fields["release"].kind is bool and fields["release"].default is False
     assert fields["carry_s"].default == 10.0 and fields["wait_s"].default == 20.0
     assert fields["recover_m"].default == 0.15
     floats = [name for name in fields if name not in ("label", "block", "probe", "close_jaw", "need_contact",
-                                                      "max_attempts", "release", "grasp_source",
-                                                      "library_dir", "jaw_file")]
+                                                      "max_attempts", "grip_strength", "release",
+                                                      "grasp_source", "library_dir", "jaw_file")]
     assert fields["jaw_file"].kind is str and fields["jaw_file"].default == ""
     assert fields["jaw_gap_offset_m"].default == 0.0
     assert all(fields[name].kind is float for name in floats)

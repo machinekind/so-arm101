@@ -84,6 +84,7 @@ from ..planner.schema import (
 from ..planner.steps import check_steps, describe, first_unmet, remaining
 from ..planner.world import IN_GRIPPER_SOURCE, World, label_key, world_state
 from ..robot import load_robot
+from .grasp import grip_strength
 from .jev import JevJudge
 from .judges import Decision, Judge
 from .pick_place import (
@@ -277,6 +278,8 @@ class BuildStrategy(Strategy[BuildSettings]):
         for name, least in (("max_steps", 1), ("max_replans", 0), ("max_stack", 1)):
             if getattr(config, name) < least:
                 raise ValueError(f"build: {name} must be at least {least}, is {getattr(config, name)}")
+        #: Every step's grip; the twin's runner reads it once, after `start`.
+        self.grip_strength = grip_strength(config.grip_strength, "build")
         #: The fixed plan, or None when the model plans.
         self.goal: Plan | None = None
         if config.plan_json.strip():
