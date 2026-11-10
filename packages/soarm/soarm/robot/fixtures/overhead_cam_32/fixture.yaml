@@ -1,0 +1,42 @@
+# TheRobotStudio's overhead camera mount for a 32x32 mm UVC camera module (SO-ARM100, Apache-2.0):
+# a pole of two or three parts on a foot that joins the arm plate the SO-101 stands on. See README.md.
+# Written by tools/overhead_cam_mount.py from the upstream STL files.
+name: overhead_cam_32
+title: Statyw kamery z gory (modul 32x32)
+# Frame: x forward (where the camera head points), y left, z up [m]; origin on the pole's axis under the foot.
+parts:
+  bottom:
+    mesh: cam_mount_bottom.stl
+    rgba: [0.25, 0.25, 0.25, 1.0]
+    top: [0.0, 0.0, 0.2231]
+    colliders:
+      foot: {pos: [0.0, 0.0, 0.0036], size: [0.0187, 0.04651, 0.0036]}
+      pole: {pos: [0.0, 0.0, 0.11907], size: [0.01345, 0.01906, 0.11187]}
+  middle:
+    mesh: cam_mount_middle.stl
+    rgba: [0.25, 0.25, 0.25, 1.0]
+    top: [0.0, 0.0, 0.1550]
+    colliders:
+      pole: {pos: [0.0, 0.0, 0.08143], size: [0.0127, 0.01831, 0.08143]}
+  top:
+    mesh: cam_mount_top.stl
+    rgba: [0.25, 0.25, 0.25, 1.0]
+    colliders:
+      pole: {pos: [0.0, 0.0, 0.0838], size: [0.0127, 0.01831, 0.0838]}
+      # The camera plate with the module on it: the board above, the lens below.
+      head: {pos: [0.02762, 0.0, 0.17015], size: [0.01771, 0.0175, 0.01762]}
+    # The module's lens, looking down and 25 deg forward. T_cam2part in OpenCV axes,
+    # the top of the image forward.
+    cameras:
+      camera:
+        - [0.0, -0.906318334, 0.422595643, 0.032]
+        - [-1.0, 0.0, 0.0, 0.0]
+        - [0.0, -0.422595643, -0.906318334, 0.1668]
+        - [0.0, 0.0, 0.0, 1.0]
+# The full design; a build without the middle part is [bottom, top].
+stack: [bottom, middle, top]
+# Where the fixture stands in the SO-101's base frame when the arm stands on the design's arm plate:
+# the pole on the arm's left or right.
+placements:
+  left: {xyz: [-0.0022, 0.116, -0.0096]}
+  right: {xyz: [-0.0022, -0.116, -0.0096]}
