@@ -29,3 +29,36 @@ See [conventions](../../../../docs/conventions.md) for units and calibration det
 Its `pose` is T_cam2body in OpenCV axes. Field of view and image size define its intrinsics.
 The twin renders it in simulation and serves the workspace camera named `wrist` on a real arm.
 `RobotKinematics.camera` exposes its pose to soarm-lab strategies.
+
+## Overhead camera mount
+
+`fixtures/overhead_cam_32` is TheRobotStudio's
+[overhead camera mount for a 32x32 mm UVC module](https://github.com/TheRobotStudio/SO-ARM100/tree/c8af7c4b7abe191b149c618bb36044425f4ad159/Optional/Overhead_Cam_Mount_32x32_UVC_Module)
+as a fixture of the digital twin. Its pole stands on a foot that joins the plate the arm
+stands on. The head holds the camera module looking down, tilted 25 degrees forward.
+
+- Parts: `bottom`, `middle` and `top`. The full design, `[bottom, middle, top]`, is 0.56 m
+  tall. Without the middle part, `[bottom, top]`, it is 0.41 m.
+- Colliders: boxes fitted to each part. The top's camera head box also holds the module's
+  board and lens.
+- Camera site `camera`: the module's lens, with the top of the image forward.
+- Placements `left` and `right`: the pole on the arm's left or right, as the design puts it.
+  The SO-101's base sits on the arm plate by its four screw holes, and the plate's tabs join
+  the foot's. The pole's axis then stands 2 mm behind the base origin and 11.6 cm to the
+  side. The arm stands on the 7.2 mm plate, so the foot is 9.6 mm below the base origin.
+
+Two parts on the arm's left, with `kamera3` on the mount, in `stand.json`:
+
+```json
+"fixtures": [
+  {"name": "slup", "fixture": "so101/overhead_cam_32", "placement": "left", "parts": ["bottom", "top"]}
+],
+"cameras": [
+  {"name": "kamera3", "source": "1", "width": 1920, "height": 1080, "fixture": "slup"}
+]
+```
+
+Where the pole stands elsewhere, `xyz` (its foot in the arm's base frame, metres) and
+`yaw_deg` replace `placement`. The twin's documentation, "Fixtures in the scene", lists
+every key. `tools/overhead_cam_mount.py` in the repository builds the meshes and
+`fixture.yaml` from the upstream STL files.

@@ -42,9 +42,9 @@ dev = [
 ]
 torch = [{ name = "soarm-lab", extras = ["torch"], editable = "packages/soarm_lab" }]
 twin = [
-    { name = "machinekind-twin", git = "https://github.com/machinekind/twin.git?rev=b1d606d4646c0df7146fb2d22656be00ec6fcc46" },
-    { name = "machinekind-twin-cube", git = "https://github.com/machinekind/twin.git?subdirectory=examples%2Fdetectors%2Fcube&rev=b1d606d4646c0df7146fb2d22656be00ec6fcc46" },
-    { name = "machinekind-twin-llm", git = "https://github.com/machinekind/twin.git?subdirectory=packages%2Fmachinekind_twin_llm&rev=b1d606d4646c0df7146fb2d22656be00ec6fcc46" },
+    { name = "machinekind-twin", git = "https://github.com/machinekind/twin.git?rev=4071cb63c10257d903de1495311a82c236da80b8" },
+    { name = "machinekind-twin-cube", git = "https://github.com/machinekind/twin.git?subdirectory=examples%2Fdetectors%2Fcube&rev=4071cb63c10257d903de1495311a82c236da80b8" },
+    { name = "machinekind-twin-llm", git = "https://github.com/machinekind/twin.git?subdirectory=packages%2Fmachinekind_twin_llm&rev=4071cb63c10257d903de1495311a82c236da80b8" },
 ]
 
 [[package]]
@@ -1855,7 +1855,7 @@ wheels = [
 [[package]]
 name = "machinekind-twin"
 version = "0.1.0"
-source = { git = "https://github.com/machinekind/twin.git?rev=b1d606d4646c0df7146fb2d22656be00ec6fcc46#b1d606d4646c0df7146fb2d22656be00ec6fcc46" }
+source = { git = "https://github.com/machinekind/twin.git?rev=4071cb63c10257d903de1495311a82c236da80b8#4071cb63c10257d903de1495311a82c236da80b8" }
 dependencies = [
     { name = "machinekind-twin-api" },
     { name = "numpy" },
@@ -1867,7 +1867,7 @@ dependencies = [
 [[package]]
 name = "machinekind-twin-api"
 version = "0.1.6"
-source = { git = "https://github.com/machinekind/twin.git?subdirectory=packages%2Fmachinekind_twin_api&rev=b1d606d4646c0df7146fb2d22656be00ec6fcc46#b1d606d4646c0df7146fb2d22656be00ec6fcc46" }
+source = { git = "https://github.com/machinekind/twin.git?subdirectory=packages%2Fmachinekind_twin_api&rev=4071cb63c10257d903de1495311a82c236da80b8#4071cb63c10257d903de1495311a82c236da80b8" }
 dependencies = [
     { name = "numpy" },
 ]
@@ -1875,7 +1875,7 @@ dependencies = [
 [[package]]
 name = "machinekind-twin-cube"
 version = "0.1.0"
-source = { git = "https://github.com/machinekind/twin.git?subdirectory=examples%2Fdetectors%2Fcube&rev=b1d606d4646c0df7146fb2d22656be00ec6fcc46#b1d606d4646c0df7146fb2d22656be00ec6fcc46" }
+source = { git = "https://github.com/machinekind/twin.git?subdirectory=examples%2Fdetectors%2Fcube&rev=4071cb63c10257d903de1495311a82c236da80b8#4071cb63c10257d903de1495311a82c236da80b8" }
 dependencies = [
     { name = "machinekind-twin-api" },
     { name = "numpy" },
@@ -1885,7 +1885,7 @@ dependencies = [
 [[package]]
 name = "machinekind-twin-llm"
 version = "0.1.0"
-source = { git = "https://github.com/machinekind/twin.git?subdirectory=packages%2Fmachinekind_twin_llm&rev=b1d606d4646c0df7146fb2d22656be00ec6fcc46#b1d606d4646c0df7146fb2d22656be00ec6fcc46" }
+source = { git = "https://github.com/machinekind/twin.git?subdirectory=packages%2Fmachinekind_twin_llm&rev=4071cb63c10257d903de1495311a82c236da80b8#4071cb63c10257d903de1495311a82c236da80b8" }
 dependencies = [
     { name = "machinekind-twin-api" },
     { name = "numpy" },
@@ -4413,7 +4413,7 @@ panel = [
 [package.metadata]
 requires-dist = [
     { name = "lerobot", extras = ["feetech"], marker = "python_full_version >= '3.12' and extra == 'lerobot'", specifier = ">=0.6,<0.7" },
-    { name = "machinekind-twin-api", git = "https://github.com/machinekind/twin.git?subdirectory=packages%2Fmachinekind_twin_api&rev=b1d606d4646c0df7146fb2d22656be00ec6fcc46" },
+    { name = "machinekind-twin-api", git = "https://github.com/machinekind/twin.git?subdirectory=packages%2Fmachinekind_twin_api&rev=4071cb63c10257d903de1495311a82c236da80b8" },
     { name = "pyserial", marker = "extra == 'feetech'", specifier = ">=3.5" },
     { name = "pyserial", marker = "extra == 'panel'", specifier = ">=3.5" },
     { name = "pyyaml", marker = "extra == 'panel'", specifier = ">=6" },
@@ -4460,7 +4460,7 @@ requires-dist = [
     { name = "hydra-core", marker = "extra == 'train'", specifier = ">=1.3,<1.4" },
     { name = "jax", marker = "extra == 'train'", specifier = ">=0.6" },
     { name = "jax", extras = ["cuda12"], marker = "sys_platform == 'linux' and extra == 'train'", specifier = ">=0.6" },
-    { name = "machinekind-twin-api", git = "https://github.com/machinekind/twin.git?subdirectory=packages%2Fmachinekind_twin_api&rev=b1d606d4646c0df7146fb2d22656be00ec6fcc46" },
+    { name = "machinekind-twin-api", git = "https://github.com/machinekind/twin.git?subdirectory=packages%2Fmachinekind_twin_api&rev=4071cb63c10257d903de1495311a82c236da80b8" },
     { name = "mujoco", specifier = ">=3.14,<3.15" },
     { name = "mujoco-warp", marker = "extra == 'train'", specifier = ">=3.14,<3.15" },
     { name = "numpy", specifier = ">=1.24" },

@@ -31,3 +31,23 @@ by hand as URDF for GraspGenX, the wrist camera mount and the primitive
 collision geoms left out. It references the same meshes and carries the
 same Apache-2.0 license; the file identifies itself as modified in its
 header, as Apache-2.0 section 4 asks.
+
+Overhead camera mount
+
+soarm/robot/fixtures/overhead_cam_32/cam_mount_bottom.stl, cam_mount_middle.stl
+and cam_mount_top.stl are derived from TheRobotStudio's SO-ARM100 "Overhead
+Camera w/ 32x32 Camera Module", stl/ at commit
+c8af7c4b7abe191b149c618bb36044425f4ad159:
+https://github.com/TheRobotStudio/SO-ARM100/tree/c8af7c4b7abe191b149c618bb36044425f4ad159/Optional/Overhead_Cam_Mount_32x32_UVC_Module
+
+Machinekind modified them: scaled from millimetres to metres and moved into
+each part's own frame (z up). Each file's header says so. fixture.yaml (the
+colliders, the part stack, the camera site and the placements beside the
+SO-101) is Machinekind's, written by tools/overhead_cam_mount.py (in the
+repository, not in this package) from those files and the design's
+arm_base.stl, which is not included.
+
+SO-ARM100 is licensed under Apache-2.0. Its LICENSE is identical to
+soarm/robot/LICENSE:
+https://github.com/TheRobotStudio/SO-ARM100/blob/c8af7c4b7abe191b149c618bb36044425f4ad159/LICENSE
+The upstream README credits Conor McGartoll and Philip Fung.

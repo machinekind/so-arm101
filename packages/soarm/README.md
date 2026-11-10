@@ -78,7 +78,7 @@ A read-only arm only logs them. `soarm-panel` and `soarm-zero` use the same sect
 
 The twin discovers robot `so101` and backends `feetech` and `lerobot` through
 entry points. The [robot folder](soarm/robot/README.md) contains its MuJoCo model,
-meshes and `robot.yaml` configuration.
+meshes and `robot.yaml` configuration, and the overhead camera mount as a twin fixture.
 
 The twin can also watch an SO-101 it does not drive, such as a second arm on the
 stand. `feetech` then opens the arm read-only: only PING, READ and SYNC READ reach
